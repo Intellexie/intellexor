@@ -12,11 +12,11 @@ import (
 	"strings"
 	"sync"
 
-	"intellexor/internal/app"
-	"intellexor/internal/bus"
-	"intellexor/internal/provider"
-	"intellexor/internal/session"
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/app"
+	"github.com/Intellexie/intellexor/internal/bus"
+	"github.com/Intellexie/intellexor/internal/provider"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 type Server struct {

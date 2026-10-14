@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"intellexor/internal/app"
-	"intellexor/internal/session"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/app"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) *apiError {

@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"intellexor/internal/auth"
-	"intellexor/internal/config"
-	"intellexor/internal/question"
-	"intellexor/internal/session"
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/auth"
+	"github.com/Intellexie/intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/question"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 func mergedConfig(dir string) *config.Info { return config.Merge(dir) }

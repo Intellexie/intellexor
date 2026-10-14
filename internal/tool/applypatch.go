@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"intellexor/internal/diff"
+	"github.com/Intellexie/intellexor/internal/diff"
 )
 
 type ApplyPatchTool struct{}

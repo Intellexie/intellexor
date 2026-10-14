@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"intellexor/internal/session"
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 // slowSSE streams `n` content tokens, one every `delay`, so tests can abort

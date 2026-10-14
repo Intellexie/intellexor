@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"intellexor/internal/diff"
-	"intellexor/internal/session"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/diff"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 // EditTool applies exact-match replacements with fuzzy fallbacks.

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 type Cost struct {

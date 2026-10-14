@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -147,7 +146,7 @@ func (BashTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 	// `... &`) keeps the stdout pipe open after the shell is killed and
 	// cmd.Wait blocks on pipe EOF forever — the session would stay busy and
 	// abort would appear to do nothing.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setPgroup(cmd)
 
 	var mu sync.Mutex
 	var buf bytes.Buffer
@@ -199,7 +198,7 @@ func (BashTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		// holds it after the kill, give up waiting so the agent loop (and any
 		// abort) can always make progress.
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killTree(cmd)
 		}
 		select {
 		case err = <-doneCh:

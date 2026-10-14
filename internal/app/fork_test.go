@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"intellexor/internal/session"
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 func TestForkCopiesMessagesPartsAndKV(t *testing.T) {

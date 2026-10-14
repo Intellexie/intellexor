@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"intellexor/internal/provider"
-	"intellexor/internal/session"
-	"intellexor/internal/store"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/provider"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 const (

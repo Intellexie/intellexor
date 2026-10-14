@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 // refresh re-reads the session from disk so mutations start from the current

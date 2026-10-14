@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 type Info struct {

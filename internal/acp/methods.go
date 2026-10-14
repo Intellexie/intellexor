@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"intellexor/internal/app"
-	"intellexor/internal/session"
-	"intellexor/internal/store"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/app"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
-var appVersion = "1.15.0"
+var appVersion = session.Version
 
 // agent methods (client -> agent requests)
 

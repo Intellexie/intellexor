@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"intellexor/internal/config"
-	"intellexor/internal/provider"
-	"intellexor/internal/session"
-	"intellexor/internal/tool"
+	"github.com/Intellexie/intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/provider"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/tool"
 )
 
 var (

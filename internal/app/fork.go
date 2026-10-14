@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 // Fork clones a session into a new one: the session info, its visible

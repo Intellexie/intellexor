@@ -9,9 +9,9 @@ import (
 	"os"
 	"strconv"
 
-	"intellexor/internal/acp"
-	"intellexor/internal/server"
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/acp"
+	"github.com/Intellexie/intellexor/internal/server"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 func main() {

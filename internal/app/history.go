@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"intellexor/internal/provider"
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/provider"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 // BuildHistory converts stored messages/parts into provider wire messages.

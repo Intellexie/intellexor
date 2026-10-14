@@ -4,7 +4,7 @@ import (
 	"embed"
 	"sort"
 
-	"intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/config"
 )
 
 // Built-in slash commands, mirroring opencode's Command.Service defaults:

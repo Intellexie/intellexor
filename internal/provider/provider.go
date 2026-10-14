@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"intellexor/internal/auth"
-	"intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/auth"
+	"github.com/Intellexie/intellexor/internal/config"
 )
 
 // Wire shape (v1 Provider.Info)

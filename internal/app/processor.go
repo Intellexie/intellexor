@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"intellexor/internal/permission"
-	"intellexor/internal/provider"
-	"intellexor/internal/session"
-	"intellexor/internal/tool"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/permission"
+	"github.com/Intellexie/intellexor/internal/provider"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/tool"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 type processor struct {

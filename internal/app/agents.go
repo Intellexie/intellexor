@@ -1,6 +1,6 @@
 package app
 
-import "intellexor/internal/session"
+import "github.com/Intellexie/intellexor/internal/session"
 
 type AgentDef struct {
 	Name        string

@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"intellexor/internal/server"
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/server"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 // ---------------- JSON-RPC framing ----------------

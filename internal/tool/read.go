@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"intellexor/internal/session"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 const maxLineLength = 2000

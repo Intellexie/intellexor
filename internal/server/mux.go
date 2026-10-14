@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"intellexor/internal/util"
-	"intellexor/web"
+	"github.com/Intellexie/intellexor/internal/util"
+	"github.com/Intellexie/intellexor/web"
 )
 
 func (s *Server) Handler() http.Handler {

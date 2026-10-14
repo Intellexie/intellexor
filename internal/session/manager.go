@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"intellexor/internal/store"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 var ErrNotFound = errors.New("not found")

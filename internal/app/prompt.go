@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/config"
 
-	"intellexor/internal/provider"
-	"intellexor/internal/session"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/provider"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 var isGitRootCache = map[string]bool{}

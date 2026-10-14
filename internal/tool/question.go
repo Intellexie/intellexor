@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"intellexor/internal/question"
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/question"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 type QuestionTool struct {

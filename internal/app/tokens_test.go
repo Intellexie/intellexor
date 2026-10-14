@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"intellexor/internal/bus"
-	"intellexor/internal/session"
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/bus"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 	"sync"
 )
 

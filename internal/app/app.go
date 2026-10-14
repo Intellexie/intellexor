@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"sync"
 
-	"intellexor/internal/bus"
-	"intellexor/internal/config"
-	"intellexor/internal/permission"
-	"intellexor/internal/question"
-	"intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/bus"
+	"github.com/Intellexie/intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/permission"
+	"github.com/Intellexie/intellexor/internal/question"
+	"github.com/Intellexie/intellexor/internal/session"
 )
 
 type Instance struct {

@@ -3,7 +3,7 @@ package acp
 import (
 	"encoding/json"
 
-	"intellexor/internal/bus"
+	"github.com/Intellexie/intellexor/internal/bus"
 )
 
 // toToolKind mirrors opencode acp/tool.ts toToolKind.

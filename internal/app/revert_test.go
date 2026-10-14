@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"intellexor/internal/session"
-	"intellexor/internal/store"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 func TestRevertRestoreUnrevert(t *testing.T) {

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"intellexor/internal/bus"
-	"intellexor/internal/session"
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/bus"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 type Request = session.PermissionRequest

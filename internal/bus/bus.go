@@ -3,7 +3,7 @@ package bus
 import (
 	"sync"
 
-	"intellexor/internal/util"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 type Event struct {

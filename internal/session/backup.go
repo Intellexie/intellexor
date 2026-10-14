@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/store"
 )
 
 // FileBackup is the pre-edit state of a single file, recorded before an
