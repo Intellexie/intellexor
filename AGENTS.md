@@ -20,7 +20,7 @@ Tests are fully local (httptest fake providers streaming SSE) — no network or 
 - **Tests must isolate the data dir.** It is cached at package level, so new tests need `os.Setenv("INTELLEXOR_DATA", t.TempDir())` plus `store.ResetDataDirForTest()` — see the setup helpers in internal/app/abort_test.go.
 - **Permissions are inert.** Everything is allowed by default; `permission.*` config and the `/permission` endpoints exist for opencode compatibility but have no effect. Don't write tests expecting them to block.
 - **Port fallback:** when the default port 4096 is busy, the server silently binds a random free port (cmd/intellexor/main.go:100) — the printed URL is the source of truth.
-- The version is a plain const (`session.Version` in internal/session/types.go), not injected via ldflags.
+- **The version is a package-level var** (`session.Version` in internal/session/types.go), not a const: the release workflow (`.github/workflows/release.yml`) injects the git tag via `-ldflags "-X github.com/Intellexie/intellexor/internal/session.Version=<tag>"`. Unset, it falls back to the hardcoded default.
 - `internal/engine/` is empty (vestigial).
 
 ## Architecture

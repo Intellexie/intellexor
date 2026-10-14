@@ -3,8 +3,8 @@ package session
 import "encoding/json"
 
 // Version is the release version. Overridable at build time via
-// -ldflags "-X intellexor/internal/session.Version=<tag>" (the release
-// workflow injects the git tag).
+// -ldflags "-X github.com/Intellexie/intellexor/internal/session.Version=<tag>"
+// (the release workflow injects the git tag).
 var Version = "1.15.0"
 
 type ModelRef struct {
