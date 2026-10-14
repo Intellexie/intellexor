@@ -1,13 +1,16 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +48,19 @@ func slowSSE(n int, delay time.Duration) http.HandlerFunc {
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		fl.Flush()
 	}
+}
+
+// respondEmptyStop writes the minimal valid completion: no content, stop.
+// Used to answer the async title-generation call that fires on the first user
+// message of every prompt — it hits the same fake server and must never take
+// a parent/child slot in the count-dispatched handlers below.
+func respondEmptyStop(w http.ResponseWriter) {
+	fl, _ := w.(http.Flusher)
+	final := map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}}
+	b, _ := json.Marshal(final)
+	fmt.Fprintf(w, "data: %s\n\n", b)
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	fl.Flush()
 }
 
 func setupAbortTest(t *testing.T, h http.HandlerFunc) (*Instance, *session.Session) {
@@ -384,13 +400,21 @@ func TestAbortDuringBackgroundChildTool(t *testing.T) {
 // The task tool part must expose metadata.sessionId while the subagent is
 // still running, so the web UI can open the child session (opencode parity).
 func TestTaskPartHasSessionIDWhileRunning(t *testing.T) {
-	var calls int32
 	childStarted := make(chan struct{})
 	releaseChild := make(chan struct{})
+	var childOnce sync.Once
+	var apiCalls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&calls, 1)
 		fl, _ := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("title generator")) {
+			// async title-generation call: answer immediately so it can't
+			// take a parent/child slot in the count dispatch below
+			respondEmptyStop(w)
+			return
+		}
+		n := atomic.AddInt32(&apiCalls, 1)
 		if n == 1 {
 			// parent turn: spawn the subagent
 			chunk := map[string]any{
@@ -410,8 +434,10 @@ func TestTaskPartHasSessionIDWhileRunning(t *testing.T) {
 			fl.Flush()
 			return
 		}
-		// child turn: hold the response open so the running window is wide
-		close(childStarted)
+		// child turn: hold the response open so the running window is wide.
+		// The parent's follow-up step lands here too (after releaseChild is
+		// closed), so the signal is close-once.
+		childOnce.Do(func() { close(childStarted) })
 		<-releaseChild
 		txt := map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": "child done"}, "finish_reason": "stop"}}}
 		b, _ := json.Marshal(txt)
@@ -466,11 +492,18 @@ func TestTaskPartHasSessionIDWhileRunning(t *testing.T) {
 // must still surface the child session id on the task part — the web UI opens
 // the child session instead of showing an empty result box.
 func TestTaskPartKeepsSessionIDOnEmptyChildResult(t *testing.T) {
-	var calls int32
+	var apiCalls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&calls, 1)
 		fl, _ := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("title generator")) {
+			// async title-generation call: answer immediately so it can't
+			// take a parent/child slot in the count dispatch below
+			respondEmptyStop(w)
+			return
+		}
+		n := atomic.AddInt32(&apiCalls, 1)
 		if n == 2 {
 			// child turn fails hard
 			http.Error(w, `{"error":{"message":"provider exploded"}}`, http.StatusInternalServerError)
