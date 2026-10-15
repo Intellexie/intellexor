@@ -71,6 +71,9 @@ func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, mo
 	if u := instructionText(i.Directory); u != "" {
 		system += "\n\n" + u
 	}
+	if bc := boardContext(i, p.s); bc != "" {
+		system += "\n\n" + bc
+	}
 
 	names := activeToolNames(i.Directory, agent)
 	names = toolNamesForModel(model.ID, names)

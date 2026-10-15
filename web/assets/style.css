@@ -15,9 +15,12 @@ html[data-color-scheme="light"] {
   --accent:#3b5cf6; --accent-fg:#ffffff;
   --surface-hover:rgba(0,0,0,0.04); --surface-active:rgba(0,0,0,0.06);
   --ok-bg:#e7f9ea; --ok-fg:#198b43; --warn-bg:#fefaec; --warn-fg:#cb9f34; --err-bg:#fceceb; --err-fg:#b82d35;
+  --purple-bg:#f2ecfd; --purple-fg:#7c3aed;
   --add-bg:rgba(18,201,5,0.08); --del-bg:rgba(252,83,58,0.08);
   --code-bg:#f5f5f5;
   --shadow:0 4px 16px rgba(0,0,0,0.08);
+  --aurora-1:59, 92, 246; --aurora-2:162, 188, 255; --aurora-3:128, 222, 234;
+  --aurora-alpha:0.10; --glass:rgba(255,255,255,0.66); --bg-dot:rgba(35,35,35,0.10);
 }
 html[data-color-scheme="dark"] {
   --bg-base:var(--v2-grey-1100); --bg-deep:var(--v2-grey-1200);
@@ -27,9 +30,12 @@ html[data-color-scheme="dark"] {
   --accent:#a2bcff; --accent-fg:#0b0f2a;
   --surface-hover:rgba(255,255,255,0.05); --surface-active:rgba(255,255,255,0.08);
   --ok-bg:rgba(18,201,5,0.12); --ok-fg:#3ddc68; --warn-bg:rgba(252,213,58,0.12); --warn-fg:#fcd53a; --err-bg:rgba(252,83,58,0.12); --err-fg:#ff7a63;
+  --purple-bg:rgba(167,139,250,0.14); --purple-fg:#c4b5fd;
   --add-bg:rgba(200,255,196,0.08); --del-bg:rgba(252,83,58,0.1);
   --code-bg:#101010;
   --shadow:0 4px 20px rgba(0,0,0,0.5);
+  --aurora-1:162, 188, 255; --aurora-2:99, 102, 241; --aurora-3:128, 222, 234;
+  --aurora-alpha:0.16; --glass:rgba(22,22,22,0.66); --bg-dot:rgba(255,255,255,0.07);
 }
 * { box-sizing:border-box; margin:0; padding:0; }
 html,body { height:100%; }
@@ -44,10 +50,53 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 ::-webkit-scrollbar-thumb { background:var(--layer-3); border-radius:4px; }
 ::-webkit-scrollbar-track { background:transparent; }
 
-#app { display:flex; height:100vh; height:100dvh; background:var(--bg-base); }
+#app { display:flex; height:100vh; height:100dvh; background:transparent; position:relative; z-index:1; }
+
+/* ---------- animated background (global) ---------- */
+/* #bg sits behind the app and is visible on every view: the app chrome (rail,
+   sidebar, main) is translucent glass so the aurora shows through everywhere.
+   body.bg-live (landing / new-session view) shows it at full strength;
+   body.bg-dim (every other view) eases it back a little so chat text stays
+   readable. Painted by web/assets/bg.js. */
+#bg { position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden; opacity:1; transition:opacity .45s ease; }
+body.bg-dim #bg { opacity:0.7; }
+#bg-canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+.bg-grid {
+  position:absolute; inset:0;
+  background-image:radial-gradient(circle, var(--bg-dot) 1px, transparent 1.5px);
+  background-size:26px 26px;
+  -webkit-mask-image:radial-gradient(ellipse 90% 70% at 50% 42%, #000 35%, transparent 78%);
+  mask-image:radial-gradient(ellipse 90% 70% at 50% 42%, #000 35%, transparent 78%);
+  animation:bg-grid-drift 90s linear infinite;
+}
+@keyframes bg-grid-drift { from { background-position:0 0; } to { background-position:26px 52px; } }
+.bg-vignette { position:absolute; inset:0; background:radial-gradient(ellipse 120% 90% at 50% 45%, transparent 55%, rgba(0,0,0,0.32) 100%); }
+html[data-color-scheme="light"] .bg-vignette { background:radial-gradient(ellipse 120% 90% at 50% 45%, transparent 60%, rgba(255,255,255,0.55) 100%); }
+
+/* landing view: full-strength background, float the composer on glass */
+body.bg-live .main { background:transparent; }
+body.bg-live .new-session-view { background:transparent; }
+body.bg-live .composer { background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); }
+body.bg-live .wordmark {
+  background:linear-gradient(180deg, var(--text-base) 30%, var(--text-faint));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+body.bg-live .brand-mark { position:relative; }
+body.bg-live .brand-mark::before {
+  content:""; position:absolute; inset:-28%; z-index:0; border-radius:50%;
+  background:radial-gradient(circle, rgba(var(--aurora-1), 0.40), transparent 70%);
+  filter:blur(22px);
+  animation:bg-breathe 7s ease-in-out infinite;
+}
+body.bg-live .brand-mark img { position:relative; z-index:1; }
+@keyframes bg-breathe { 0%,100% { opacity:0.7; transform:scale(1); } 50% { opacity:1; transform:scale(1.08); } }
+@media (prefers-reduced-motion: reduce) {
+  .bg-grid { animation:none; }
+  body.bg-live .brand-mark::before { animation:none; }
+}
 
 /* ---------- rail ---------- */
-.rail { width:64px; flex:0 0 64px; background:var(--bg-base); display:flex; flex-direction:column; align-items:center; padding:12px 0; gap:12px; border-right:1px solid transparent; }
+.rail { width:64px; flex:0 0 64px; background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); display:flex; flex-direction:column; align-items:center; padding:12px 0; gap:12px; border-right:1px solid transparent; }
 .rail-brand { width:32px; height:32px; flex:0 0 32px; display:flex; align-items:center; justify-content:center; }
 .rail-brand img { width:26px; height:26px; display:block; }
 .rail-project { width:32px; height:32px; border-radius:var(--radius-md); background:var(--layer-2); color:var(--text-base); font-size:12px; font-weight:600; display:flex; align-items:center; justify-content:center; }
@@ -57,7 +106,7 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 .rail-spacer { flex:1; }
 
 /* ---------- sidebar ---------- */
-.sidebar { width:280px; flex:0 0 280px; min-width:0; background:var(--bg-deep); border-radius:var(--radius-lg); margin:8px 0 8px 8px; display:flex; flex-direction:column; overflow:hidden; transition:flex-basis .18s ease, margin .18s ease; }
+.sidebar { width:280px; flex:0 0 280px; min-width:0; background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); border-radius:var(--radius-lg); margin:8px 0 8px 8px; display:flex; flex-direction:column; overflow:hidden; transition:flex-basis .18s ease, margin .18s ease; }
 .sidebar-title { padding:14px 16px 8px; font-size:12px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .new-session { display:flex; align-items:center; gap:8px; margin:4px 8px 8px; padding:8px 10px; border-radius:var(--radius-md); color:var(--text-muted); text-align:left; }
 .new-session:hover { background:var(--surface-hover); color:var(--text-base); }
@@ -87,14 +136,14 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 @media (min-width: 768px) { .sidebar-backdrop { display:none; } }
 
 /* ---------- main ---------- */
-.main { flex:1; min-width:0; background:var(--bg-base); display:flex; flex-direction:column; position:relative; }
+.main { flex:1; min-width:0; background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); display:flex; flex-direction:column; position:relative; }
 
 /* new session view */
 .new-session-view { flex:1; display:flex; flex-direction:column; align-items:center; overflow-y:auto; background:var(--bg-deep); }
 .new-session-inner { width:min(720px, 92%); min-height:100%; display:flex; flex-direction:column; align-items:stretch; }
 .brand-mark { margin-top:22vh; width:64px; height:64px; display:flex; align-items:center; justify-content:center; align-self:center; }
 .brand-mark img { width:64px; height:64px; display:block; }
-.wordmark { margin-top:14px; font-size:48px; font-weight:600; letter-spacing:-0.03em; color:var(--text-base); user-select:none; text-align:center; }
+.wordmark { margin-top:14px; font-size:48px; line-height:1.15; font-weight:600; letter-spacing:-0.03em; color:var(--text-base); user-select:none; text-align:center; }
 .new-hint { margin-top:10px; text-align:center; color:var(--text-muted); font-size:13px; }
 
 /* session tabs */
@@ -113,7 +162,7 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 .tab-new:hover { background:var(--surface-hover); color:var(--text-base); }
 
 /* header */
-.chat-header { position:sticky; top:0; z-index:5; height:48px; flex:0 0 48px; display:flex; align-items:center; gap:8px; padding:0 16px; background:var(--bg-base); }
+.chat-header { position:sticky; top:0; z-index:5; height:48px; flex:0 0 48px; display:flex; align-items:center; gap:8px; padding:0 16px; background:var(--glass); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); }
 .chat-header .title { font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:70%; }
 .chat-header .title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; padding:0 4px; }
 .chat-header .spacer { flex:1; }
@@ -311,6 +360,7 @@ pre:hover .copy-code { opacity:1; }
 .cmd-menu .cmd-item.on .cmd-name { color:var(--accent); }
 .tool-row.task-link { cursor:pointer; }
 .tool-row.task-link:hover .tname { color:var(--accent); }
+.tool-row .spinner { width:12px; height:12px; flex:0 0 12px; color:var(--accent); }
 .ro-open { color:var(--text-muted); font-size:11px; }
 .tool-row.task-link:hover .ro-open { color:var(--accent); }
 .subagent-header .ro-badge { font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
@@ -345,6 +395,14 @@ pre:hover .copy-code { opacity:1; }
 .kanban-card { position:relative; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-md); padding:8px 26px 8px 10px; font-size:13px; cursor:grab; word-break:break-word; }
 .kanban-card:hover { border-color:var(--border-base); }
 .kanban-card.dragging { opacity:0.45; }
+/* Card header strip: spans the full card width (negative margins cancel the
+   card padding) so a status color can paint it edge to edge. Open cards get
+   no background and keep the exact pre-header layout. */
+.kanban-card-head { margin:-8px -26px 0 -10px; padding:8px 26px 0 10px; border-radius:calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0 0; }
+.kanban-card[data-column="inprogress"] .kanban-card-head { background:var(--ok-bg); padding-bottom:8px; margin-bottom:-8px; }
+.kanban-card[data-column="inprogress"] .kanban-card-title { color:var(--ok-fg); }
+.kanban-card[data-column="done"] .kanban-card-head { background:var(--purple-bg); padding-bottom:8px; margin-bottom:-8px; }
+.kanban-card[data-column="done"] .kanban-card-title { color:var(--purple-fg); }
 .kanban-card-title { outline:none; }
 .kanban-card-title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; }
 .kanban-card-del { position:absolute; top:4px; right:4px; width:18px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--text-faint); opacity:0; }
@@ -362,7 +420,7 @@ pre:hover .copy-code { opacity:1; }
 @media (max-width: 767px) {
   .rail { width:48px; flex-basis:48px; }
   /* sidebar becomes an off-canvas drawer; the chat area uses the full width */
-  .sidebar { position:fixed; left:0; top:0; bottom:0; z-index:70; width:min(300px, 85vw); flex:0 0 auto; margin:0; border-radius:0; transform:translateX(-105%); transition:transform .2s ease; box-shadow:var(--shadow); }
+  .sidebar { position:fixed; left:0; top:0; bottom:0; z-index:70; width:min(300px, 85vw); flex:0 0 auto; margin:0; border-radius:0; transform:translateX(-105%); transition:transform .2s ease; box-shadow:var(--shadow); background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); }
   #app.sidebar-open .sidebar { transform:translateX(0); }
   .timeline-inner { padding:0 12px; }
   .composer-region { padding:0 8px 10px; }

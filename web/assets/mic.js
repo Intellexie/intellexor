@@ -5,6 +5,10 @@
  * Worker) + NVIDIA Parakeet TDT 0.6B v3 (int8, multilingual).
  * Everything runs client-side — audio never leaves the browser.
  *
+ * Pure record → transcribe: click the mic to record, click again to stop;
+ * the whole recording is decoded once and appended to the composer. No
+ * real-time / partial transcription.
+ *
  * The engine (wasm + glue, ~15 MB) ships embedded with the app: the worker
  * (sherpa-worker.js) imports sherpa-engine.js + sherpa-asr.js and receives
  * sherpa.wasm via postMessage. The model (~640 MB) is downloaded once on
@@ -24,19 +28,17 @@
   ];
   const TOTAL_BYTES = MODEL_FILES.reduce((a, f) => a + f.bytes, 0);
   const TARGET_RATE = 16000;
-  const LIVE_WINDOW_SEC = 12; // partial re-decodes only look at the recent tail (wasm RTFx ~1.7)
 
   const S = {
     state: "idle", // idle | loading | ready | recording | decoding
     progress: { loaded: 0, total: TOTAL_BYTES },
-    partial: "",
     recordingSince: 0,
     error: "",
   };
 
   let worker = null, client = null, recognizerId = null;
   let mediaStream = null, audioCtx = null, sourceNode = null, procNode = null;
-  let chunks = [], totalSamples = 0, decBusy = false, tickTimer = null;
+  let chunks = [], totalSamples = 0, tickTimer = null;
   let abortCtl = null;
   let progress = {}; // file.key -> {loaded, total}
   const hooks = { onUpdate: () => {}, onText: () => {}, toast: () => {} };
@@ -190,7 +192,6 @@
         await fetchWithProgress(f, abortCtl);
       }
       await ensureWorker();
-      S.partial = "";
       upd();
       // hand the model bytes to the worker (MEMFS paths) and build the recognizer
       const names = { encoder: "/enc.onnx", decoder: "/dec.onnx", joiner: "/join.onnx", tokens: "/tokens.txt" };
@@ -289,54 +290,42 @@
     sourceNode.connect(procNode);
     procNode.connect(audioCtx.destination);
 
-    chunks = []; totalSamples = 0; decBusy = false;
-    S.partial = "";
+    chunks = []; totalSamples = 0;
     S.recordingSince = Date.now();
     S.state = "recording";
     upd();
 
-    tickTimer = setInterval(async () => {
-      upd(); // keeps the recording timer fresh
-      if (decBusy || !audioCtx || totalSamples < audioCtx.sampleRate * 0.7) return;
-      decBusy = true;
-      try {
-        const window_ = Math.min(totalSamples, LIVE_WINDOW_SEC * TARGET_RATE);
-        const all = mergeChunks(chunks, totalSamples);
-        const tail = totalSamples > window_ ? all.subarray(totalSamples - window_) : all;
-        const text = await decodeSamples(new Float32Array(tail));
-        if (text && text !== S.partial) { S.partial = text; upd(); }
-      } catch (e) {
-        hooks.toast("Transcription: " + (e.message || e), true);
-      } finally {
-        decBusy = false;
-      }
-    }, 2000);
+    // recording-timer display only — no decoding while recording
+    tickTimer = setInterval(updThrottled, 1000);
   }
 
   function stopRecording() {
     clearInterval(tickTimer); tickTimer = null;
+    try { procNode && (procNode.onaudioprocess = null); } catch {}
     try { procNode && procNode.disconnect(); } catch {}
     try { sourceNode && sourceNode.disconnect(); } catch {}
     if (mediaStream) for (const t of mediaStream.getTracks()) t.stop();
 
     S.state = "decoding";
     upd();
-    const finish = (text) => {
+    const finish = () => {
       try { audioCtx && audioCtx.close(); } catch {}
       audioCtx = null; procNode = null; sourceNode = null; mediaStream = null;
-      chunks = []; totalSamples = 0; decBusy = false;
-      S.state = "ready"; S.partial = "";
+      chunks = []; totalSamples = 0;
+      S.state = "ready";
       upd();
-      if (text) hooks.onText(text);
     };
     if (totalSamples > 0) {
       const all = mergeChunks(chunks, totalSamples);
-      decodeSamples(all).then(finish).catch((e) => {
-        hooks.toast("Transcription failed: " + (e.message || e), true);
-        finish("");
-      });
+      chunks = [];
+      decodeSamples(all)
+        .then((text) => { finish(); if (text) hooks.onText(text); })
+        .catch((e) => {
+          hooks.toast("Transcription failed: " + (e.message || e), true);
+          finish();
+        });
     } else {
-      finish("");
+      finish();
     }
   }
 
@@ -403,12 +392,10 @@
       head.innerHTML =
         `<span class="rec-dot"></span><span class="d-title">Recording — ${secs}s · click the mic to stop</span>`;
       d.appendChild(head);
-      if (S.partial) d.appendChild(el("div", "mic-partial", esc(S.partial)));
     } else if (S.state === "decoding") {
       const head = el("div", "d-head");
       head.innerHTML = `<span class="d-title">Transcribing…</span>`;
       d.appendChild(head);
-      if (S.partial) d.appendChild(el("div", "mic-partial", esc(S.partial)));
     }
     return d;
   }

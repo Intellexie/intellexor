@@ -133,6 +133,21 @@ func columnRank(column string) int {
 	return len(Columns)
 }
 
+// ForSession returns the card linked to the given session (the card the
+// session was started from on the board), if any.
+func ForSession(projectID, sessionID string) (Card, bool, error) {
+	cards, err := Get(projectID)
+	if err != nil {
+		return Card{}, false, err
+	}
+	for _, c := range cards {
+		if c.SessionID == sessionID {
+			return c, true, nil
+		}
+	}
+	return Card{}, false, nil
+}
+
 // Add creates a card at the end of the given column.
 func Add(projectID, title, column string) (Card, error) {
 	if !validColumn(column) {

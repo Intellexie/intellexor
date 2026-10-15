@@ -354,6 +354,18 @@ function handleEvent(ev) {
       updateTab();
       if (p.sessionID === S.current) navigate("");
       break;
+    case "server.connected":
+      // (re)connect: session statuses may have changed while the stream was
+      // down — refresh them so progress indicators (sidebar, tabs, and the
+      // spinner on still-running subagent rows) reflect reality
+      get("/session/status").then((st) => {
+        S.statuses = st || {};
+        renderSidebar();
+        renderComposer();
+        renderTimeline();
+        updateTab();
+      }).catch(() => {});
+      break;
     case "session.status": {
       if (p.status && p.status.type === "idle") delete S.statuses[p.sessionID];
       else {
@@ -362,7 +374,9 @@ function handleEvent(ev) {
       }
       renderSidebar();
       renderComposer();
-      if (p.sessionID === S.current) renderTimeline();
+      // also re-render when a subagent shown in the current timeline changed
+      // state — its task row carries a live progress indicator
+      if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       updateTab();
       break;
     }
@@ -371,7 +385,7 @@ function handleEvent(ev) {
       S.streaming.clear();
       renderSidebar();
       renderComposer();
-      if (p.sessionID === S.current) renderTimeline();
+      if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       updateTab();
       break;
     case "session.error": {
@@ -479,6 +493,32 @@ function handleEvent(ev) {
 
 function isDockSession(sessionID) {
   return sessionID === S.current || (S.current && S.children[S.current] && S.children[S.current].includes(sessionID));
+}
+
+// A session is "ongoing" while it has a non-idle status (busy/retry). Statuses
+// are deleted on idle, so a missing entry means idle/never-ran.
+function sessionBusy(sessionID) {
+  const st = S.statuses[sessionID];
+  return !!(st && st.type !== "idle");
+}
+
+// True when sessionID is a subagent referenced by a task tool part in the
+// current session's timeline — its row shows the open link and, while the
+// subagent is still working, a progress indicator.
+function taskChildOfCurrent(sessionID) {
+  if (!S.current || !sessionID || sessionID === S.current) return false;
+  const store = S.msgs.get(S.current);
+  if (!store) return false;
+  for (const mid of store.order) {
+    const parts = store.parts[mid];
+    if (!parts) continue;
+    for (const pid of Object.keys(parts)) {
+      const part = parts[pid];
+      if (part && part.type === "tool" && part.tool === "task" &&
+          part.state && part.state.metadata && part.state.metadata.sessionId === sessionID) return true;
+    }
+  }
+  return false;
 }
 
 function msgStore(sid) {
@@ -731,18 +771,37 @@ async function loadMessages(sid) {
 
 function renderMain() {
   const main = $("#main");
+  // full rebuild — carry composer focus/caret across (navigation happens
+  // right after a send, and typing must survive it)
+  const oldTa = document.activeElement && document.activeElement.tagName === "TEXTAREA"
+    && document.activeElement.closest("#composer-region") ? document.activeElement : null;
+  let selS = 0, selE = 0;
+  if (oldTa) { try { selS = oldTa.selectionStart; selE = oldTa.selectionEnd; } catch {} }
   main.innerHTML = "";
   main.appendChild(buildTabBar());
   renderTabs();
+  // the animated background is global: full strength on the landing (new
+  // session) view, dimmed behind the panels everywhere else (see style.css)
+  const landing = S.view === "sessions" && !S.current;
+  document.body.classList.toggle("bg-live", landing);
+  document.body.classList.toggle("bg-dim", !landing);
+  if (window.IntellexorBG) IntellexorBG.setActive(true);
   if (S.view === "board") {
     renderBoardView(main);
     return;
   }
   if (!S.current) {
     renderNewSessionView(main);
-    return;
+  } else {
+    renderSessionView(main);
   }
-  renderSessionView(main);
+  if (oldTa) {
+    const ta = $("#composer-region textarea");
+    if (ta) {
+      ta.focus();
+      try { ta.setSelectionRange(selS, selE); } catch {}
+    }
+  }
 }
 
 function renderNewSessionView(main) {
@@ -1248,7 +1307,16 @@ function renderTool(p, info) {
   if (sub) titleRow.appendChild(el("span", "tsub", esc(sub)));
   if (taskLink) {
     titleRow.classList.add("task-link");
-    titleRow.title = "Open subagent session (read-only)";
+    // while the subagent session is still ongoing, a spinner at the beginning
+    // of the line tells the user it is still working; the row itself stays
+    // clickable and opens the session (read-only)
+    const childRunning = sessionBusy(taskLink);
+    titleRow.title = childRunning
+      ? "Subagent still working — click to open its session (read-only)"
+      : "Open subagent session (read-only)";
+    if (childRunning) {
+      titleRow.prepend(el("span", "spinner", ICONS.spinner));
+    }
     titleRow.appendChild(el("span", "tsub ro-open", "open ↗"));
     titleRow.appendChild(el("span", "spacer"));
     titleRow.onclick = () => navigate("/" + taskLink);
@@ -1435,23 +1503,26 @@ function openAddCardModal() {
 
 /* ---------- start / view a card ---------- */
 
-// Start the agent on a card: create a fresh session, prompt it with the
-// card's task, link the session to the card and move it to In Progress.
+// Start the agent on a card: create a fresh session, link the card to it
+// (and move it to In Progress) BEFORE prompting so the agent already knows
+// its card from the first step, then prompt it with the card's task.
 async function startCard(c) {
   try {
     const body = { agent: S.agent, title: c.title };
     if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
     const sess = await post("/session", body);
+    await patch("/board/card/" + c.id, { column: "inprogress", sessionID: sess.id });
     const prompt =
       `A task was created on the project kanban board:\n\n` +
       `"${c.title}"\n\n` +
+      `The task's card ID is ${c.id} (the card is linked to this session). ` +
+      `When you finish working on it, move the card to the done column with the board tool.\n\n` +
       `Start working on this task now. Explore the codebase as needed, implement it end to end, and verify your work (build and tests where applicable). Keep going until the task is complete.`;
     await post(`/session/${sess.id}/prompt_async`, {
       agent: S.agent,
       model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
       parts: [{ type: "text", text: prompt }],
     });
-    await patch("/board/card/" + c.id, { column: "inprogress", sessionID: sess.id });
     await refreshSession(sess.id).catch(() => {});
     await loadBoard();
     renderBoard();
@@ -1549,28 +1620,35 @@ function boardCardNode(c) {
   const card = el("div", "kanban-card");
   card.draggable = true;
   card.dataset.id = c.id;
+  card.dataset.column = c.column; // drives the per-status header color
+  const head = el("div", "kanban-card-head");
   const title = el("div", "kanban-card-title", esc(c.title));
   title.title = "Double-click to edit";
-  card.appendChild(title);
+  head.appendChild(title);
+  card.appendChild(head);
 
   const actions = el("div", "kanban-card-actions");
-  const start = el("button", "kanban-card-btn", ICONS.play + "<span>Start</span>");
-  start.title = "Start the agent on this card in a new session";
-  start.onclick = async (e) => {
-    e.stopPropagation();
-    start.disabled = true;
-    start.innerHTML = ICONS.spinner + "<span>Starting…</span>";
-    await startCard(c);
-    renderBoard(); // re-render restores the real buttons
-  };
-  actions.appendChild(start);
+  // Cards in "In Progress" are already started, so they must not offer a
+  // Start button (View below opens the session working on them).
+  if (c.column !== "inprogress") {
+    const start = el("button", "kanban-card-btn", ICONS.play + "<span>Start</span>");
+    start.title = "Start the agent on this card in a new session";
+    start.onclick = async (e) => {
+      e.stopPropagation();
+      start.disabled = true;
+      start.innerHTML = ICONS.spinner + "<span>Starting…</span>";
+      await startCard(c);
+      renderBoard(); // re-render restores the real buttons
+    };
+    actions.appendChild(start);
+  }
   if (c.sessionID) {
     const view = el("button", "kanban-card-btn", ICONS.eye + "<span>View</span>");
     view.title = "Open the session working on this card";
     view.onclick = (e) => { e.stopPropagation(); viewCard(c); };
     actions.appendChild(view);
   }
-  card.appendChild(actions);
+  if (actions.children.length) card.appendChild(actions);
 
   const delBtn = el("button", "kanban-card-del", ICONS.close);
   delBtn.title = "Delete card";
@@ -1681,8 +1759,28 @@ function buildComposerRegion(region) {
 function renderComposerRegion() {
   const region = $("#composer-region");
   if (!region) return;
+  // The rebuild wipes the DOM — carry focus, caret, and an open slash menu
+  // across it. Status events, docks, and the mic's periodic dock updates all
+  // rebuild; typing must never be interrupted.
+  const active = document.activeElement;
+  const inRegion = active && active !== document.body && region.contains(active);
+  const wasText = !!(inRegion && active.tagName === "TEXTAREA");
+  let selS = 0, selE = 0;
+  if (wasText) { try { selS = active.selectionStart; selE = active.selectionEnd; } catch {} }
+  const activeId = inRegion && active.id ? active.id : "";
+  const menuOpen = !!cmdMenu.el;
   region.innerHTML = "";
   buildComposerRegion(region);
+  if (!inRegion) return;
+  const ta = $("#composer-region textarea");
+  if (wasText && ta) {
+    ta.focus();
+    try { ta.setSelectionRange(selS, selE); } catch {}
+    if (menuOpen) renderCmdMenu(ta);
+  } else if (activeId) {
+    const again = region.querySelector("#" + (window.CSS && CSS.escape ? CSS.escape(activeId) : activeId));
+    if (again) again.focus();
+  }
 }
 
 function renderComposer() {
@@ -1856,6 +1954,8 @@ async function doSend() {
     }
     await refreshSession(sid);
     renderSidebar();
+    const ta = $("#composer-region textarea");
+    if (ta) { ta.focus(); ta.selectionStart = ta.selectionEnd = 0; }
   } catch (e) {
     toast(e.message || String(e), true);
   }
@@ -2253,6 +2353,8 @@ async function runCommand(name, args) {
     await post(`/session/${sid}/command`, { command: name, arguments: args, agent: S.agent });
     await refreshSession(sid);
     renderSidebar();
+    const ta = $("#composer-region textarea");
+    if (ta) ta.focus();
   } catch (e) {
     toast(e.message || String(e), true);
   }

@@ -1,6 +1,12 @@
 package app
 
-import "github.com/Intellexie/intellexor/internal/session"
+import (
+	"strings"
+
+	"github.com/Intellexie/intellexor/internal/board"
+	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
+)
 
 type AgentDef struct {
 	Name        string
@@ -93,7 +99,7 @@ func baseRules() []session.PermissionRule {
 	}
 }
 
-var activeTools = []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch"}
+var activeTools = []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board"}
 
 func systemPrompt(i *Instance) string {
 	return `You are Intellexor, an interactive CLI tool that helps users with software engineering tasks.
@@ -136,4 +142,20 @@ func yn(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// boardContext describes the kanban card linked to the session (the card the
+// agent was started from on the board), so the agent knows which card it is
+// working on — including its ID — and can move it to done when finished.
+// Returns "" for sessions without a linked card (and for subagents, whose
+// session IDs never match the link).
+func boardContext(i *Instance, s *session.Session) string {
+	card, ok, err := board.ForSession(store.ProjectID(i.Directory), s.ID)
+	if err != nil || !ok {
+		return ""
+	}
+	title := strings.ReplaceAll(card.Title, "\n", " ")
+	return `# Kanban board
+You are working on the kanban card "` + title + `" (id: ` + card.ID + `, column: ` + card.Column + `).
+When you have finished the task, move the card to the done column with the board tool: {"action": "move", "column": "done"} — the card is resolved from this session automatically, or pass its ID explicitly.`
 }

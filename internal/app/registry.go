@@ -36,6 +36,11 @@ func registryFor(i *Instance) *tool.Registry {
 		_ = i.Mgr.WriteKV("todo", sessionID, todos)
 		i.Hub.Publish("todo.updated", map[string]any{"sessionID": sessionID, "todos": todos})
 	}}
+	boardTool := tool.BoardTool{OnUpdate: func() {
+		// same broadcast the board HTTP routes send, so every connected
+		// client refreshes when the agent moves a card
+		i.Hub.Publish("board.updated", map[string]any{"directory": i.Directory})
+	}}
 	questionTool := tool.QuestionTool{Svc: i.Quest}
 	r := tool.NewRegistry(
 		tool.InvalidTool{},
@@ -50,6 +55,7 @@ func registryFor(i *Instance) *tool.Registry {
 		tool.WebFetchTool{},
 		todo,
 		tool.ApplyPatchTool{},
+		boardTool,
 	)
 	regInst[i] = r
 	return r
@@ -73,7 +79,7 @@ func activeToolNames(dir string, agent AgentDef) []string {
 		disabled[d] = true
 	}
 	applyPatch := false
-	for _, n := range []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch"} {
+	for _, n := range []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board"} {
 		if n == "apply_patch" {
 			continue // only for gpt models
 		}

@@ -10,6 +10,11 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div id="bg" aria-hidden="true">
+  <canvas id="bg-canvas"></canvas>
+  <div class="bg-grid"></div>
+  <div class="bg-vignette"></div>
+</div>
 <div id="app">
   <aside class="rail">
     <a class="rail-brand" href="/" title="Intellexor"><img src="/logo.png" alt="Intellexor"></a>
@@ -32,6 +37,7 @@
 <div id="modal-root"></div>
 <div id="toast-root"></div>
 <script src="/mic.js"></script>
+<script src="/bg.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

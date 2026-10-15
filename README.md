@@ -11,13 +11,15 @@ Highlights:
 - **Agent loop** with streaming, retries, cost/token accounting, session
   titles, subagents (`task`) and per-session diff tracking.
 - **Built-in tools**: `bash`, `read`, `edit`, `write`, `apply_patch`, `grep`,
-  `glob`, `task`, `todowrite`, `webfetch`, `question` (+ `invalid` for
+  `glob`, `task`, `todowrite`, `webfetch`, `question`, `board` (+ `invalid` for
   malformed calls) — with output truncation limits and argument validation.
 - **Web UI**: single-page app (dark/light/system themes) with a session
   sidebar, streaming markdown timeline, collapsible tool rows with diff
   viewer, reasoning blocks, todo/permission/question docks, agent + model
-  pickers, attachments, `!` shell mode, context-usage indicator and a
-  client-side speech-to-text mic button.
+  pickers, attachments, `!` shell mode, context-usage indicator, a
+  client-side speech-to-text mic button and a kanban board tab — starting a
+  card links it to a new session and the agent moves it to done (via the
+  `board` tool) when the task is finished.
 - **All permissions granted by default** — Intellexor never blocks on tool
   approval. `permission.*` config keys and the `/permission` endpoints exist
   for compatibility but have no effect.
@@ -71,8 +73,9 @@ The image is ubuntu-based and gives the agent a full toolchain: `bash`,
 
 ## Speech to text (mic button)
 
-The composer has a microphone button: click, talk, click again — the
-transcript is appended to the input box. It runs **fully client-side**
+The composer has a microphone button: click, talk, click again — the whole
+recording is transcribed once and appended to the input box (no real-time
+partials). It runs **fully client-side**
 (sherpa-onnx WASM in a Web Worker + NVIDIA Parakeet TDT 0.6B v3 int8,
 multilingual); audio never leaves the browser. The ~640 MB model is
 downloaded once with a visible progress bar and cached in the browser
