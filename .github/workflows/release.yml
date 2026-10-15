@@ -85,7 +85,7 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags "-s -w -X github.com/Intellexie/intellexor/internal/session.Version=${GITHUB_REF_NAME}" \
-            -o "dist/${BINARY}${ext}" ./cmd/intellexor
+            -o "dist/${BINARY}${ext}" .
 
       - name: Package
         shell: bash

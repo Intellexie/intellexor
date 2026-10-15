@@ -25,7 +25,7 @@ Highlights:
 ## Build & run
 
 ```sh
-go build -o bin/intellexor ./cmd/intellexor
+go build -o bin/intellexor .
 ./bin/intellexor --dir /path/to/project --port 4096
 # open http://127.0.0.1:4096
 ```
@@ -165,7 +165,7 @@ Four agents ship compiled in:
 ## Layout
 
 ```
-cmd/intellexor/          entry point (serve + acp)
+main.go                 entry point (serve + acp)
 internal/acp/        ACP JSON-RPC transport, methods, event mapping
 internal/app/        instance, agents, prompt loop, processor, history
 internal/config/     global/project config loading and merging

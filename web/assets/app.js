@@ -44,6 +44,7 @@ const S = {
   questions: [],
   providers: { all: [], default: {}, connected: [] },
   current: null, // session id
+  view: "sessions", // "sessions" | "board" (the kanban first tab)
   msgs: new Map(), // sid -> {order:[ids], info:{id->info}, parts:{id->part}}
   todos: {},
   children: {},
@@ -115,6 +116,8 @@ const ICONS = {
   console: svg('<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>', 12),
   branch: svg('<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>', 12),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 12),
+  play: svg('<polygon points="6 3 20 12 6 21 6 3"/>', 12),
+  eye: svg('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>', 12),
   revert: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>', 12),
   fork: svg('<circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v2a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9"/><path d="M12 12v3"/>', 12),
   restore: svg('<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>', 14),
@@ -456,6 +459,10 @@ function handleEvent(ev) {
       S.todos[p.sessionID] = p.todos;
       if (isDockSession(p.sessionID)) renderComposerRegion();
       break;
+    case "board.updated":
+      // another client (or tab) changed the board
+      if (S.view === "board") loadBoard().then(renderBoard);
+      break;
     case "session.diff":
       break;
     default:
@@ -561,6 +568,12 @@ function renderTabs() {
   const bar = $("#tab-bar");
   if (!bar) return;
   bar.innerHTML = "";
+  // the board is a fixed first tab, always present
+  const boardTab = el("div", "tab" + (S.view === "board" ? " active" : ""));
+  boardTab.title = "Kanban board";
+  boardTab.appendChild(el("span", "tab-title", "Board"));
+  boardTab.onclick = () => navigate("/board");
+  bar.appendChild(boardTab);
   for (const sid of S.tabs) {
     const s = S.sessions.find((x) => x.id === sid);
     if (!s) continue;
@@ -675,6 +688,10 @@ function renderMain() {
   main.innerHTML = "";
   main.appendChild(buildTabBar());
   renderTabs();
+  if (S.view === "board") {
+    renderBoardView(main);
+    return;
+  }
   if (!S.current) {
     renderNewSessionView(main);
     return;
@@ -1276,6 +1293,308 @@ function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
 function renderTurnFiles(files) {
   const box = el("div", "turn-files");
   return box;
+}
+
+/* ---------- kanban board (first tab) ---------- */
+
+const BOARD_COLUMNS = [
+  { id: "open", label: "Open" },
+  { id: "inprogress", label: "In Progress" },
+  { id: "done", label: "Done" },
+];
+
+let boardCards = [];
+
+async function renderBoardView(main) {
+  const header = el("header", "chat-header");
+  header.appendChild(el("div", "title", "Board"));
+  header.appendChild(el("div", "spacer"));
+  header.appendChild(el("span", "board-hint", "Drag cards between columns · double-click a title to edit"));
+  const addBtn = el("button", "btn secondary board-add", ICONS.plus + "<span>Add card</span>");
+  addBtn.title = "Create a new card";
+  addBtn.onclick = () => openAddCardModal();
+  header.appendChild(addBtn);
+  main.appendChild(header);
+  const board = el("div", "kanban");
+  board.id = "kanban";
+  main.appendChild(board);
+  await loadBoard();
+  renderBoard();
+}
+
+/* ---------- add-card modal ---------- */
+
+// Generic modal helper: builds an overlay + .modal box, calls build(modal, ov)
+// to populate it, and removes itself when the backdrop is clicked.
+function openModal(title, build) {
+  const ov = el("div", "overlay");
+  const modal = el("div", "modal");
+  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  modal.appendChild(el("h2", "", title));
+  build(modal, ov);
+  ov.appendChild(modal);
+  $("#modal-root").appendChild(ov);
+  return ov;
+}
+
+function openAddCardModal() {
+  openModal("Add card", (modal, ov) => {
+    const field = el("div", "m-field");
+    field.appendChild(el("label", "m-label", "Title"));
+    const input = el("input");
+    input.type = "text";
+    input.placeholder = "Describe the task for the agent…";
+    input.maxLength = 500;
+    field.appendChild(input);
+    modal.appendChild(field);
+
+    const colField = el("div", "m-field");
+    colField.appendChild(el("label", "m-label", "Column"));
+    const sel = el("select", "m-select");
+    for (const col of BOARD_COLUMNS) {
+      const opt = el("option", "", col.label);
+      opt.value = col.id;
+      if (col.id === "open") opt.selected = true;
+      sel.appendChild(opt);
+    }
+    colField.appendChild(sel);
+    modal.appendChild(colField);
+
+    const actions = el("div", "m-actions");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const create = el("button", "btn primary", "Create card");
+    create.onclick = async () => {
+      const title = input.value.trim();
+      if (!title) { input.focus(); return; }
+      create.disabled = true;
+      try {
+        await post("/board/card", { title, column: sel.value });
+        ov.remove();
+        await loadBoard();
+        renderBoard();
+        toast("Card added");
+      } catch (e) {
+        create.disabled = false;
+        toast(e.message || String(e), true);
+      }
+    };
+    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); create.click(); } };
+    actions.append(cancel, create);
+    modal.appendChild(actions);
+    setTimeout(() => input.focus(), 0);
+  });
+}
+
+/* ---------- start / view a card ---------- */
+
+// Start the agent on a card: create a fresh session, prompt it with the
+// card's task, link the session to the card and move it to In Progress.
+async function startCard(c) {
+  try {
+    const body = { agent: S.agent, title: c.title };
+    if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
+    const sess = await post("/session", body);
+    const prompt =
+      `A task was created on the project kanban board:\n\n` +
+      `"${c.title}"\n\n` +
+      `Start working on this task now. Explore the codebase as needed, implement it end to end, and verify your work (build and tests where applicable). Keep going until the task is complete.`;
+    await post(`/session/${sess.id}/prompt_async`, {
+      agent: S.agent,
+      model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
+      parts: [{ type: "text", text: prompt }],
+    });
+    await patch("/board/card/" + c.id, { column: "inprogress", sessionID: sess.id });
+    await refreshSession(sess.id).catch(() => {});
+    await loadBoard();
+    renderBoard();
+    toast(`Agent started on "${c.title}"`);
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
+}
+
+// Open the session working on a card.
+async function viewCard(c) {
+  if (!c.sessionID) return;
+  await refreshSession(c.sessionID).catch(() => {});
+  navigate("/" + c.sessionID);
+}
+
+async function loadBoard() {
+  try {
+    boardCards = (await get("/board")) || [];
+  } catch {
+    boardCards = [];
+  }
+}
+
+function boardCardsIn(column) {
+  return boardCards.filter((c) => c.column === column).sort((a, b) => a.order - b.order);
+}
+
+function renderBoard() {
+  const board = $("#kanban");
+  if (!board) return;
+  board.innerHTML = "";
+  for (const col of BOARD_COLUMNS) {
+    board.appendChild(buildBoardColumn(col));
+  }
+}
+
+function buildBoardColumn(col) {
+  const colEl = el("div", "kanban-col");
+  colEl.dataset.column = col.id;
+  const cards = boardCardsIn(col.id);
+
+  const head = el("div", "kanban-col-head");
+  head.innerHTML = `<span class="kanban-col-title">${esc(col.label)}</span><span class="kanban-count">${cards.length}</span>`;
+  colEl.appendChild(head);
+
+  const list = el("div", "kanban-cards");
+  for (const c of cards) list.appendChild(boardCardNode(c));
+  colEl.appendChild(list);
+
+  // add-card input pinned to the bottom of the column
+  const add = el("div", "kanban-add");
+  const input = el("input", "kanban-add-input");
+  input.placeholder = "Add card…";
+  input.maxLength = 500;
+  const commit = async () => {
+    const title = input.value.trim();
+    if (!title) return;
+    input.value = "";
+    try {
+      await post("/board/card", { title, column: col.id });
+      await loadBoard();
+      renderBoard();
+      const next = $(`#kanban .kanban-col[data-column="${col.id}"] .kanban-add-input`);
+      if (next) next.focus();
+    } catch (e) {
+      toast(e.message || String(e), true);
+    }
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+  };
+  add.appendChild(input);
+  colEl.appendChild(add);
+
+  // drop target: insert before the card under the pointer, else at the end
+  colEl.ondragover = (e) => { e.preventDefault(); colEl.classList.add("drag-over"); };
+  colEl.ondragleave = (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove("drag-over"); };
+  colEl.ondrop = (e) => {
+    e.preventDefault();
+    colEl.classList.remove("drag-over");
+    const cid = e.dataTransfer.getData("text/plain");
+    if (!cid) return;
+    let beforeID = null;
+    for (const n of list.querySelectorAll(".kanban-card:not(.dragging)")) {
+      const r = n.getBoundingClientRect();
+      if (e.clientY < r.top + r.height / 2) { beforeID = n.dataset.id; break; }
+    }
+    moveBoardCard(cid, col.id, beforeID);
+  };
+  return colEl;
+}
+
+function boardCardNode(c) {
+  const card = el("div", "kanban-card");
+  card.draggable = true;
+  card.dataset.id = c.id;
+  const title = el("div", "kanban-card-title", esc(c.title));
+  title.title = "Double-click to edit";
+  card.appendChild(title);
+
+  const actions = el("div", "kanban-card-actions");
+  const start = el("button", "kanban-card-btn", ICONS.play + "<span>Start</span>");
+  start.title = "Start the agent on this card in a new session";
+  start.onclick = async (e) => {
+    e.stopPropagation();
+    start.disabled = true;
+    start.innerHTML = ICONS.spinner + "<span>Starting…</span>";
+    await startCard(c);
+    renderBoard(); // re-render restores the real buttons
+  };
+  actions.appendChild(start);
+  if (c.sessionID) {
+    const view = el("button", "kanban-card-btn", ICONS.eye + "<span>View</span>");
+    view.title = "Open the session working on this card";
+    view.onclick = (e) => { e.stopPropagation(); viewCard(c); };
+    actions.appendChild(view);
+  }
+  card.appendChild(actions);
+
+  const delBtn = el("button", "kanban-card-del", ICONS.close);
+  delBtn.title = "Delete card";
+  delBtn.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      await del("/board/card/" + c.id);
+      await loadBoard();
+      renderBoard();
+    } catch (err) {
+      toast(err.message || String(err), true);
+    }
+  };
+  card.appendChild(delBtn);
+
+  title.ondblclick = () => {
+    title.contentEditable = "true";
+    title.focus();
+    document.getSelection().selectAllChildren(title);
+  };
+  const saveTitle = async () => {
+    if (title.contentEditable !== "true") return;
+    title.contentEditable = "false";
+    const v = title.textContent.trim();
+    if (!v || v === c.title) { title.textContent = esc(c.title); return; }
+    c.title = v;
+    try {
+      await patch("/board/card/" + c.id, { title: v });
+    } catch (err) {
+      toast(err.message || String(err), true);
+    }
+  };
+  title.onblur = saveTitle;
+  title.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); title.blur(); }
+    else if (e.key === "Escape") { title.textContent = c.title; title.blur(); }
+  };
+
+  card.ondragstart = (e) => {
+    e.dataTransfer.setData("text/plain", c.id);
+    e.dataTransfer.effectAllowed = "move";
+    card.classList.add("dragging");
+  };
+  card.ondragend = () => card.classList.remove("dragging");
+  return card;
+}
+
+async function moveBoardCard(id, column, beforeID) {
+  const card = boardCards.find((c) => c.id === id);
+  if (!card) return;
+  const col = boardCardsIn(column).filter((x) => x.id !== id);
+  let targetIdx = col.length;
+  if (beforeID) {
+    const i = col.findIndex((x) => x.id === beforeID);
+    if (i >= 0) targetIdx = i;
+  }
+  if (card.column === column) {
+    const curIdx = boardCardsIn(column).findIndex((x) => x.id === id);
+    if (curIdx === targetIdx) return; // dropped back where it was
+  }
+  // optimistic: reposition locally, then reconcile with the server
+  col.splice(targetIdx, 0, card);
+  col.forEach((c, i) => { c.column = column; c.order = i; });
+  renderBoard();
+  try {
+    await patch("/board/card/" + id, { column, before: beforeID || "" });
+    await loadBoard();
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
+  renderBoard();
 }
 
 /* ---------- composer ---------- */
@@ -2099,10 +2418,12 @@ function sessionInfo(id) {
 
 async function route() {
   const h = location.hash.replace(/^#/, "");
-  if (!h) {
+  const id = h.replace(/^\//, "");
+  if (id === "board") {
+    S.view = "board";
     S.current = null;
   } else {
-    const id = h.replace(/^\//, "");
+    S.view = "sessions";
     S.current = id || null;
   }
   // a subagent session opened from a task part is not in the session list —

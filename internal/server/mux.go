@@ -92,6 +92,12 @@ func (s *Server) Handler() http.Handler {
 	handle("POST /question/{requestID}/reply", s.replyQuestion)
 	handle("POST /question/{requestID}/reject", s.rejectQuestion)
 
+	// kanban board (first tab in the web UI)
+	handle("GET /board", s.getBoard)
+	handle("POST /board/card", s.createBoardCard)
+	handle("PATCH /board/card/{cardID}", s.patchBoardCard)
+	handle("DELETE /board/card/{cardID}", s.deleteBoardCard)
+
 	// provider / auth / config
 	handle("GET /provider", func(w http.ResponseWriter, r *http.Request) *apiError { providersHandler(s)(w, r); return nil })
 	handle("GET /provider/auth", func(w http.ResponseWriter, r *http.Request) *apiError { providerAuthHandler(s)(w, r); return nil })

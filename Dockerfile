@@ -18,7 +18,7 @@ COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
 COPY web ./web
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/intellexor ./cmd/intellexor
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/intellexor .
 
 # ---- runtime stage ----
 FROM ubuntu:24.04
@@ -75,7 +75,7 @@ COPY --from=build /out/intellexor /usr/local/bin/intellexor
 USER intellexor
 WORKDIR /workspace
 VOLUME ["/data", "/workspace"]
-EXPOSE 8080
+EXPOSE 4096 8080
 
-ENTRYPOINT ["/usr/local/bin/intellexor", "acp", "--cwd", "/workspace"]
+ENTRYPOINT ["/usr/local/bin/intellexor", "acp", "--cwd", "/workspace", "--port", "4096"]
 CMD []
