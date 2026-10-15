@@ -15,7 +15,7 @@ FROM golang:1.26-alpine AS build
 ARG GO_VERSION=1.26.2
 WORKDIR /src
 COPY go.mod ./
-COPY cmd ./cmd
+COPY main.go ./
 COPY internal ./internal
 COPY web ./web
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/intellexor .

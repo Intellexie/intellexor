@@ -58,6 +58,7 @@ const S = {
   streaming: new Map(), // partID -> messageID (parts with live text deltas)
   toolOpen: new Map(), // tool partID -> user's explicit open/closed choice (survives timeline re-renders)
   tabs: [], // open session tabs, in order (persisted)
+  sidebarOpen: true, // resolved from localStorage/viewport by initSidebar()
   commands: null, // cached GET /command result (slash-command menu)
   subagents: new Map(), // sessionID -> info for subagent sessions (fetched on demand, not in the sidebar)
   es: null,
@@ -332,6 +333,12 @@ function handleEvent(ev) {
       if (info.id === S.current) {
         renderHeader();
         if (wasReverted !== !!info.revert) {
+          // Reverting puts the reverted message back in the chat box; read it
+          // from the local store before the reload hides it.
+          if (info.revert && info.revert.messageID) {
+            const text = userMessageText(msgStore(info.id), info.revert.messageID);
+            if (text) setComposerText(text);
+          }
           loadMessages(info.id).then(() => renderTimeline()).catch(() => {});
         }
       }
@@ -614,6 +621,44 @@ function renderTabs() {
   bar.appendChild(plus);
 }
 
+/* ---------- sidebar collapse ---------- */
+
+function isNarrow() { return matchMedia("(max-width: 767px)").matches; }
+
+// Reflect S.sidebarOpen onto the DOM: on desktop the sidebar collapses inline,
+// on small screens it slides in as an overlay drawer with a backdrop.
+function applySidebar() {
+  const app = $("#app");
+  if (!app) return;
+  app.classList.toggle("sidebar-collapsed", !S.sidebarOpen);
+  app.classList.toggle("sidebar-open", S.sidebarOpen);
+  let bd = $("#sidebar-backdrop");
+  if (isNarrow() && S.sidebarOpen) {
+    if (!bd) {
+      bd = el("div", "sidebar-backdrop");
+      bd.id = "sidebar-backdrop";
+      bd.onclick = () => setSidebar(false);
+      document.body.appendChild(bd);
+    }
+  } else if (bd) {
+    bd.remove();
+  }
+}
+
+function setSidebar(open) {
+  S.sidebarOpen = open;
+  try { localStorage.setItem("intellexor.sidebar", open ? "1" : "0"); } catch {}
+  applySidebar();
+}
+
+function initSidebar() {
+  let saved = null;
+  try { saved = localStorage.getItem("intellexor.sidebar"); } catch {}
+  // default: open on desktop, closed (drawer) on small screens
+  S.sidebarOpen = saved != null ? saved === "1" : !isNarrow();
+  applySidebar();
+}
+
 function renderSidebar() {
   const list = $("#session-list");
   list.innerHTML = "";
@@ -662,6 +707,7 @@ function renderSidebar() {
 }
 
 function navigate(path) {
+  if (isNarrow() && S.sidebarOpen) setSidebar(false); // dismiss the drawer after picking a session
   location.hash = path === "" ? "" : "#" + path;
 }
 
@@ -1008,7 +1054,8 @@ function renderUserMessage(info, parts) {
       await loadMessages(S.current);
       await refreshSession(S.current);
       renderTimeline();
-      toast("Reverted — later messages removed, file changes restored");
+      if (text) setComposerText(text);
+      toast("Reverted — message returned to the chat box, file changes restored");
     } catch (e) {
       toast(e.message || String(e), true);
     }
@@ -1601,6 +1648,28 @@ async function moveBoardCard(id, column, beforeID) {
 
 let composerText = "";
 let attachments = [];
+
+// Put text back into the chat box (used when reverting a message so the user
+// can edit and resend it).
+function setComposerText(text) {
+  composerText = text;
+  const ta = $("#composer-region textarea");
+  if (ta) {
+    ta.value = composerText;
+    autosize(ta);
+    if (ta.value.startsWith("!")) ta.classList.add("shell-mode");
+    else ta.classList.remove("shell-mode");
+    renderCmdMenu(ta);
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = ta.value.length;
+  }
+}
+
+// Text of a user message from the local store (non-synthetic text parts).
+function userMessageText(store, messageID) {
+  const parts = Object.values(store.parts[messageID] || {}).sort((a, b) => (a.id < b.id ? -1 : 1));
+  return parts.filter((p) => p.type === "text" && !p.synthetic).map((p) => p.text || "").join("\n");
+}
 
 function buildComposerRegion(region) {
   region.innerHTML = "";
@@ -2207,7 +2276,9 @@ async function runUICommand(name) {
           if (info && info.role === "user") lastUser = mid;
         }
         if (!lastUser) { toast("Nothing to undo", true); return; }
+        const text = userMessageText(store, lastUser);
         await post(`/session/${S.current}/revert`, { messageID: lastUser });
+        if (text) setComposerText(text);
       } else {
         await post(`/session/${S.current}/unrevert`, {});
       }
@@ -2518,6 +2589,9 @@ async function boot() {
   $("#btn-new-session").onclick = () => navigate("");
   $("#rail-new").onclick = () => navigate("");
   $("#rail-settings").onclick = openSettings;
+  $("#rail-sidebar").onclick = () => setSidebar(!S.sidebarOpen);
+  initSidebar();
+  window.addEventListener("resize", applySidebar); // keep drawer/backdrop correct across the breakpoint
   const name = (S.dir || "Project").split("/").filter(Boolean).pop() || "P";
   $("#rail-avatar").textContent = name[0].toUpperCase();
   $("#sidebar-title").textContent = name;

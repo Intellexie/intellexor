@@ -44,7 +44,7 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 ::-webkit-scrollbar-thumb { background:var(--layer-3); border-radius:4px; }
 ::-webkit-scrollbar-track { background:transparent; }
 
-#app { display:flex; height:100vh; background:var(--bg-base); }
+#app { display:flex; height:100vh; height:100dvh; background:var(--bg-base); }
 
 /* ---------- rail ---------- */
 .rail { width:64px; flex:0 0 64px; background:var(--bg-base); display:flex; flex-direction:column; align-items:center; padding:12px 0; gap:12px; border-right:1px solid transparent; }
@@ -57,7 +57,7 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 .rail-spacer { flex:1; }
 
 /* ---------- sidebar ---------- */
-.sidebar { width:280px; flex:0 0 280px; background:var(--bg-deep); border-radius:var(--radius-lg); margin:8px 0 8px 8px; display:flex; flex-direction:column; overflow:hidden; }
+.sidebar { width:280px; flex:0 0 280px; min-width:0; background:var(--bg-deep); border-radius:var(--radius-lg); margin:8px 0 8px 8px; display:flex; flex-direction:column; overflow:hidden; transition:flex-basis .18s ease, margin .18s ease; }
 .sidebar-title { padding:14px 16px 8px; font-size:12px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .new-session { display:flex; align-items:center; gap:8px; margin:4px 8px 8px; padding:8px 10px; border-radius:var(--radius-md); color:var(--text-muted); text-align:left; }
 .new-session:hover { background:var(--surface-hover); color:var(--text-base); }
@@ -76,6 +76,15 @@ input,textarea,select { font-family:inherit; font-size:inherit; color:inherit; }
 .dot-error { background:var(--diff-del); }
 .dot-unseen { background:var(--accent); }
 .empty-sessions { padding:16px 8px; color:var(--text-faint); font-size:13px; }
+
+/* collapsed sidebar (desktop) — the rail toggle restores it */
+@media (min-width: 768px) {
+  #app.sidebar-collapsed .sidebar { flex-basis:0; width:0; margin-left:0; }
+}
+
+/* backdrop behind the sidebar drawer on small screens */
+.sidebar-backdrop { position:fixed; inset:0; z-index:65; background:rgba(0,0,0,0.45); }
+@media (min-width: 768px) { .sidebar-backdrop { display:none; } }
 
 /* ---------- main ---------- */
 .main { flex:1; min-width:0; background:var(--bg-base); display:flex; flex-direction:column; position:relative; }
@@ -351,7 +360,18 @@ pre:hover .copy-code { opacity:1; }
 .kanban-add-input:focus { border-color:var(--accent); color:var(--text-base); }
 
 @media (max-width: 767px) {
-  .sidebar { display:none; }
+  .rail { width:48px; flex-basis:48px; }
+  /* sidebar becomes an off-canvas drawer; the chat area uses the full width */
+  .sidebar { position:fixed; left:0; top:0; bottom:0; z-index:70; width:min(300px, 85vw); flex:0 0 auto; margin:0; border-radius:0; transform:translateX(-105%); transition:transform .2s ease; box-shadow:var(--shadow); }
+  #app.sidebar-open .sidebar { transform:translateX(0); }
+  .timeline-inner { padding:0 12px; }
+  .composer-region { padding:0 8px 10px; }
+  .chat-header { padding:0 10px; }
+  .wordmark { font-size:34px; }
+  .brand-mark { margin-top:12vh; }
+  .kanban-col { min-width:200px; }
+  #toast-root { left:16px; }
+  .toast { max-width:none; }
 }
 
 /* ---------- mic / speech-to-text ---------- */
