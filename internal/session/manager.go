@@ -51,6 +51,30 @@ func (m *Manager) Save(s *Session) error {
 	return m.st.WriteJSON(m.st.SessionFile(s.ProjectID, s.ID), s)
 }
 
+// Update atomically re-reads the session from disk, applies fn, and writes it
+// back — all under the manager lock. Use it for background writers that hold
+// no live session object (title generation, renames): a plain Find+Save can
+// read a pre-prompt copy and clobber tokens/cost the prompt loop saved in
+// between, because Save is a blind write of the passed object.
+func (m *Manager) Update(sessionID string, fn func(*Session)) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, projectID, err := m.findFile(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var s Session
+	if err := store.ReadJSON(m.st.SessionFile(projectID, sessionID), &s); err != nil {
+		return nil, err
+	}
+	fn(&s)
+	s.Time.Updated = util.Now()
+	if err := m.st.WriteJSON(m.st.SessionFile(projectID, sessionID), &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 func (m *Manager) findFile(sessionID string) (string, string, error) {
 	root := filepath.Join(m.st.Root, "storage", "session")
 	projects, err := os.ReadDir(root)

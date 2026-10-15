@@ -254,17 +254,20 @@ func (i *Instance) generateTitle(s *session.Session, userParts []session.Part, r
 	if title == "" {
 		return
 	}
-	// re-read so cost/token updates (and a possible manual rename) made while
-	// generating are not clobbered by a stale save
-	fresh, err := i.Mgr.Find(s.ID)
+	// re-read + write atomically so cost/token updates (and a possible manual
+	// rename) made while generating are not clobbered by a stale save
+	fresh, err := i.Mgr.Update(s.ID, func(u *session.Session) {
+		if u.Title != fallback && !strings.HasPrefix(u.Title, "New session") {
+			return // renamed by the user meanwhile
+		}
+		u.Title = title
+	})
 	if err != nil {
 		return
 	}
-	if fresh.Title != fallback && !strings.HasPrefix(fresh.Title, "New session") {
+	if fresh.Title != title {
 		return // renamed by the user meanwhile
 	}
-	fresh.Title = title
-	_ = i.Mgr.Save(fresh)
 	i.Hub.Publish("session.updated", map[string]any{"sessionID": s.ID, "info": *fresh})
 }
 
@@ -314,6 +317,8 @@ func completeText(ctx context.Context, resolved *provider.Resolved, model provid
 	}
 	var sb strings.Builder
 	for ev := range ch {
+		if ev.Type == "error" {
+		}
 		switch ev.Type {
 		case "text-delta":
 			sb.WriteString(ev.Text)
