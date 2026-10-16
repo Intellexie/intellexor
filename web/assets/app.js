@@ -37,6 +37,7 @@ const del = (p) => api("DELETE", p);
 
 const S = {
   dir: "",
+  version: "", // server version from /global/health
   vcs: {},
   sessions: [],
   statuses: {},
@@ -100,6 +101,49 @@ function toast(msg, isErr) {
   $("#toast-root").appendChild(t);
   setTimeout(() => t.remove(), isErr ? 6000 : 3000);
 }
+
+/* ============================== notification sound ============================== */
+
+// Played when the agent finishes working (see the session.idle handler).
+// Browsers block audible playback until the user has interacted with the page,
+// so the first pointer/key gesture "unlocks" the element with a muted
+// play/pause; plays that are still blocked resolve as silent no-ops.
+const Notify = (() => {
+  const audio = new Audio("/notification.mp3");
+  audio.preload = "auto";
+  let unlocked = false;
+  const unlock = () => {
+    if (unlocked) return;
+    unlocked = true;
+    audio.muted = true;
+    audio.play().then(() => {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = false;
+    }).catch(() => { audio.muted = false; });
+  };
+  addEventListener("pointerdown", unlock, { once: true });
+  addEventListener("keydown", unlock, { once: true });
+  return {
+    play() {
+      try {
+        audio.currentTime = 0;
+        const p = audio.play();
+        if (p && p.catch) p.catch(() => {});
+      } catch {}
+    },
+  };
+})();
+
+// Timestamp until which the completion chime is muted — set when the user
+// aborts a run themselves (they are already looking at the UI).
+let soundSuppressedUntil = 0;
+
+// Sessions whose idle session.status arrived while they were still marked
+// busy. The server publishes the idle status before session.idle, and the
+// status handler deletes the busy entry — so session.idle must recover the
+// "was actually working" bit from here to decide whether to chime.
+const idleAfterBusy = new Set();
 
 const svg = (d, size = 14) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
@@ -367,7 +411,12 @@ function handleEvent(ev) {
       }).catch(() => {});
       break;
     case "session.status": {
-      if (p.status && p.status.type === "idle") delete S.statuses[p.sessionID];
+      if (p.status && p.status.type === "idle") {
+        // record whether the session was really working before the entry is
+        // wiped — session.idle needs it to decide on the completion chime
+        if (sessionBusy(p.sessionID)) idleAfterBusy.add(p.sessionID);
+        delete S.statuses[p.sessionID];
+      }
       else {
         S.statuses[p.sessionID] = p.status;
         S.errored.delete(p.sessionID); // fresh activity clears a stale error flag
@@ -380,14 +429,26 @@ function handleEvent(ev) {
       updateTab();
       break;
     }
-    case "session.idle":
+    case "session.idle": {
+      // the idle session.status always precedes this event and has already
+      // cleared S.statuses — the recorded bit is the only reliable signal
+      // (the sessionBusy fallback covers an idle event without a status)
+      const wasBusy = idleAfterBusy.delete(p.sessionID) || sessionBusy(p.sessionID);
       delete S.statuses[p.sessionID];
       S.streaming.clear();
       renderSidebar();
       renderComposer();
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       updateTab();
+      // the agent finished working — chime, but only for real completions of
+      // top-level sessions (subagents going idle just hand control back to
+      // their parent, and a user-initiated abort needs no fanfare)
+      const finished = S.sessions.find((s) => s.id === p.sessionID);
+      if (wasBusy && finished && !finished.parentID && Date.now() >= soundSuppressedUntil) {
+        Notify.play();
+      }
       break;
+    }
     case "session.error": {
       if (p.sessionID) S.errored.add(p.sessionID);
       renderSidebar();
@@ -993,13 +1054,29 @@ function buildTimeline() {
   const inner = el("div", "timeline-inner");
   inner.id = "timeline-inner";
   tl.appendChild(inner);
-  tl.onscroll = () => {
-    const nearBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
-    S.scrollStick = nearBottom;
-    const jb = $("#jump-latest");
-    if (jb) jb.classList.toggle("show", !nearBottom && tl.scrollHeight > tl.clientHeight + 200);
+  // floating "to bottom" button. It is a DOM child of the scroller but
+  // .timeline is not positioned, so its containing block is #main
+  // (position:relative) — it stays pinned above the composer instead of
+  // scrolling away with the messages.
+  const jb = el("button", "jump-latest", ICONS.down);
+  jb.id = "jump-latest";
+  jb.title = "Jump to latest message";
+  jb.onclick = () => {
+    S.scrollStick = true;
+    tl.scrollTop = tl.scrollHeight;
   };
+  tl.appendChild(jb);
+  tl.onscroll = () => updateJumpButton(tl);
   return tl;
+}
+
+// show the button when the user is scrolled up far enough that new content
+// is arriving out of view; hide again near the bottom
+function updateJumpButton(tl) {
+  const nearBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
+  S.scrollStick = nearBottom;
+  const jb = $("#jump-latest");
+  if (jb) jb.classList.toggle("show", !nearBottom && tl.scrollHeight > tl.clientHeight + 200);
 }
 
 function buildComposerRegionRoot() {
@@ -1067,6 +1144,7 @@ async function renderTimeline() {
     inner.appendChild(renderTurnFiles(turnFiles));
   }
   if (wasStick) tl.scrollTop = tl.scrollHeight;
+  else updateJumpButton(tl); // content grew while scrolled up — no scroll event fires, refresh visibility
 }
 
 function lastBlockHasText(store) {
@@ -1909,6 +1987,7 @@ function isBusy() {
 
 async function abort() {
   if (!S.current) return;
+  soundSuppressedUntil = Date.now() + 10000; // the user stopped it — no chime
   await post(`/session/${S.current}/abort`).catch(() => {});
   setTimeout(() => {
     if (isBusy()) toast("Abort requested — waiting for the running tool to exit…");
@@ -2498,7 +2577,7 @@ function openSettings() {
   const modal = el("div", "modal");
   ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
 
-  modal.appendChild(el("h2", "", "Settings"));
+  modal.appendChild(el("h2", "", "Settings" + (S.version ? ` <span class="m-sub">v${esc(S.version)}</span>` : "")));
 
   // color scheme
   const row1 = el("div", "m-row");
@@ -2636,6 +2715,7 @@ async function boot() {
   try {
     const health = await get("/global/health");
     if (!health.healthy) throw new Error("unhealthy");
+    S.version = health.version || "";
   } catch (e) {
     document.body.innerHTML = '<div style="padding:40px;font-family:monospace">Cannot reach Intellexor server. Is it running?</div>';
     return;
