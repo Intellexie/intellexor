@@ -21,10 +21,17 @@ type builtinCommand struct {
 
 func builtinCommands() map[string]builtinCommand {
 	m := map[string]builtinCommand{}
+	// "compact" has no template: sessionCommand runs it as an action
+	// (session summarization), the other built-ins load their prompt file.
 	for _, b := range []struct{ name, desc, file string }{
 		{"init", "guided AGENTS.md setup", "templates/initialize.txt"},
 		{"review", "review changes [commit|branch|pr], defaults to uncommitted", "templates/review.txt"},
+		{"compact", "summarize the session to free context window", ""},
 	} {
+		if b.file == "" {
+			m[b.name] = builtinCommand{name: b.name, description: b.desc}
+			continue
+		}
 		raw, err := builtinTemplates.ReadFile(b.file)
 		if err != nil {
 			continue
@@ -40,7 +47,7 @@ func resolveCommand(name string, commands map[string]config.CommandCfg) (templat
 	if cfg, found := commands[name]; found {
 		return cfg.Template, cfg.Agent, cfg.Template != ""
 	}
-	if b, found := builtinCommands()[name]; found {
+	if b, found := builtinCommands()[name]; found && b.template != "" {
 		return b.template, "", true
 	}
 	return "", "", false

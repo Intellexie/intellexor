@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	handle("POST /session/{sessionID}/abort", s.abortSession)
 	handle("POST /session/{sessionID}/shell", s.sessionShell)
 	handle("POST /session/{sessionID}/command", s.sessionCommand)
+	handle("POST /session/{sessionID}/summarize", s.sessionSummarize)
 	handle("POST /session/{sessionID}/init", s.sessionInit)
 	handle("POST /session/{sessionID}/fork", s.sessionFork)
 	handle("POST /session/{sessionID}/revert", s.revertSession)

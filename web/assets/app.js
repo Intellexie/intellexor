@@ -458,6 +458,11 @@ function handleEvent(ev) {
     case "message.updated": {
       const store = msgStore(p.sessionID);
       const info = p.info;
+      // updates to messages older than the loaded window are ignored —
+      // pushing them would append out of order at the end of the timeline
+      if (store.info[info.id] === undefined && store.order.length && info.id < store.order[0]) {
+        break;
+      }
       if (store.info[info.id] === undefined) store.order.push(info.id);
       store.info[info.id] = Object.assign(store.info[info.id] || {}, info);
       if (info.role === "assistant" && info.error && p.sessionID === S.current) {
@@ -486,6 +491,8 @@ function handleEvent(ev) {
       if (!store.parts[p.messageID]) store.parts[p.messageID] = {};
       let part = store.parts[p.messageID][p.partID];
       if (!part) {
+        // delta for a message older than the loaded window — not displayed
+        if (store.order.length && p.messageID < store.order[0]) break;
         // delta arrived before the part.updated event — create a placeholder
         part = {
           id: p.partID,
@@ -812,8 +819,14 @@ function navigate(path) {
   location.hash = path === "" ? "" : "#" + path;
 }
 
+// Only the last MESSAGE_WINDOW messages are fetched and rendered. Long
+// sessions stay smooth (the timeline is fully rebuilt on every render) and
+// a page refresh transfers a bounded payload. Older messages are simply not
+// shown; SSE events for them are ignored so they can't land out of order.
+const MESSAGE_WINDOW = 100;
+
 async function loadMessages(sid) {
-  const msgs = await get(`/session/${sid}/message`);
+  const msgs = await get(`/session/${sid}/message?limit=${MESSAGE_WINDOW}`);
   const store = msgStore(sid);
   store.order = [];
   store.info = {};
@@ -1122,7 +1135,8 @@ async function renderTimeline() {
     const parts = Object.values(store.parts[mid] || {}).sort((a, b) => (a.id < b.id ? -1 : 1));
     if (!info) continue;
     if (info.role === "user") {
-      inner.appendChild(renderUserMessage(info, parts));
+      const userNode = renderUserMessage(info, parts);
+      if (userNode) inner.appendChild(userNode);
       turnFiles = [];
     } else {
       inner.appendChild(renderAssistantMessage(info, parts));
@@ -1163,6 +1177,8 @@ function renderUserMessage(info, parts) {
   const wrap = el("div", "msg-user");
   const text = parts.filter((p) => p.type === "text" && !p.synthetic).map((p) => p.text || "").join("\n");
   const files = parts.filter((p) => p.type === "file");
+  // synthetic-only user messages (e.g. the post-compaction resume prompt) render nothing
+  if (!text && !files.length) return null;
   if (files.length) {
     const row = el("div", "attach-row");
     for (const f of files) {
@@ -1698,12 +1714,9 @@ function boardCardNode(c) {
   const card = el("div", "kanban-card");
   card.draggable = true;
   card.dataset.id = c.id;
-  card.dataset.column = c.column; // drives the per-status header color
-  const head = el("div", "kanban-card-head");
   const title = el("div", "kanban-card-title", esc(c.title));
   title.title = "Double-click to edit";
-  head.appendChild(title);
-  card.appendChild(head);
+  card.appendChild(title);
 
   const actions = el("div", "kanban-card-actions");
   // Cards in "In Progress" are already started, so they must not offer a

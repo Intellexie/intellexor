@@ -127,6 +127,11 @@ default — this covers vLLM, one-api, OpenRouter, Ollama, etc:
 - `permission` uses the rules format (`{"bash": {"git *": "allow", "*":
   "ask"}}`, last matching rule wins) but is currently inert — everything is
   allowed.
+- `compaction` controls context compaction (opencode-style): `"auto": false`
+  disables the automatic summarize-when-overflow pass, `"reserved"` overrides
+  the token reserve kept free below the model's context window (default: the
+  model's output limit, capped at 32000). `/compact` in the composer
+  summarizes the session on demand either way.
 
 ## HTTP API
 
@@ -143,6 +148,11 @@ values as bare JSON. Highlights:
   message: later messages are hidden (purged on the next prompt) and file
   changes made by them are restored from per-message backups taken before
   each edit/write/apply_patch
+- `POST /session/:id/summarize` — compact the context now (also the `/compact`
+  command): the conversation is summarized into a `summary: true` assistant
+  message and later requests replay history from it; runs automatically
+  before a step when the context overflows the model window (see
+  `compaction` config)
 - Events: `session.{created,updated,deleted,status,idle,error,diff}`,
   `message.{updated,removed,part.updated,part.delta}`,
   `permission.{asked,replied}`, `question.{asked,replied,rejected}`,

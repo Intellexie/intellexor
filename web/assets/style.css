@@ -390,19 +390,14 @@ pre:hover .copy-code { opacity:1; }
 .kanban-col.drag-over { border-color:var(--accent); }
 .kanban-col-head { display:flex; align-items:center; gap:8px; padding:10px 12px 6px; }
 .kanban-col-title { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); }
+/* per-status color belongs on the column header title, not the cards */
+.kanban-col[data-column="inprogress"] .kanban-col-title { color:var(--ok-fg); }
+.kanban-col[data-column="done"] .kanban-col-title { color:var(--purple-fg); }
 .kanban-count { font-size:11px; color:var(--text-faint); background:var(--layer-2); border-radius:999px; padding:1px 7px; }
 .kanban-cards { flex:1; min-height:40px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:6px 8px; }
 .kanban-card { position:relative; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-md); padding:8px 26px 8px 10px; font-size:13px; cursor:grab; word-break:break-word; }
 .kanban-card:hover { border-color:var(--border-base); }
 .kanban-card.dragging { opacity:0.45; }
-/* Card header strip: spans the full card width (negative margins cancel the
-   card padding) so a status color can paint it edge to edge. Open cards get
-   no background and keep the exact pre-header layout. */
-.kanban-card-head { margin:-8px -26px 0 -10px; padding:8px 26px 0 10px; border-radius:calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0 0; }
-.kanban-card[data-column="inprogress"] .kanban-card-head { background:var(--ok-bg); padding-bottom:8px; margin-bottom:-8px; }
-.kanban-card[data-column="inprogress"] .kanban-card-title { color:var(--ok-fg); }
-.kanban-card[data-column="done"] .kanban-card-head { background:var(--purple-bg); padding-bottom:8px; margin-bottom:-8px; }
-.kanban-card[data-column="done"] .kanban-card-title { color:var(--purple-fg); }
 .kanban-card-title { outline:none; }
 .kanban-card-title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; }
 .kanban-card-del { position:absolute; top:4px; right:4px; width:18px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--text-faint); opacity:0; }

@@ -10,11 +10,19 @@ import (
 )
 
 // BuildHistory converts stored messages/parts into provider wire messages.
+// History replays from the newest summary assistant message onward
+// (filterCompacted): everything a compaction summary covers is represented by
+// the summary itself.
 func BuildHistory(i *Instance, s *session.Session) []provider.Msg {
 	msgs, err := i.Mgr.LoadMessages(s)
 	if err != nil {
 		return nil
 	}
+	return historyFrom(filterCompacted(msgs))
+}
+
+// historyFrom converts an already-loaded message slice into wire messages.
+func historyFrom(msgs []session.WithParts) []provider.Msg {
 	var out []provider.Msg
 	for _, m := range msgs {
 		switch info := m.Info.(type) {
@@ -58,8 +66,13 @@ func BuildHistory(i *Instance, s *session.Session) []provider.Msg {
 					}
 					switch p.State.Status {
 					case "completed":
+						output := p.State.Output
+						if p.State.Time != nil && p.State.Time.Compacted != nil {
+							// output cleared by a prune pass (opencode)
+							output = prunedToolOutput
+						}
 						blocks = append(blocks, provider.ContentBlock{Type: "tool_use", ID: p.CallID, Name: p.Tool, Input: mustMarshal(p.State.Input)})
-						results = append(results, provider.ContentBlock{Type: "tool_result", ID: p.CallID, Name: p.Tool, Output: p.State.Output})
+						results = append(results, provider.ContentBlock{Type: "tool_result", ID: p.CallID, Name: p.Tool, Output: output})
 					case "error":
 						blocks = append(blocks, provider.ContentBlock{Type: "tool_use", ID: p.CallID, Name: p.Tool, Input: mustMarshal(p.State.Input)})
 						results = append(results, provider.ContentBlock{Type: "tool_result", ID: p.CallID, Name: p.Tool, Output: p.State.Error, IsError: true})

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -199,7 +200,19 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) *apiErr
 	if err != nil {
 		return err
 	}
-	msgs, err2 := in.Mgr.LoadMessages(sess)
+	// optional ?limit=N returns only the last N messages (the web UI uses
+	// this to keep long sessions snappy); absent means everything
+	var msgs []session.WithParts
+	var err2 error
+	if v := r.URL.Query().Get("limit"); v != "" {
+		limit, perr := strconv.Atoi(v)
+		if perr != nil || limit <= 0 {
+			return badRequest("invalid limit")
+		}
+		msgs, err2 = in.Mgr.LoadMessagesTail(sess, limit)
+	} else {
+		msgs, err2 = in.Mgr.LoadMessages(sess)
+	}
 	if err2 != nil {
 		return badRequest(err2.Error())
 	}
@@ -311,6 +324,16 @@ func (s *Server) sessionCommand(w http.ResponseWriter, r *http.Request) *apiErro
 	}
 	merged := mergedConfig(in.Directory)
 	template, cmdAgent, ok := resolveCommand(body.Command, merged.Commands)
+	if !ok && body.Command == "compact" {
+		// built-in action command: summarize the session now (opencode /compact)
+		wp, cerr := in.Compact(sess, "", "")
+		if cerr != nil {
+			return badRequest(cerr.Error())
+		}
+		in.Hub.Publish("command.executed", map[string]any{"name": body.Command, "sessionID": sess.ID, "arguments": body.Arguments})
+		writeJSON(w, 200, wp)
+		return nil
+	}
 	if !ok {
 		return notFound("Command not found: " + body.Command)
 	}
@@ -337,6 +360,27 @@ func (s *Server) sessionCommand(w http.ResponseWriter, r *http.Request) *apiErro
 		}
 	}
 	writeJSON(w, 200, session.WithParts{})
+	return nil
+}
+
+func (s *Server) sessionSummarize(w http.ResponseWriter, r *http.Request) *apiError {
+	// opencode v1 shape: POST /session/:id/summarize {providerID, modelID}
+	in, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
+	if err != nil {
+		return err
+	}
+	var body struct {
+		ProviderID string `json:"providerID"`
+		ModelID    string `json:"modelID"`
+	}
+	if e := decodeBody(r, &body); e != nil {
+		return e
+	}
+	wp, cerr := in.Compact(sess, body.ProviderID, body.ModelID)
+	if cerr != nil {
+		return badRequest(cerr.Error())
+	}
+	writeJSON(w, 200, wp)
 	return nil
 }
 

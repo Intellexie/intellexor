@@ -172,6 +172,10 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		if ctx.Err() != nil {
 			break
 		}
+		// opencode checks context overflow before every step (getMessages)
+		// and summarizes into a fresh summary when the window is exceeded
+		i.autoCompact(ctx, s, resolved, model, agentName)
+
 		asst = session.AssistantMessage{
 			ID:         util.ID("msg"),
 			SessionID:  s.ID,
@@ -201,6 +205,10 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 	}
 
 	_ = stepTools
+	// opencode prunes old tool outputs after each prompt
+	// (SessionCompaction.prune) so stale results stop occupying the window
+	i.Prune(s)
+
 	msgs, _ := i.Mgr.LoadMessages(s)
 	for j := len(msgs) - 1; j >= 0; j-- {
 		if a, ok := msgs[j].Info.(session.AssistantMessage); ok && a.ID == asst.ID {

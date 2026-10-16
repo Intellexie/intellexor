@@ -154,18 +154,39 @@ type LoadedSession struct {
 }
 
 func (m *Manager) LoadMessages(s *Session) ([]WithParts, error) {
-	return m.loadMessages(s, false)
+	return m.loadMessages(s, false, 0)
 }
 
 // LoadMessagesAll loads every stored message, including reverted ones.
 func (m *Manager) LoadMessagesAll(s *Session) ([]WithParts, error) {
-	return m.loadMessages(s, true)
+	return m.loadMessages(s, true, 0)
 }
 
-func (m *Manager) loadMessages(s *Session, includeReverted bool) ([]WithParts, error) {
+// LoadMessagesTail loads at most the last limit visible messages, trimming
+// from the front. limit <= 0 loads everything.
+func (m *Manager) LoadMessagesTail(s *Session, limit int) ([]WithParts, error) {
+	return m.loadMessages(s, false, limit)
+}
+
+func (m *Manager) loadMessages(s *Session, includeReverted bool, limit int) ([]WithParts, error) {
 	ids, err := m.st.ListMessages(s.ProjectID, s.ID)
 	if err != nil {
 		return nil, err
+	}
+	// a revert hides everything from the reverted message onward; the files
+	// stay on disk until the revert is undone or a new prompt purges them.
+	// Trimming the ID list up front keeps the tail limit relative to what is
+	// actually visible and skips decoding hidden messages entirely.
+	if !includeReverted && s.Revert != nil && s.Revert.MessageID != "" {
+		for j, id := range ids {
+			if id == s.Revert.MessageID {
+				ids = ids[:j]
+				break
+			}
+		}
+	}
+	if limit > 0 && len(ids) > limit {
+		ids = ids[len(ids)-limit:]
 	}
 	var out []WithParts
 	for _, id := range ids {
@@ -203,16 +224,6 @@ func (m *Manager) loadMessages(s *Session, includeReverted bool) ([]WithParts, e
 		}
 		sort.SliceStable(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
 		out = append(out, WithParts{Info: v, Parts: parts})
-	}
-	// a revert hides everything from the reverted message onward; the files
-	// stay on disk until the revert is undone or a new prompt purges them
-	if !includeReverted && s.Revert != nil && s.Revert.MessageID != "" {
-		for j, m := range out {
-			if messageID(m.Info) == s.Revert.MessageID {
-				out = out[:j]
-				break
-			}
-		}
 	}
 	return out, nil
 }
