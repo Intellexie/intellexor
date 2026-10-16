@@ -408,7 +408,16 @@ func (p *processor) finishStep(ev provider.StreamEvent) {
 	// step re-counts the prompt and every cached request re-counts the whole
 	// cached prefix.
 	p.s.Context = total
-	_ = i.Mgr.Save(p.s)
+	// persist via read-modify-write so a concurrent background writer (async
+	// title generation) is not clobbered by a blind save of the live object,
+	// then copy the fresh state back so the loop and events carry it
+	if fresh, err := i.Mgr.Update(p.s.ID, func(u *session.Session) {
+		u.Cost += cost
+		u.Tokens = accumulate(u.Tokens, tokens)
+		u.Context = total
+	}); err == nil {
+		*p.s = *fresh
+	}
 	// clients rebuild the context-usage circle from session.updated; without
 	// this the circle stays at 0% until a full page reload
 	i.Hub.Publish("session.updated", map[string]any{"sessionID": p.s.ID, "info": *p.s})

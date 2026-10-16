@@ -168,6 +168,8 @@ const ICONS = {
   restore: svg('<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>', 14),
   close: svg('<path d="M18 6 6 18M6 6l12 12"/>', 12),
   mic: svg('<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>'),
+  board: svg('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/>', 12),
+  trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>', 12),
 };
 
 /* ============================== tab progress ============================== */
@@ -407,6 +409,7 @@ function handleEvent(ev) {
         renderSidebar();
         renderComposer();
         renderTimeline();
+        renderBoard();
         updateTab();
       }).catch(() => {});
       break;
@@ -426,6 +429,7 @@ function handleEvent(ev) {
       // also re-render when a subagent shown in the current timeline changed
       // state — its task row carries a live progress indicator
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
+      renderBoard(); // in-progress cards show a spinner while their session is busy
       updateTab();
       break;
     }
@@ -439,6 +443,7 @@ function handleEvent(ev) {
       renderSidebar();
       renderComposer();
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
+      renderBoard(); // clear the spinner on the card this session was working on
       updateTab();
       // the agent finished working — chime, but only for real completions of
       // top-level sessions (subagents going idle just hand control back to
@@ -452,6 +457,7 @@ function handleEvent(ev) {
     case "session.error": {
       if (p.sessionID) S.errored.add(p.sessionID);
       renderSidebar();
+      renderBoard();
       updateTab();
       break;
     }
@@ -686,6 +692,7 @@ function renderTabs() {
   // the board is a fixed first tab, always present
   const boardTab = el("div", "tab" + (S.view === "board" ? " active" : ""));
   boardTab.title = "Kanban board";
+  boardTab.appendChild(el("span", "tab-icon", ICONS.board));
   boardTab.appendChild(el("span", "tab-title", "Board"));
   boardTab.onclick = () => navigate("/board");
   bar.appendChild(boardTab);
@@ -1618,6 +1625,10 @@ async function startCard(c) {
       parts: [{ type: "text", text: prompt }],
     });
     await refreshSession(sess.id).catch(() => {});
+    // Create a tab for the new session without activating it — like View,
+    // but the user stays on the board.
+    openTab(sess.id);
+    renderTabs();
     await loadBoard();
     renderBoard();
     toast(`Agent started on "${c.title}"`);
@@ -1648,6 +1659,9 @@ function boardCardsIn(column) {
 function renderBoard() {
   const board = $("#kanban");
   if (!board) return;
+  // don't rebuild over an active title edit — it would destroy the
+  // contenteditable node and lose the unsaved text
+  if (board.querySelector('.kanban-card-title[contenteditable="true"]')) return;
   board.innerHTML = "";
   for (const col of BOARD_COLUMNS) {
     board.appendChild(buildBoardColumn(col));
@@ -1714,9 +1728,16 @@ function boardCardNode(c) {
   const card = el("div", "kanban-card");
   card.draggable = true;
   card.dataset.id = c.id;
+  const head = el("div", "kanban-card-head");
+  // same busy indicator as the session tabs: a spinner while the linked
+  // session is actively working on this in-progress card
+  if (c.column === "inprogress" && c.sessionID && sessionBusy(c.sessionID)) {
+    head.appendChild(el("span", "spinner", ICONS.spinner));
+  }
   const title = el("div", "kanban-card-title", esc(c.title));
   title.title = "Double-click to edit";
-  card.appendChild(title);
+  head.appendChild(title);
+  card.appendChild(head);
 
   const actions = el("div", "kanban-card-actions");
   // Cards in "In Progress" are already started, so they must not offer a
@@ -1815,16 +1836,37 @@ async function moveBoardCard(id, column, beforeID) {
 
 /* ---------- composer ---------- */
 
-let composerText = "";
-let attachments = [];
+// Composer drafts are per session: every tab keeps its own unsent text (and
+// attachments), so switching tabs neither loses nor leaks what was typed.
+// The landing view (no session yet) drafts under the "" key.
+const composerDrafts = new Map(); // sessionID -> unsent text
+const composerFiles = new Map(); // sessionID -> [{type, mime, url, filename}]
+
+function draftKey() {
+  return S.current || "";
+}
+
+function composerDraft() {
+  return composerDrafts.get(draftKey()) || "";
+}
+
+function setComposerDraft(text) {
+  composerDrafts.set(draftKey(), text);
+}
+
+function currentAttachments() {
+  let list = composerFiles.get(draftKey());
+  if (!list) composerFiles.set(draftKey(), (list = []));
+  return list;
+}
 
 // Put text back into the chat box (used when reverting a message so the user
 // can edit and resend it).
 function setComposerText(text) {
-  composerText = text;
+  setComposerDraft(text);
   const ta = $("#composer-region textarea");
   if (ta) {
-    ta.value = composerText;
+    ta.value = text;
     autosize(ta);
     if (ta.value.startsWith("!")) ta.classList.add("shell-mode");
     else ta.classList.remove("shell-mode");
@@ -1903,9 +1945,9 @@ function buildComposerRegion(region) {
   const ta = el("textarea");
   ta.placeholder = "Ask anything, / for commands, @ for context…";
   ta.rows = 1;
-  ta.value = composerText;
+  ta.value = composerDraft();
   ta.oninput = () => {
-    composerText = ta.value;
+    setComposerDraft(ta.value);
     autosize(ta);
     if (ta.value.startsWith("!")) ta.classList.add("shell-mode");
     else ta.classList.remove("shell-mode");
@@ -2008,18 +2050,18 @@ async function abort() {
 }
 
 function isShell() {
-  return composerText.startsWith("!");
+  return composerDraft().startsWith("!");
 }
 
 async function doSend() {
-  const text = composerText.trim();
+  const text = composerDraft().trim();
   const isCmd = isShell();
-  if (!text && !attachments.length) return;
-  composerText = "";
+  if (!text && !currentAttachments().length) return;
+  setComposerDraft("");
   const parts = [];
   if (text) parts.push({ type: "text", text });
-  for (const a of attachments) parts.push(a);
-  attachments = [];
+  for (const a of currentAttachments()) parts.push(a);
+  composerFiles.delete(draftKey());
 
   try {
     let sid = S.current;
@@ -2070,7 +2112,7 @@ async function onFilesPicked(files) {
       rd.onload = () => res(rd.result);
       rd.readAsDataURL(f);
     });
-    attachments.push({ type: "file", mime: f.type || "text/plain", url: dataUrl, filename: f.name });
+    currentAttachments().push({ type: "file", mime: f.type || "text/plain", url: dataUrl, filename: f.name });
   }
   renderComposerRegion();
   const ta = $("#composer-region textarea");
@@ -2078,7 +2120,7 @@ async function onFilesPicked(files) {
 }
 
 function renderAttachChips(row) {
-  for (const a of attachments) {
+  for (const a of currentAttachments()) {
     const chip = el("div", "attach-chip");
     if (a.mime && a.mime.startsWith("image/")) {
       chip.innerHTML = `<img src="${esc(a.url)}"><span>${esc(a.filename)}</span>`;
@@ -2087,7 +2129,7 @@ function renderAttachChips(row) {
     }
     const x = el("button", "", "✕");
     x.onclick = () => {
-      attachments = attachments.filter((t) => t !== a);
+      composerFiles.set(draftKey(), currentAttachments().filter((t) => t !== a));
       renderComposerRegion();
     };
     chip.appendChild(x);
@@ -2298,7 +2340,18 @@ function buildTodosDock(todos) {
   const box = el("div", "todos");
   const done = todos.filter((t) => t.status === "completed").length;
   const head = el("div", "t-head");
-  head.innerHTML = `<span>Todos</span><span>${done} of ${todos.length} todos completed</span>`;
+  head.innerHTML = `<span>Todos</span>`;
+  const count = el("span", "t-count", `${done} of ${todos.length} todos completed`);
+  // once the agent is idle (no tab progress), the list can be cleared
+  if (S.current && !sessionBusy(S.current)) {
+    const clear = el("button", "t-clear", ICONS.trash);
+    clear.title = "Clear todos";
+    clear.onclick = async () => {
+      await del(`/session/${S.current}/todo`).catch((e) => toast(e.message, true));
+    };
+    count.appendChild(clear);
+  }
+  head.appendChild(count);
   box.appendChild(head);
   for (const t of todos) {
     const item = el("div", "t-item" + (t.status === "completed" ? " done" : t.status === "in_progress" ? " current" : ""));
@@ -2411,7 +2464,7 @@ function moveCmdSel(d) {
 function pickCmd(ta, c) {
   closeCmdMenu();
   if (c.ui) {
-    composerText = "";
+    setComposerDraft("");
     ta.value = "";
     autosize(ta);
     runUICommand(c.name);
@@ -2419,13 +2472,13 @@ function pickCmd(ta, c) {
   }
   const takesArgs = /\$ARGUMENTS|\$1\b/.test(c.template || "");
   if (takesArgs) {
-    composerText = "/" + c.name + " ";
-    ta.value = composerText;
+    setComposerDraft("/" + c.name + " ");
+    ta.value = composerDraft();
     ta.focus();
     ta.selectionStart = ta.selectionEnd = ta.value.length;
     autosize(ta);
   } else {
-    composerText = "";
+    setComposerDraft("");
     ta.value = "";
     autosize(ta);
     runCommand(c.name, "");
@@ -2767,10 +2820,11 @@ async function boot() {
     IntellexorMic.init({
       onUpdate: () => renderComposerRegion(),
       onText: (text) => {
-        composerText = (composerText ? composerText.trimEnd() + " " : "") + text;
+        const cur = composerDraft();
+        setComposerDraft((cur ? cur.trimEnd() + " " : "") + text);
         const ta = $("#composer-region textarea");
         if (ta) {
-          ta.value = composerText;
+          ta.value = composerDraft();
           autosize(ta);
           renderCmdMenu(ta);
           ta.focus();

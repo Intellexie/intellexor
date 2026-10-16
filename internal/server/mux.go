@@ -68,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	handle("PATCH /session/{sessionID}", s.patchSession)
 	handle("GET /session/{sessionID}/children", s.sessionChildren)
 	handle("GET /session/{sessionID}/todo", s.sessionTodo)
+	handle("DELETE /session/{sessionID}/todo", s.sessionTodoDelete)
 	handle("GET /session/{sessionID}/diff", s.sessionDiff)
 	handle("GET /session/{sessionID}/message", s.sessionMessages)
 	handle("DELETE /session/{sessionID}/message/{messageID}", s.deleteSessionMessage)

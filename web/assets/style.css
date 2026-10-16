@@ -155,6 +155,7 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .tab .tab-title { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tab .dot { width:6px; height:6px; border-radius:50%; flex:0 0 6px; }
 .tab .spinner { width:12px; height:12px; flex:0 0 12px; color:var(--accent); }
+.tab .tab-icon { display:flex; align-items:center; flex:0 0 auto; }
 .tab-close { display:flex; align-items:center; justify-content:center; width:16px; height:16px; flex:0 0 16px; border-radius:4px; color:var(--text-faint); opacity:0; }
 .tab:hover .tab-close, .tab.active .tab-close { opacity:1; }
 .tab-close:hover { color:var(--text-base); background:var(--surface-active); }
@@ -296,6 +297,9 @@ pre:hover .copy-code { opacity:1; }
 .btn.primary:hover { filter:brightness(1.08); }
 .todos { max-width:800px; margin:0 auto 8px; border:1px solid var(--border-weak); border-radius:var(--radius-lg); padding:10px 12px; background:var(--layer-1); }
 .todos .t-head { display:flex; justify-content:space-between; font-size:12.5px; color:var(--text-muted); margin-bottom:6px; }
+.todos .t-count { display:inline-flex; align-items:center; gap:6px; }
+.todos .t-clear { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:4px; color:var(--text-faint); }
+.todos .t-clear:hover { color:var(--err-fg); background:var(--surface-hover); }
 .todos .t-item { display:flex; gap:8px; align-items:center; font-size:13px; padding:2px 0; }
 .todos .t-item .tbox { width:14px; height:14px; border:1.5px solid var(--border-base); border-radius:4px; flex:0 0 14px; display:inline-flex; align-items:center; justify-content:center; }
 .todos .t-item.done { color:var(--text-faint); text-decoration:line-through; }
@@ -398,6 +402,9 @@ pre:hover .copy-code { opacity:1; }
 .kanban-card { position:relative; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-md); padding:8px 26px 8px 10px; font-size:13px; cursor:grab; word-break:break-word; }
 .kanban-card:hover { border-color:var(--border-base); }
 .kanban-card.dragging { opacity:0.45; }
+.kanban-card-head { display:flex; align-items:flex-start; gap:6px; min-width:0; }
+.kanban-card-head .kanban-card-title { flex:1; min-width:0; }
+.kanban-card .spinner { width:12px; height:12px; flex:0 0 12px; margin-top:2px; color:var(--accent); }
 .kanban-card-title { outline:none; }
 .kanban-card-title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; }
 .kanban-card-del { position:absolute; top:4px; right:4px; width:18px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--text-faint); opacity:0; }

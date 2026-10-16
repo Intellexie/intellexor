@@ -181,6 +181,22 @@ func (s *Server) sessionTodo(w http.ResponseWriter, r *http.Request) *apiError {
 	return nil
 }
 
+// sessionTodoDelete clears the session's todo list and notifies all connected
+// clients so their docks re-render.
+func (s *Server) sessionTodoDelete(w http.ResponseWriter, r *http.Request) *apiError {
+	in, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
+	if err != nil {
+		return err
+	}
+	todos := []map[string]any{}
+	if err := in.Mgr.WriteKV("todo", sess.ID, todos); err != nil {
+		return badRequest(err.Error())
+	}
+	in.Hub.Publish("todo.updated", map[string]any{"sessionID": sess.ID, "todos": todos})
+	writeJSON(w, 200, todos)
+	return nil
+}
+
 func (s *Server) sessionDiff(w http.ResponseWriter, r *http.Request) *apiError {
 	in, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
 	if err != nil {

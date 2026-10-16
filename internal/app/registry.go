@@ -227,9 +227,9 @@ Rules:
 - Respond with the title only`
 
 // generateTitle sets a readable fallback title immediately, then asks the
-// configured small model (config "small_model") for a proper title. When no
-// small model is configured or the request fails, the truncated first user
-// message stays as the title.
+// configured small model (config "small_model") for a proper title, falling
+// back to the model used for the prompt itself. Only when both fail does the
+// truncated first user message stay as the title.
 func (i *Instance) generateTitle(s *session.Session, userParts []session.Part, resolved *provider.Resolved, model provider.Model) {
 	text := ""
 	for _, p := range userParts {
@@ -272,8 +272,9 @@ func (i *Instance) generateTitle(s *session.Session, userParts []session.Part, r
 }
 
 // smallModelTitle asks the small model for a session title. It prefers the
-// "small_model" config entry ("provider/model") and falls back to the model
-// used for the prompt itself.
+// "small_model" config entry ("provider/model"); when none is configured,
+// unresolvable, or the request fails or comes back empty, it falls back to
+// the model the prompt itself uses.
 func (i *Instance) smallModelTitle(text string, resolved *provider.Resolved, model provider.Model) string {
 	if sm := config.Merge(i.Directory).SmallModel; sm != "" {
 		if pid, mid, ok := strings.Cut(sm, "/"); ok {
@@ -285,10 +286,17 @@ func (i *Instance) smallModelTitle(text string, resolved *provider.Resolved, mod
 				}
 			}
 			if err == nil {
-				resolved, model = r, m
+				if out := titleCompletion(text, r, m); out != "" {
+					return out
+				}
 			}
 		}
 	}
+	return titleCompletion(text, resolved, model)
+}
+
+// titleCompletion runs the title prompt against one model; "" on any failure.
+func titleCompletion(text string, resolved *provider.Resolved, model provider.Model) string {
 	if resolved == nil || model.ID == "" {
 		return ""
 	}
@@ -317,8 +325,6 @@ func completeText(ctx context.Context, resolved *provider.Resolved, model provid
 	}
 	var sb strings.Builder
 	for ev := range ch {
-		if ev.Type == "error" {
-		}
 		switch ev.Type {
 		case "text-delta":
 			sb.WriteString(ev.Text)

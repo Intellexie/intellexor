@@ -263,10 +263,16 @@ func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolv
 		tokens.Total = &total
 		asst.Tokens = tokens
 		asst.Cost = usageCost(model, *usage)
-		// the summary call is billed against the session like any other step
+		// the summary call is billed against the session like any other step —
+		// read-modify-write so a concurrent title save is not clobbered
 		s.Cost += asst.Cost
 		s.Tokens = accumulate(s.Tokens, tokens)
-		_ = i.Mgr.Save(s)
+		if fresh, err := i.Mgr.Update(s.ID, func(u *session.Session) {
+			u.Cost += asst.Cost
+			u.Tokens = accumulate(u.Tokens, tokens)
+		}); err == nil {
+			*s = *fresh
+		}
 	}
 	if ctx.Err() != nil {
 		asst.Error = session.NewNamedError("MessageAbortedError", map[string]any{"message": "Message aborted"})
