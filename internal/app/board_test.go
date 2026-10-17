@@ -17,14 +17,15 @@ import (
 )
 
 // linkCard creates a card and links it to the session (as the web UI does
-// when a card is started from the board).
+// when a card is started from the board). Cards are always created in open,
+// so a non-open column is reached with a move.
 func linkCard(t *testing.T, i *Instance, s *session.Session, title, column string) board.Card {
 	t.Helper()
-	card, err := board.Add(store.ProjectID(i.Directory), title, column)
+	card, err := board.Add(store.ProjectID(i.Directory), title, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := board.Update(store.ProjectID(i.Directory), card.ID, nil, nil, nil, &s.ID); err != nil {
+	if _, err := board.Update(store.ProjectID(i.Directory), card.ID, nil, &column, nil, &s.ID); err != nil {
 		t.Fatal(err)
 	}
 	return card
@@ -78,7 +79,7 @@ func TestBoardToolMovesLinkedCardToDone(t *testing.T) {
 func TestBoardToolListAndExplicitCard(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	linked := linkCard(t, i, s, "Linked task", "inprogress")
-	other, err := board.Add(store.ProjectID(i.Directory), "Other task", "open")
+	other, err := board.Add(store.ProjectID(i.Directory), "Other task", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,5 +229,80 @@ func TestBoardToolIsAdvertised(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("board tool missing from tool defs")
+	}
+}
+
+// Cards can only be added to the open column — the tool rejects other
+// columns and lands cards in open otherwise.
+func TestBoardToolAddOnlyOpen(t *testing.T) {
+	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	bt, ok := registryFor(i).Get("board")
+	if !ok {
+		t.Fatal("board tool not registered")
+	}
+	ctx := &tool.Ctx{SessionID: s.ID, Directory: i.Directory}
+
+	if _, err := bt.Run(ctx, json.RawMessage(`{"action":"add","title":"Straight to done","column":"done"}`)); err == nil {
+		t.Fatal("expected an error adding a card to the done column")
+	}
+	res, err := bt.Run(ctx, json.RawMessage(`{"action":"add","title":"Follow-up"}`))
+	if err != nil {
+		t.Fatalf("add without column failed: %v", err)
+	}
+	cards, err := board.Get(store.ProjectID(i.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 || cards[0].Column != "open" || cards[0].Title != "Follow-up" {
+		t.Fatalf("cards = %+v, want one open card %q", cards, res.Title)
+	}
+}
+
+// Starting a card prompts the fresh session with the card's title as the
+// user message and its attachments as file parts (the composer's shape).
+func TestStartCardPromptsAttachments(t *testing.T) {
+	i, _ := setupAbortTest(t, textSSE("Working on it."))
+	projectID := store.ProjectID(i.Directory)
+	atts := []board.Attachment{
+		{Type: "file", MIME: "image/png", URL: "data:image/png;base64,AAAA", Filename: "shot.png"},
+	}
+	card, err := board.Add(projectID, "Fix the login page", atts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessID, err := startCard(i, projectID, card.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := i.Mgr.Find(sessID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 5*time.Second, func() bool { return watcherReplied(i, sess, "Working on it.") })
+
+	msgs, err := i.Mgr.LoadMessages(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, file := "", false
+	for _, m := range msgs {
+		if _, ok := m.Info.(session.UserMessage); !ok {
+			continue
+		}
+		for _, p := range m.Parts {
+			switch p.Type {
+			case "text":
+				text += p.Text
+			case "file":
+				file = p.Mime == "image/png" && p.URL == "data:image/png;base64,AAAA" && p.Filename == "shot.png"
+			}
+		}
+	}
+	if text != "Fix the login page" {
+		t.Fatalf("user text = %q, want the card title", text)
+	}
+	if !file {
+		t.Fatal("card attachment was not prompted as a file part")
 	}
 }

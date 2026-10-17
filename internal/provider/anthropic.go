@@ -130,7 +130,7 @@ func (c *Client) streamAnthropic(ctx context.Context, req Request) (<-chan Strea
 		blocks := map[int]*blkState{}
 		var usage Usage
 		var finish string
-		err := postSSE(ctx, c.Resolved.BaseURL+"/messages", c.anthropicHeaders(), body, func(event string, data []byte) (bool, error) {
+		err := postSSE(ctx, c.Resolved.BaseURL+"/messages", c.anthropicHeaders(), body, c.streamIdle(), func(event string, data []byte) (bool, error) {
 			var v map[string]json.RawMessage
 			if err := json.Unmarshal(data, &v); err != nil {
 				return true, nil

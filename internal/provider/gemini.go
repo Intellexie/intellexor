@@ -110,7 +110,7 @@ func (c *Client) streamGemini(ctx context.Context, req Request) (<-chan StreamEv
 		textOpen := false
 		var usage Usage
 		var finish string
-		err := postSSE(ctx, url, map[string]string{}, body, func(event string, data []byte) (bool, error) {
+		err := postSSE(ctx, url, map[string]string{}, body, c.streamIdle(), func(event string, data []byte) (bool, error) {
 			var chunk struct {
 				Candidates []struct {
 					Content struct {

@@ -183,7 +183,7 @@ func (c *Client) streamOpenAI(ctx context.Context, req Request) (<-chan StreamEv
 			tcOrder = nil
 		}
 
-		err := postSSE(ctx, url, c.openaiHeaders(), body, func(event string, data []byte) (bool, error) {
+		err := postSSE(ctx, url, c.openaiHeaders(), body, c.streamIdle(), func(event string, data []byte) (bool, error) {
 			var chunk struct {
 				Choices []struct {
 					Delta struct {

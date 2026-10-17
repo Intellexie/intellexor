@@ -81,6 +81,7 @@ func New(dir string) *Instance {
 		locks:     map[string]*sync.Mutex{},
 		cancels:   map[string]context.CancelFunc{},
 	}
+	registerInstance(inst)
 	return inst
 }
 

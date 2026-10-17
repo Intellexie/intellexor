@@ -162,8 +162,12 @@ func (m *Manager) LoadMessagesAll(s *Session) ([]WithParts, error) {
 	return m.loadMessages(s, true, 0)
 }
 
-// LoadMessagesTail loads at most the last limit visible messages, trimming
-// from the front. limit <= 0 loads everything.
+// LoadMessagesTail loads the last visible display units, trimming whole
+// messages from the front. The budget counts chat content, not message
+// records: a user prompt, a response text, a thinking block and a tool call
+// are each one unit (see displayUnits). A message is never split across the
+// window edge, so the result can exceed the limit by the oldest kept
+// message's units. limit <= 0 loads everything.
 func (m *Manager) LoadMessagesTail(s *Session, limit int) ([]WithParts, error) {
 	return m.loadMessages(s, false, limit)
 }
@@ -185,47 +189,99 @@ func (m *Manager) loadMessages(s *Session, includeReverted bool, limit int) ([]W
 			}
 		}
 	}
-	if limit > 0 && len(ids) > limit {
-		ids = ids[len(ids)-limit:]
-	}
+	// with a limit the walk starts at the newest message and moves back until
+	// the unit budget is spent, so only the returned window is ever decoded
 	var out []WithParts
+	if limit > 0 {
+		units := 0
+		for i := len(ids) - 1; i >= 0 && units < limit; i-- {
+			wp, ok := m.decodeMessage(s, ids[i])
+			if !ok {
+				continue
+			}
+			units += displayUnits(wp)
+			out = append(out, wp)
+		}
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+		return out, nil
+	}
 	for _, id := range ids {
-		var info json.RawMessage
-		if err := store.ReadJSON(m.st.MessageFile(s.ProjectID, s.ID, id), &info); err != nil {
+		wp, ok := m.decodeMessage(s, id)
+		if !ok {
 			continue
 		}
-		var probe struct {
-			Role string `json:"role"`
-		}
-		_ = json.Unmarshal(info, &probe)
-		var v any
-		switch probe.Role {
-		case "assistant":
-			var a AssistantMessage
-			if err := json.Unmarshal(info, &a); err != nil {
-				continue
-			}
-			v = a
-		default:
-			var u UserMessage
-			if err := json.Unmarshal(info, &u); err != nil {
-				continue
-			}
-			v = u
-		}
-		partIDs, _ := m.st.ListParts(s.ProjectID, s.ID, id)
-		var parts []Part
-		for _, pid := range partIDs {
-			var p Part
-			if err := store.ReadJSON(m.st.PartFile(s.ProjectID, s.ID, id, pid), &p); err != nil {
-				continue
-			}
-			parts = append(parts, p)
-		}
-		sort.SliceStable(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
-		out = append(out, WithParts{Info: v, Parts: parts})
+		out = append(out, wp)
 	}
 	return out, nil
+}
+
+// decodeMessage reads one stored message with its parts, sorted by part ID.
+func (m *Manager) decodeMessage(s *Session, id string) (WithParts, bool) {
+	var info json.RawMessage
+	if err := store.ReadJSON(m.st.MessageFile(s.ProjectID, s.ID, id), &info); err != nil {
+		return WithParts{}, false
+	}
+	var probe struct {
+		Role string `json:"role"`
+	}
+	_ = json.Unmarshal(info, &probe)
+	var v any
+	switch probe.Role {
+	case "assistant":
+		var a AssistantMessage
+		if err := json.Unmarshal(info, &a); err != nil {
+			return WithParts{}, false
+		}
+		v = a
+	default:
+		var u UserMessage
+		if err := json.Unmarshal(info, &u); err != nil {
+			return WithParts{}, false
+		}
+		v = u
+	}
+	partIDs, _ := m.st.ListParts(s.ProjectID, s.ID, id)
+	var parts []Part
+	for _, pid := range partIDs {
+		var p Part
+		if err := store.ReadJSON(m.st.PartFile(s.ProjectID, s.ID, id, pid), &p); err != nil {
+			continue
+		}
+		parts = append(parts, p)
+	}
+	sort.SliceStable(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
+	return WithParts{Info: v, Parts: parts}, true
+}
+
+// displayUnits is the window accounting rule, mirroring what the web UI
+// renders: a user prompt counts 1, and an assistant message contributes one
+// unit per response text, thinking block and tool call. Auxiliary parts
+// (step markers, patches, file chips, ...) and content that renders as
+// nothing (synthetic/ignored text) are free, so they never push visible
+// messages out of the window.
+func displayUnits(wp WithParts) int {
+	if _, ok := wp.Info.(UserMessage); ok {
+		for _, p := range wp.Parts {
+			if p.Type == "file" || (p.Type == "text" && !p.Synthetic) {
+				return 1
+			}
+		}
+		return 0
+	}
+	n := 0
+	for _, p := range wp.Parts {
+		switch p.Type {
+		case "text":
+			if !p.Synthetic && !p.Ignored {
+				n++
+			}
+		case "reasoning", "tool":
+			n++
+		}
+	}
+	return n
 }
 
 func (m *Manager) SaveMessage(s *Session, info any) error {

@@ -216,8 +216,10 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) *apiErr
 	if err != nil {
 		return err
 	}
-	// optional ?limit=N returns only the last N messages (the web UI uses
-	// this to keep long sessions snappy); absent means everything
+	// optional ?limit=N returns only the last N display units — a user prompt,
+	// response text, thinking block or tool call each count as one, whole
+	// messages are kept (the web UI uses this to keep long sessions snappy);
+	// absent means everything
 	var msgs []session.WithParts
 	var err2 error
 	if v := r.URL.Query().Get("limit"); v != "" {

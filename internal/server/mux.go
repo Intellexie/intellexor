@@ -100,6 +100,13 @@ func (s *Server) Handler() http.Handler {
 	handle("PATCH /board/card/{cardID}", s.patchBoardCard)
 	handle("DELETE /board/card/{cardID}", s.deleteBoardCard)
 
+	// cron jobs (scheduled prompts that start fresh sessions)
+	handle("GET /cron", s.listCron)
+	handle("POST /cron", s.createCron)
+	handle("GET /cron/preview", s.previewCron)
+	handle("PATCH /cron/{cronID}", s.patchCron)
+	handle("DELETE /cron/{cronID}", s.deleteCron)
+
 	// provider / auth / config
 	handle("GET /provider", func(w http.ResponseWriter, r *http.Request) *apiError { providersHandler(s)(w, r); return nil })
 	handle("GET /provider/auth", func(w http.ResponseWriter, r *http.Request) *apiError { providerAuthHandler(s)(w, r); return nil })

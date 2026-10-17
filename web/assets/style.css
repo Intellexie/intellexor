@@ -11,7 +11,7 @@ html[data-color-scheme="light"] {
   --bg-base:var(--v2-grey-50); --bg-deep:var(--v2-grey-100);
   --layer-1:var(--v2-grey-100); --layer-2:var(--v2-grey-200); --layer-3:var(--v2-grey-300); --layer-4:var(--v2-grey-400);
   --text-base:var(--v2-grey-1100); --text-muted:var(--v2-grey-700); --text-faint:var(--v2-grey-600); --text-inverse:var(--v2-grey-50);
-  --border-weak:#e5e5e5; --border-base:#dbdbdb;
+  --border-weak:#e5e5e5; --border-base:#dbdbdb; --border-strong:#c4c4c4;
   --accent:#3b5cf6; --accent-fg:#ffffff;
   --surface-hover:rgba(0,0,0,0.04); --surface-active:rgba(0,0,0,0.06);
   --ok-bg:#e7f9ea; --ok-fg:#198b43; --warn-bg:#fefaec; --warn-fg:#cb9f34; --err-bg:#fceceb; --err-fg:#b82d35;
@@ -26,7 +26,7 @@ html[data-color-scheme="dark"] {
   --bg-base:var(--v2-grey-1100); --bg-deep:var(--v2-grey-1200);
   --layer-1:var(--v2-grey-1000); --layer-2:var(--v2-grey-900); --layer-3:var(--v2-grey-800); --layer-4:var(--v2-grey-700);
   --text-base:var(--v2-grey-100); --text-muted:var(--v2-grey-600); --text-faint:var(--v2-grey-600); --text-inverse:var(--v2-grey-1200);
-  --border-weak:#282828; --border-base:#3a3a3a;
+  --border-weak:#282828; --border-base:#3a3a3a; --border-strong:#2b2b2b;
   --accent:#a2bcff; --accent-fg:#0b0f2a;
   --surface-hover:rgba(255,255,255,0.05); --surface-active:rgba(255,255,255,0.08);
   --ok-bg:rgba(18,201,5,0.12); --ok-fg:#3ddc68; --warn-bg:rgba(252,213,58,0.12); --warn-fg:#fcd53a; --err-bg:rgba(252,83,58,0.12); --err-fg:#ff7a63;
@@ -140,6 +140,44 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .sidebar-backdrop { position:fixed; inset:0; z-index:65; background:rgba(0,0,0,0.45); }
 @media (min-width: 768px) { .sidebar-backdrop { display:none; } }
 
+/* ---------- board side panel (rail toggle) ---------- */
+/* Left-hand companion to the sidebar: the Open + In Progress cards, one line
+   each, full text in a hover tooltip. Sits between the rail and the sidebar —
+   opening it collapses the sidebar (see setBoardPanel in app.js). Collapses
+   inline on desktop like the sidebar; on small screens it slides in as an
+   overlay drawer from the left. */
+.board-panel { width:300px; flex:0 0 300px; min-width:0; background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); border-radius:var(--radius-lg); margin:8px 0 8px 8px; display:flex; flex-direction:column; overflow:hidden; transition:flex-basis .18s ease, margin .18s ease; }
+.board-panel-head { display:flex; align-items:center; gap:8px; padding:14px 16px 8px; }
+.board-panel-title { font-size:12px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.board-panel-count { font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--text-muted); background:var(--layer-2); border:1px solid var(--border-weak); border-radius:999px; padding:1px 8px; }
+.board-panel-expand { margin-left:auto; width:22px; height:22px; display:flex; align-items:center; justify-content:center; border-radius:var(--radius-md); color:var(--text-muted); }
+.board-panel-expand:hover { color:var(--text-base); background:var(--surface-hover); }
+.board-panel-list { flex:1; overflow-y:auto; padding:0 8px 12px; }
+.board-panel-group { padding-top:10px; }
+.board-panel-group-label { display:flex; align-items:center; gap:7px; padding:4px 8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); }
+/* status dot inherits the group label color, like the board columns */
+.board-panel-group-label::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; opacity:0.85; }
+.board-panel-group[data-column="inprogress"] .board-panel-group-label { color:var(--ok-fg); }
+.board-panel-group-count { margin-left:auto; font-size:10px; font-variant-numeric:tabular-nums; color:var(--text-faint); }
+.board-panel-card { display:flex; align-items:center; gap:8px; padding:7px 8px; border-radius:var(--radius-md); cursor:pointer; }
+.board-panel-card:hover { background:var(--surface-hover); }
+.board-panel-dot { width:6px; height:6px; border-radius:50%; flex:0 0 6px; background:var(--text-faint); }
+.board-panel-dot.inprogress { background:var(--ok-fg); }
+/* the 1-line rule: truncate here, show everything else in the hover tooltip */
+.board-panel-card-title { flex:1; min-width:0; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.board-panel-schedule { flex:none; font-size:10.5px; line-height:1; color:var(--accent); font-variant-numeric:tabular-nums; }
+.board-panel-card .spinner { width:12px; height:12px; flex:0 0 12px; color:var(--accent); }
+.board-panel-empty { padding:4px 8px 2px; font-size:12px; color:var(--text-faint); }
+.board-panel-tip { position:fixed; z-index:80; max-width:320px; background:var(--bg-base); border:1px solid var(--border-base); border-radius:var(--radius-lg); box-shadow:var(--shadow); padding:8px 10px; font-size:12.5px; pointer-events:none; }
+.board-panel-tip-head { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+.board-panel-tip-col { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-faint); }
+.board-panel-tip-body { white-space:pre-wrap; word-break:break-word; line-height:1.45; color:var(--text-base); }
+
+/* collapsed board panel (desktop) — the rail toggle restores it */
+@media (min-width: 768px) {
+  #app.board-panel-collapsed .board-panel { flex-basis:0; width:0; margin-left:0; }
+}
+
 /* ---------- main ---------- */
 .main { flex:1; min-width:0; background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); display:flex; flex-direction:column; position:relative; }
 
@@ -222,25 +260,44 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .copy-code { position:absolute; top:6px; right:6px; font-size:11px; color:var(--text-faint); padding:3px 6px; border-radius:4px; background:var(--layer-2); opacity:0; }
 pre:hover .copy-code { opacity:1; }
 
-/* reasoning */
+/* reasoning — collapsed "🧠 Thinking [N] ..." header, click to expand */
 .reasoning { margin:10px 0; border-left:2px solid var(--border-base); padding-left:12px; color:var(--text-muted); }
-.reasoning .rlabel { font-size:12px; font-weight:600; margin-bottom:4px; }
+.reasoning-row { display:flex; align-items:center; gap:6px; padding:3px 6px; margin-left:-6px; border-radius:var(--radius-md); cursor:pointer; font-size:13px; color:var(--text-muted); user-select:none; }
+.reasoning-row:hover { background:var(--surface-hover); }
+.ricon { font-size:12px; line-height:1; }
+.reasoning-row .rcount { font-size:12px; color:var(--text-faint); font-family:var(--font-mono); }
+.reasoning-body { margin-top:6px; }
+
+/* animated ellipsis dots (after "Thinking" while it is still streaming) */
+.dots { display:inline-flex; align-items:center; gap:3px; }
+.dots i { width:4px; height:4px; border-radius:50%; background:var(--text-faint); }
+.dots.animate i { animation:dotBounce 1.2s infinite ease-in-out; }
+.dots.animate i:nth-child(2) { animation-delay:.15s; }
+.dots.animate i:nth-child(3) { animation-delay:.3s; }
+@keyframes dotBounce { 0%,60%,100% { transform:translateY(0); opacity:.35; } 30% { transform:translateY(-3px); opacity:1; } }
+
+/* busy placeholder row (🧠 Thinking …) */
+.thinking-row { display:flex; align-items:center; gap:6px; padding:4px 0; }
+
+/* agent · model label embedded at the right end of a thinking bar; shrinks
+   with an ellipsis so a long model id cannot push the row wider */
+.think-meta { margin-left:auto; padding-left:12px; font-size:12px; color:var(--text-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
 
 /* shimmer / thinking */
 .shimmer { color:var(--text-muted); font-size:13px; background:linear-gradient(90deg, var(--text-faint) 25%, var(--text-base) 50%, var(--text-faint) 75%); background-size:200% 100%; -webkit-background-clip:text; background-clip:text; color:transparent; animation:shimmer 1.8s infinite linear; }
 @keyframes shimmer { 0% { background-position:200% 0; } 100% { background-position:-200% 0; } }
 
-/* tool parts */
-.tool { margin:8px 0; border-radius:var(--radius-md); overflow:hidden; }
-.tool-row { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:var(--radius-md); cursor:pointer; color:var(--text-muted); }
+/* tool parts — same collapsed-row design as reasoning: 🔨 Name [sub] ... */
+.tool { margin:10px 0; border-left:2px solid var(--border-base); padding-left:12px; color:var(--text-muted); }
+.tool-row { display:flex; align-items:center; gap:6px; padding:3px 6px; margin-left:-6px; border-radius:var(--radius-md); cursor:pointer; font-size:13px; color:var(--text-muted); user-select:none; }
 .tool-row:hover { background:var(--surface-hover); }
-.tool-row .tname { font-size:13px; color:var(--text-base); }
-.tool-row .tsub { font-size:12.5px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tool-row .tname { font-size:13px; color:var(--text-muted); }
+.tool-row .tsub { font-size:12px; color:var(--text-faint); font-family:var(--font-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tool-row .args { font-size:12px; color:var(--text-faint); font-family:var(--font-mono); white-space:nowrap; overflow:hidden; }
 .tool-row .spacer { flex:1; }
 .changes { font-size:12px; font-family:var(--font-mono); white-space:nowrap; }
 .changes .add { color:var(--diff-add); } .changes .del { color:var(--diff-del); }
-.tool-body { padding:8px 12px 8px 34px; }
+.tool-body { margin-top:6px; }
 .tool pre { background:var(--code-bg); border-radius:var(--radius-md); padding:10px 12px; overflow-x:auto; font-family:var(--font-mono); font-size:12.5px; line-height:1.55; max-height:420px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; }
 .tool .err-card { border:1px solid var(--err-fg); background:var(--err-bg); border-radius:var(--radius-md); padding:10px 12px; color:var(--err-fg); font-size:13px; white-space:pre-wrap; word-break:break-word; }
 .tool.error .tname { color:var(--err-fg); }
@@ -274,7 +331,7 @@ pre:hover .copy-code { opacity:1; }
 .composer-region { flex:0 0 auto; padding:0 16px 12px; }
 .composer-inner { max-width:800px; margin:0 auto; }
 .shell-mode { font-family:var(--font-mono); color:#fcd53a; }
-.composer { border:1px solid var(--border-base); border-radius:var(--radius-xl2); background:var(--bg-base); }
+.composer { border:1px solid var(--border-strong); border-radius:var(--radius-xl2); background:var(--bg-base); }
 .composer:focus-within { border-color:var(--text-faint); }
 .composer textarea { width:100%; border:none; outline:none; background:transparent; resize:none; padding:12px 14px 4px; max-height:240px; font-size:14px; line-height:150%; }
 .composer textarea::placeholder { color:var(--text-faint); }
@@ -308,6 +365,8 @@ pre:hover .copy-code { opacity:1; }
 .btn.secondary:hover { background:var(--surface-hover); }
 .btn.primary { background:var(--accent); color:var(--accent-fg); }
 .btn.primary:hover { filter:brightness(1.08); }
+.btn.danger { background:var(--err-fg); color:#fff; }
+.btn.danger:hover { filter:brightness(1.08); }
 .todos { max-width:800px; margin:0 auto 8px; border:1px solid var(--border-weak); border-radius:var(--radius-lg); padding:10px 12px; background:var(--layer-1); }
 .todos .t-head { display:flex; justify-content:space-between; font-size:12.5px; color:var(--text-muted); margin-bottom:6px; }
 .todos .t-count { display:inline-flex; align-items:center; gap:6px; }
@@ -339,22 +398,32 @@ pre:hover .copy-code { opacity:1; }
 .child-banner a { color:var(--accent); cursor:pointer; }
 
 /* ---------- modal ---------- */
-.overlay { position:fixed; inset:0; background:rgba(0,0,0,0.45); display:flex; align-items:center; justify-content:center; z-index:50; }
-.modal { width:min(520px, 92vw); max-height:84vh; overflow-y:auto; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-xl2); padding:20px; box-shadow:var(--shadow); }
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,0.45); display:flex; align-items:center; justify-content:center; z-index:50; -webkit-backdrop-filter:blur(4px); backdrop-filter:blur(4px); animation:overlay-in .15s ease-out; }
+.modal { width:min(520px, 92vw); max-height:84vh; overflow-y:auto; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-xl2); padding:20px; box-shadow:var(--shadow); animation:modal-in .18s cubic-bezier(0.16,1,0.3,1); }
+@keyframes overlay-in { from { opacity:0; } to { opacity:1; } }
+@keyframes modal-in { from { transform:translateY(8px) scale(0.98); opacity:0; } to { transform:none; opacity:1; } }
+@media (prefers-reduced-motion: reduce) { .overlay, .modal { animation:none; } }
 .modal h2 { font-size:16px; margin-bottom:14px; }
 .modal .m-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; }
 .modal .m-label { font-size:13px; color:var(--text-base); }
 .modal .m-sub { font-size:12px; color:var(--text-muted); }
-.modal input[type=text], .modal input[type=password] { flex:1; border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; }
-.modal input:focus { border-color:var(--accent); }
+.modal input[type=text], .modal input[type=password], .modal input[type=datetime-local] { flex:1; border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; transition:border-color .15s ease, box-shadow .15s ease; color:var(--text-base); }
+.modal input:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+/* multiline modal field (add/edit card): Enter submits, Ctrl+Enter a newline */
+.modal .m-textarea { border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; resize:none; overflow:hidden; min-height:34px; max-height:240px; line-height:1.5; transition:border-color .15s ease, box-shadow .15s ease; }
+.modal .m-textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
 .seg { display:flex; border:1px solid var(--border-base); border-radius:var(--radius-md); overflow:hidden; }
 .seg button { padding:5px 12px; font-size:12.5px; color:var(--text-muted); }
 .seg button.on { background:var(--layer-2); color:var(--text-base); }
 .m-close { position:absolute; }
 .modal .m-field { display:flex; flex-direction:column; gap:6px; padding:8px 0; }
-.modal .m-select { border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; }
-.modal .m-select:focus { border-color:var(--accent); }
+.modal .m-select { border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; transition:border-color .15s ease, box-shadow .15s ease; }
+.modal .m-select:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
 .modal .m-actions { display:flex; justify-content:flex-end; gap:8px; padding-top:14px; }
+/* schedule dialog: quick offset pills under the datetime picker, plus a live
+   "the agent starts this card in …" preview line */
+.schedule-presets { display:flex; flex-wrap:wrap; gap:8px; padding:10px 0 2px; }
+.schedule-preview { font-size:12px; color:var(--text-muted); padding-top:10px; }
 
 /* popover (model/agent pickers) */
 .popover { position:fixed; z-index:60; min-width:260px; max-height:400px; overflow-y:auto; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-lg); box-shadow:var(--shadow); padding:6px; }
@@ -402,41 +471,148 @@ pre:hover .copy-code { opacity:1; }
 /* ---------- kanban board (first tab) ---------- */
 .board-hint { font-size:12px; color:var(--text-faint); }
 .board-add { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto; }
-.kanban { flex:1; min-height:0; display:flex; gap:12px; padding:12px 16px 16px; overflow-x:auto; }
-.kanban-col { flex:1 1 0; min-width:230px; max-width:420px; display:flex; flex-direction:column; min-height:0; background:var(--layer-1); border:1px solid var(--border-weak); border-radius:var(--radius-lg); }
-.kanban-col.drag-over { border-color:var(--accent); }
-.kanban-col-head { display:flex; align-items:center; gap:8px; padding:10px 12px 6px; }
-.kanban-col-title { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); }
+/* position:relative makes the board the containing block for the link-line
+   overlay (an abspos child sized to the scrollable content) */
+.kanban { position:relative; flex:1; min-height:0; display:flex; gap:14px; padding:14px 18px 18px; overflow-x:auto; }
+
+/* columns: soft panels with a per-status accent (dot + tinted count badge) */
+.kanban-col {
+  flex:1 1 0; min-width:230px; max-width:420px;
+  display:flex; flex-direction:column; min-height:0;
+  background:linear-gradient(180deg, var(--layer-2), var(--layer-1) 96px);
+  border:1px solid var(--border-weak);
+  border-radius:var(--radius-xl2);
+  transition:border-color .15s ease, box-shadow .15s ease;
+}
+.kanban-col.drag-over { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.kanban-col-head { display:flex; align-items:center; gap:8px; padding:12px 12px 8px; }
+.kanban-col-title { display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); }
+/* status dot inherits the per-column title color */
+.kanban-col-title::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; opacity:0.85; }
 /* per-status color belongs on the column header title, not the cards */
 .kanban-col[data-column="inprogress"] .kanban-col-title { color:var(--ok-fg); }
 .kanban-col[data-column="done"] .kanban-col-title { color:var(--purple-fg); }
-.kanban-count { font-size:11px; color:var(--text-faint); background:var(--layer-2); border-radius:999px; padding:1px 7px; }
-.kanban-cards { flex:1; min-height:40px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:6px 8px; }
-.kanban-card { position:relative; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-md); padding:8px 26px 8px 10px; font-size:13px; cursor:grab; word-break:break-word; }
-.kanban-card:hover { border-color:var(--border-base); }
-.kanban-card.dragging { opacity:0.45; }
+.kanban-count { margin-left:auto; font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--text-muted); background:var(--layer-2); border:1px solid var(--border-weak); border-radius:999px; padding:1px 8px; }
+.kanban-col[data-column="inprogress"] .kanban-count { color:var(--ok-fg); background:var(--ok-bg); border-color:transparent; }
+.kanban-col[data-column="done"] .kanban-count { color:var(--purple-fg); background:var(--purple-bg); border-color:transparent; }
+.kanban-cards { flex:1; min-height:40px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:4px 10px 6px; }
+/* empty-column hint (pure CSS: the list is a real :empty element) */
+.kanban-cards:empty::after {
+  content:"No cards yet";
+  display:block; text-align:center; margin-top:8px;
+  padding:14px 8px; font-size:12px; color:var(--text-faint);
+  border:1px dashed var(--border-weak); border-radius:var(--radius-md);
+}
+
+/* cards: elevated tiles that lift on hover and tilt while dragging */
+.kanban-card {
+  position:relative;
+  background:var(--bg-base);
+  border:1px solid var(--border-weak);
+  border-radius:var(--radius-lg);
+  padding:10px 28px 10px 12px;
+  font-size:13px; line-height:1.45;
+  cursor:grab; word-break:break-word;
+  box-shadow:0 1px 2px rgba(0,0,0,0.05);
+  transition:border-color .15s ease, box-shadow .15s ease, transform .15s ease, opacity .15s ease;
+}
+.kanban-card:hover { border-color:var(--border-base); box-shadow:var(--shadow); transform:translateY(-1px); }
+.kanban-card.dragging { opacity:0.9; transform:rotate(1.5deg) scale(1.02); box-shadow:var(--shadow); cursor:grabbing; }
 .kanban-card-head { display:flex; align-items:flex-start; gap:6px; min-width:0; }
 .kanban-card-head .kanban-card-title { flex:1; min-width:0; }
 .kanban-card .spinner { width:12px; height:12px; flex:0 0 12px; margin-top:2px; color:var(--accent); }
-.kanban-card-title { outline:none; }
-.kanban-card-title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; }
-.kanban-card-del { position:absolute; top:4px; right:4px; width:18px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--text-faint); opacity:0; }
-.kanban-card:hover .kanban-card-del { opacity:1; }
-.kanban-card-del:hover { color:var(--text-base); background:var(--surface-active); }
-.kanban-card-actions { display:flex; gap:6px; margin-top:8px; }
-.kanban-card-btn { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-muted); border:1px solid var(--border-weak); border-radius:var(--radius-md); padding:3px 9px; }
-.kanban-card-btn:hover { color:var(--text-base); background:var(--surface-hover); border-color:var(--border-base); }
+/* short numeric card ID, so cards are easy to reference */
+.kanban-card-id { flex:none; margin-top:1px; font-size:10px; font-weight:600; line-height:1.4; font-variant-numeric:tabular-nums; color:var(--text-faint); background:var(--layer-2); border:1px solid var(--border-weak); border-radius:999px; padding:0 6px; }
+.kanban-card-title { outline:none; font-weight:500; white-space:pre-wrap; overflow-wrap:anywhere; }
+.kanban-card-title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+.kanban-watchers { display:inline-flex; align-items:center; gap:2px; flex:none; font-size:10px; line-height:1; color:var(--text-muted); }
+.kanban-card-del { position:absolute; top:6px; right:6px; width:20px; height:20px; display:flex; align-items:center; justify-content:center; border-radius:var(--radius-md); color:var(--text-faint); opacity:0; transition:opacity .15s ease, color .15s ease, background-color .15s ease; }
+.kanban-card:hover .kanban-card-del, .kanban-card-del:focus-visible { opacity:1; }
+.kanban-card-del:hover { color:var(--err-fg); background:var(--err-bg); }
+/* card actions sit on the right edge of the card */
+.kanban-card-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.kanban-card-btn { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:500; color:var(--text-muted); border:1px solid var(--border-weak); border-radius:999px; padding:3px 10px; background:var(--layer-1); transition:color .15s ease, border-color .15s ease, background-color .15s ease; }
+.kanban-card-btn:hover { color:var(--accent); border-color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, transparent); }
 .kanban-card-btn:disabled { opacity:0.6; cursor:default; }
 .kanban-card-btn svg { flex:0 0 12px; }
-.kanban-add { padding:0 8px 8px; }
-.kanban-add-input { width:100%; border:1px dashed var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 8px; font-size:12.5px; outline:none; color:var(--text-muted); }
-.kanban-add-input:focus { border-color:var(--accent); color:var(--text-base); }
+/* the link pill: a target icon to drag onto another card; once linked it
+   reads "Will start Card X" and clicking it removes the link */
+.kanban-card-btn.kanban-link { cursor:grab; color:var(--text-faint); padding:3px 7px; }
+.kanban-card-btn.kanban-link:active { cursor:grabbing; }
+.kanban-card-btn.kanban-link.linked { color:var(--accent); border-color:color-mix(in srgb, var(--accent) 45%, transparent); background:color-mix(in srgb, var(--accent) 8%, transparent); }
+.kanban-card-btn.kanban-link.dragging-link { opacity:0.55; }
+.kanban-card.link-over { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+
+/* scheduled start badge: clock emoji + expected start time, tinted with the
+   accent so scheduled cards stand out at a glance */
+.kanban-card-schedule { display:inline-flex; align-items:center; gap:5px; width:fit-content; margin-top:8px; font-size:11px; font-weight:500; line-height:1.4; color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, transparent); border:1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius:999px; padding:1px 8px; }
+.kanban-card-schedule.clickable { cursor:pointer; transition:border-color .15s ease, background-color .15s ease; }
+.kanban-card-schedule.clickable:hover { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* link lines: linked cards are connected border-to-border by a dashed,
+   animated line (SVG overlay above the board, see drawLinkLines in app.js).
+   Dim by default, it turns green while the source or the target card is
+   hovered. The dash period is 12px and the animation shifts the offset by
+   exactly one period, so the flow loops seamlessly. */
+.kanban-links { position:absolute; top:0; left:0; display:block; pointer-events:none; z-index:3; overflow:visible; }
+.kanban-link-line {
+  fill:none;
+  stroke:var(--text-faint);
+  stroke-width:1.5;
+  stroke-dasharray:5 7;
+  opacity:0.5;
+  animation:kanban-link-flow 0.9s linear infinite;
+}
+.kanban-link-line.hot { stroke:var(--ok-fg); opacity:1; stroke-width:2; }
+@keyframes kanban-link-flow { to { stroke-dashoffset:-12; } }
+@media (prefers-reduced-motion: reduce) { .kanban-link-line { animation:none; } }
+.kanban-add { padding:0 10px 10px; }
+/* the inline add-card input (Open column only) is a multiline textarea:
+   Enter creates the card, Ctrl+Enter inserts a newline */
+.kanban-add-row { display:flex; align-items:flex-start; gap:6px; }
+.kanban-add-attach { flex:none; align-self:stretch; width:30px; display:flex; align-items:center; justify-content:center; border:1px dashed var(--border-base); border-radius:var(--radius-md); color:var(--text-faint); background:transparent; transition:border-color .15s ease, color .15s ease, background-color .15s ease; }
+.kanban-add-attach:hover { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, transparent); }
+.kanban-add-input { flex:1; width:100%; border:1px dashed var(--border-base); background:transparent; border-radius:var(--radius-md); padding:7px 10px; font-size:12.5px; line-height:1.45; outline:none; color:var(--text-muted); resize:none; overflow:hidden; min-height:32px; transition:border-color .15s ease, background-color .15s ease, color .15s ease, box-shadow .15s ease; }
+.kanban-add-input::placeholder { color:var(--text-faint); }
+.kanban-add-input:hover { border-color:var(--text-faint); }
+.kanban-add-input:focus { border-color:var(--accent); color:var(--text-base); background:var(--bg-base); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+/* attachment chips picked/pasted for a new card — hidden while empty */
+.kanban-add .attach-row:empty, .modal .attach-row:empty { display:none; }
+.kanban-card-attachments { display:flex; flex-wrap:wrap; margin-top:8px; }
+.kanban-card-attachments .attach-chip { margin:0; max-width:100%; }
+.kanban-card-attachments .attach-chip span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* ---------- cron jobs (second fixed tab) ---------- */
+.cron-list { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding:14px 18px 18px; width:100%; max-width:860px; margin:0 auto; }
+.cron-empty { margin:auto; text-align:center; font-size:13px; color:var(--text-faint); line-height:1.8; }
+.cron-row { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; background:var(--layer-1); border:1px solid var(--border-weak); border-radius:var(--radius-lg); padding:12px 14px; transition:border-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
+.cron-row:hover { border-color:var(--border-base); box-shadow:var(--shadow); }
+.cron-row.paused { opacity:0.72; }
+.cron-row-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:4px; }
+.cron-row-head { display:flex; align-items:center; gap:8px; min-width:0; }
+.cron-hourglass { flex:none; font-size:13px; line-height:1; }
+.cron-title { font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cron-badge { flex:none; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--warn-fg); background:var(--warn-bg); border-radius:999px; padding:1px 8px; }
+.cron-row-meta { display:flex; align-items:center; flex-wrap:wrap; gap:6px; font-size:11.5px; color:var(--text-muted); }
+.cron-meta-sep { color:var(--text-faint); }
+.cron-spec { font-family:var(--font-mono); font-size:11px; color:var(--text-base); background:var(--layer-2); border:1px solid var(--border-weak); border-radius:999px; padding:1px 8px; }
+.cron-next { color:var(--accent); }
+.cron-row-prompt { font-size:12px; color:var(--text-faint); white-space:pre-wrap; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.cron-row-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; flex:none; }
+.cron-del:hover { color:var(--err-fg); border-color:var(--err-fg); background:var(--err-bg); }
+.schedule-presets { display:flex; flex-wrap:wrap; gap:6px; padding-top:8px; }
+.schedule-preview { font-size:12px; color:var(--text-muted); padding-top:8px; }
+.schedule-preview.err { color:var(--err-fg); }
 
 @media (max-width: 767px) {
   .rail { width:48px; flex-basis:48px; }
   /* sidebar becomes an off-canvas drawer; the chat area uses the full width */
   .sidebar { position:fixed; left:0; top:0; bottom:0; z-index:70; width:min(300px, 85vw); flex:0 0 auto; margin:0; border-radius:0; transform:translateX(-105%); transition:transform .2s ease; box-shadow:var(--shadow); background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); }
   #app.sidebar-open .sidebar { transform:translateX(0); }
+  /* the board panel mirrors it, sliding in from the left too (the two drawers
+     are mutually exclusive — opening one collapses the other) */
+  .board-panel { position:fixed; left:0; top:0; bottom:0; z-index:70; width:min(300px, 85vw); flex:0 0 auto; margin:0; border-radius:0; transform:translateX(-105%); transition:transform .2s ease; box-shadow:var(--shadow); }
+  #app.board-panel-open .board-panel { transform:translateX(0); }
   .timeline-inner { padding:0 12px; }
   .composer-region { padding:0 8px 10px; }
   .chat-header { padding:0 10px; }

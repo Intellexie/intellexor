@@ -78,6 +78,23 @@ type Client struct {
 
 func (r *Resolved) Client() *Client { return &Client{Resolved: r} }
 
+// SetStreamIdleTimeoutForTest overrides the idle window (tests only; the app
+// test suites are not parallel, so a plain var write is fine).
+func SetStreamIdleTimeoutForTest(d time.Duration) { streamIdleTimeout = d }
+
+// streamIdle is the idle-watchdog window for this provider's streams. Local
+// runtimes are exempt: a cold ollama/lmstudio model load makes no bytes for
+// minutes and looks exactly like a stalled connection. Everything else gets
+// the default, so a hung proxy or silently-dropped connection errors out
+// (retryable) instead of freezing the agent loop forever.
+func (c *Client) streamIdle() time.Duration {
+	switch c.Resolved.ID {
+	case "ollama", "lmstudio":
+		return 0
+	}
+	return streamIdleTimeout
+}
+
 type httpError struct {
 	status int
 	body   string

@@ -40,6 +40,8 @@ func registryFor(i *Instance) *tool.Registry {
 		// same broadcast the board HTTP routes send, so every connected
 		// client refreshes when the agent moves a card
 		i.Hub.Publish("board.updated", map[string]any{"directory": i.Directory})
+	}, StartCard: func(projectID, cardID string) (string, error) {
+		return startCard(i, projectID, cardID)
 	}}
 	questionTool := tool.QuestionTool{Svc: i.Quest}
 	r := tool.NewRegistry(

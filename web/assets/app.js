@@ -58,8 +58,10 @@ const S = {
   scrollStick: true,
   streaming: new Map(), // partID -> messageID (parts with live text deltas)
   toolOpen: new Map(), // tool partID -> user's explicit open/closed choice (survives timeline re-renders)
+  reasoningOpen: new Map(), // reasoning partID -> user's explicit open/closed choice (survives timeline re-renders)
   tabs: [], // open session tabs, in order (persisted)
   sidebarOpen: true, // resolved from localStorage/viewport by initSidebar()
+  boardPanelOpen: false, // cards side panel (rail toggle), resolved by initBoardPanel()
   commands: null, // cached GET /command result (slash-command menu)
   subagents: new Map(), // sessionID -> info for subagent sessions (fetched on demand, not in the sidebar)
   es: null,
@@ -169,6 +171,9 @@ const ICONS = {
   close: svg('<path d="M18 6 6 18M6 6l12 12"/>', 12),
   mic: svg('<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>'),
   board: svg('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/>', 12),
+  target: svg('<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>', 12),
+  clock: svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>', 12),
+  pause: svg('<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>', 12),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>', 12),
 };
 
@@ -398,6 +403,8 @@ function handleEvent(ev) {
       // state — its task row carries a live progress indicator
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       renderBoard(); // in-progress cards show a spinner while their session is busy
+      renderBoardPanel();
+      if (S.view === "cron") renderCronList(); // running crons show the hourglass
       updateTab();
       break;
     }
@@ -412,6 +419,8 @@ function handleEvent(ev) {
       renderComposer();
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       renderBoard(); // clear the spinner on the card this session was working on
+      renderBoardPanel();
+      if (S.view === "cron") renderCronList(); // clear the hourglass on the finished run
       updateTab();
       // the agent finished working — chime, but only for real completions of
       // top-level sessions (subagents going idle just hand control back to
@@ -426,6 +435,7 @@ function handleEvent(ev) {
       if (p.sessionID) S.errored.add(p.sessionID);
       renderSidebar();
       renderBoard();
+      renderBoardPanel();
       updateTab();
       break;
     }
@@ -439,6 +449,7 @@ function handleEvent(ev) {
       }
       if (store.info[info.id] === undefined) store.order.push(info.id);
       store.info[info.id] = Object.assign(store.info[info.id] || {}, info);
+      trimWindow(store);
       if (info.role === "assistant" && info.error && p.sessionID === S.current) {
         renderTimeline();
       }
@@ -451,12 +462,17 @@ function handleEvent(ev) {
     case "message.part.updated": {
       const store = msgStore(p.sessionID);
       const part = p.part;
+      // parts for messages older than the loaded window are not displayed
+      if (!store.info[part.messageID] && store.order.length && part.messageID < store.order[0]) {
+        break;
+      }
       if (!store.parts[part.messageID]) store.parts[part.messageID] = {};
       store.parts[part.messageID][part.id] = part;
       // text/reasoning part finalized — stop delta-streaming into it
       if ((part.type === "text" || part.type === "reasoning") && part.time && part.time.end) {
         S.streaming.delete(part.id);
       }
+      trimWindow(store); // a new part can push the window over the cap
       if (p.sessionID === S.current) renderTimeline();
       break;
     }
@@ -480,6 +496,7 @@ function handleEvent(ev) {
           store.info[p.messageID] = { id: p.messageID, sessionID: p.sessionID, role: "assistant", time: {} };
         }
         if (!store.order.includes(p.messageID)) store.order.push(p.messageID);
+        trimWindow(store);
       }
       if (p.field === "text" || p.field === "reasoning") {
         part.text = (part.text || "") + (p.delta || "");
@@ -523,8 +540,15 @@ function handleEvent(ev) {
       if (isDockSession(p.sessionID)) renderComposerRegion();
       break;
     case "board.updated":
-      // another client (or tab) changed the board
-      if (S.view === "board") loadBoard().then(renderBoard);
+      // another client (or tab) changed the board — always reload so card
+      // starts are detected (and their tabs opened) even when the board is
+      // not the active view; re-render only when it is visible
+      loadBoard().then(() => { if (S.view === "board") renderBoard(); });
+      break;
+    case "cron.updated":
+      // a cron job changed (created/edited/paused/deleted, or the backend
+      // sweep started a run) — reload and re-render when the tab is visible
+      loadCron().then(() => { if (S.view === "cron") renderCronList(); });
       break;
     case "session.diff":
       break;
@@ -592,6 +616,14 @@ function renderStreamingText() {
     const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
     if (!node) { needFull = true; continue; }
     node.innerHTML = renderMarkdown(part.text || "");
+    // collapsed reasoning header: keep the character count in sync with the stream
+    if (part.type === "reasoning") {
+      const c = inner.querySelector(`[data-rcount="${cssId(pid)}"]`);
+      if (c) {
+        c.textContent = `[${fmtNum((part.text || "").length)}]`;
+        c.title = `${(part.text || "").length} characters of reasoning`;
+      }
+    }
   }
   if (needFull) {
     renderTimeline();
@@ -615,11 +647,32 @@ function sortSessions() {
 
 const TABS_KEY = "intellexor.tabs";
 
+// A pending tab is a client-side placeholder for a session that does not
+// exist on the server yet: "+" (and the new-session buttons) open one titled
+// "New session", and the session is only created when the first message is
+// sent (see doSend). Each pending tab keeps its own composer draft, so
+// several unsent messages can live side by side.
+const PENDING_RE = /^pending:(\d+)$/;
+
+function isPendingTab(id) {
+  return typeof id === "string" && PENDING_RE.test(id);
+}
+
+function nextPendingId() {
+  let max = 0;
+  for (const id of S.tabs) {
+    const m = PENDING_RE.exec(String(id));
+    if (m) max = Math.max(max, +m[1]);
+  }
+  return "pending:" + (max + 1);
+}
+
 function loadTabs() {
   try { S.tabs = JSON.parse(localStorage.getItem(TABS_KEY) || "[]"); } catch { S.tabs = []; }
   if (!Array.isArray(S.tabs)) S.tabs = [];
-  // drop tabs whose sessions no longer exist (deleted/archived) or are subagents
-  S.tabs = S.tabs.filter((id) => S.sessions.some((s) => s.id === id && !s.parentID));
+  // drop tabs whose sessions no longer exist (deleted/archived) or are
+  // subagents; pending (not-yet-created) tabs always survive
+  S.tabs = S.tabs.filter((id) => isPendingTab(id) || S.sessions.some((s) => s.id === id && !s.parentID));
 }
 
 function saveTabs() {
@@ -627,11 +680,115 @@ function saveTabs() {
 }
 
 function openTab(sid) {
+  if (isPendingTab(sid)) {
+    if (!S.tabs.includes(sid)) {
+      S.tabs.push(sid);
+      saveTabs();
+    }
+    return;
+  }
   const sess = S.sessions.find((s) => s.id === sid);
   if (!sess || sess.parentID) return;
   if (!S.tabs.includes(sid)) {
     S.tabs.push(sid);
     saveTabs();
+  }
+}
+
+// "+" and the new-session buttons: open a fresh pending tab (the landing
+// view stays reachable only via the empty hash, e.g. after closing tabs).
+// The backing session is created on the server right away — tabs and the
+// sidebar workspace read from the same session store, so the new session
+// shows up in the workspace immediately instead of only after the first
+// message is sent.
+function newSessionTab() {
+  const id = nextPendingId();
+  S.tabs.push(id);
+  saveTabs();
+  navigate("/" + id);
+  createPendingSession(id);
+}
+
+// Session creation for a pending tab, kept per pending id: if the user
+// manages to send before the create resolves, doSend awaits the same
+// promise instead of minting a second session for the tab.
+const pendingCreates = new Map(); // pendingId -> Promise<session|undefined>
+
+// Make a freshly created session visible in the workspace immediately —
+// the SSE session.created event covers other clients, this covers our own.
+function trackSession(sess) {
+  if (!sess || !sess.id) return sess;
+  if (!S.sessions.some((s) => s.id === sess.id)) {
+    S.sessions.unshift(sess);
+    sortSessions();
+  }
+  return sess;
+}
+
+function createPendingSession(id) {
+  const job = (async () => {
+    const body = { agent: S.agent, title: "New session" };
+    if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
+    const sess = trackSession(await post("/session", body));
+    // the tab may have been closed while the create was in flight — the
+    // session still exists and stays visible in the workspace
+    if (S.tabs.includes(id)) {
+      promotePendingTab(id, sess.id);
+      if (location.hash === "#/" + id) navigate("/" + sess.id);
+    }
+    renderSidebar();
+    return sess;
+  })();
+  pendingCreates.set(id, job);
+  job.catch((e) => {
+    // keep the pending tab: the session is then created on first send
+    // (see doSend), so the workspace and the tabs stay in sync either way
+    toast(e.message || String(e), true);
+  }).finally(() => {
+    if (pendingCreates.get(id) === job) pendingCreates.delete(id);
+  });
+  return job;
+}
+
+// Resolve the session a send/command should go to. A pending tab becomes a
+// real session here: an in-flight tab creation is reused when possible,
+// otherwise the session is created now. The tab is promoted in place
+// (position kept) and drafts move across with it.
+async function ensureSessionId() {
+  const pendingId = S.current;
+  if (pendingId && !isPendingTab(pendingId)) return pendingId; // already real
+  if (pendingId) {
+    const inflight = pendingCreates.get(pendingId);
+    const ready = inflight ? await inflight.catch(() => null) : null;
+    if (ready && ready.id) {
+      promotePendingTab(pendingId, ready.id);
+      if (S.current === pendingId) navigate("/" + ready.id);
+      return ready.id;
+    }
+  }
+  const body = { agent: S.agent };
+  if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
+  const sess = trackSession(await post("/session", body));
+  promotePendingTab(pendingId, sess.id);
+  if (S.current === pendingId) navigate("/" + sess.id);
+  return sess.id;
+}
+
+// Swap a pending tab for the real session id once the server created it.
+// Composer drafts (and attachments) typed under the pending key move across,
+// so nothing typed while the create was in flight is lost.
+function promotePendingTab(oldId, newId) {
+  const idx = S.tabs.indexOf(oldId);
+  if (idx >= 0) S.tabs[idx] = newId;
+  else if (!S.tabs.includes(newId)) S.tabs.push(newId);
+  saveTabs();
+  if (composerDrafts.has(oldId)) {
+    composerDrafts.set(newId, composerDrafts.get(oldId));
+    composerDrafts.delete(oldId);
+  }
+  if (composerFiles.has(oldId)) {
+    composerFiles.set(newId, composerFiles.get(oldId));
+    composerFiles.delete(oldId);
   }
 }
 
@@ -664,22 +821,35 @@ function renderTabs() {
   boardTab.appendChild(el("span", "tab-title", "Board"));
   boardTab.onclick = () => navigate("/board");
   bar.appendChild(boardTab);
+  // cron jobs: fixed second tab — scheduled prompts that start fresh sessions
+  const cronTab = el("div", "tab" + (S.view === "cron" ? " active" : ""));
+  cronTab.title = "Cron jobs";
+  cronTab.appendChild(el("span", "tab-icon", ICONS.clock));
+  cronTab.appendChild(el("span", "tab-title", "Cron jobs"));
+  cronTab.onclick = () => navigate("/cron");
+  bar.appendChild(cronTab);
   for (const sid of S.tabs) {
     const s = S.sessions.find((x) => x.id === sid);
-    if (!s) continue;
+    if (!s && !isPendingTab(sid)) continue;
+    const pending = !s;
     const tab = el("div", "tab" + (sid === S.current ? " active" : ""));
-    tab.title = (s.title || "New session") + " — click to switch, right-click to rename, middle-click to close";
-    const st = S.statuses[sid];
-    if (st && st.type !== "idle") {
-      tab.appendChild(el("span", "spinner", ICONS.spinner));
-    } else if (S.permissions.some((p) => p.sessionID === sid)) {
-      tab.appendChild(el("span", "dot dot-permission"));
-    } else if (S.errored.has(sid)) {
-      tab.appendChild(el("span", "dot dot-error"));
-    } else if (S.unseen.has(sid)) {
-      tab.appendChild(el("span", "dot dot-unseen"));
+    const title = pending ? "New session" : (s.title || "New session");
+    tab.title = pending
+      ? "New session — click to switch, middle-click to close"
+      : title + " — click to switch, right-click to rename, middle-click to close";
+    if (!pending) {
+      const st = S.statuses[sid];
+      if (st && st.type !== "idle") {
+        tab.appendChild(el("span", "spinner", ICONS.spinner));
+      } else if (S.permissions.some((p) => p.sessionID === sid)) {
+        tab.appendChild(el("span", "dot dot-permission"));
+      } else if (S.errored.has(sid)) {
+        tab.appendChild(el("span", "dot dot-error"));
+      } else if (S.unseen.has(sid)) {
+        tab.appendChild(el("span", "dot dot-unseen"));
+      }
     }
-    tab.appendChild(el("span", "tab-title", esc(s.title || "New session")));
+    tab.appendChild(el("span", "tab-title", esc(title)));
     const close = el("button", "tab-close", ICONS.close);
     close.title = "Close tab";
     close.onclick = (e) => {
@@ -690,7 +860,7 @@ function renderTabs() {
     tab.onclick = () => navigate("/" + sid);
     tab.onauxclick = (e) => { if (e.button === 1) closeTab(sid); };
     tab.onmousedown = (e) => { if (e.button === 1) e.preventDefault(); };
-    tab.oncontextmenu = (e) => {
+    if (!pending) tab.oncontextmenu = (e) => {
       e.preventDefault();
       openContextMenu(e.clientX, e.clientY, [
         { label: "Rename", icon: ICONS.edit, action: () => openRenamePopover(e.clientX, e.clientY, s) },
@@ -700,7 +870,7 @@ function renderTabs() {
   }
   const plus = el("button", "tab-new", ICONS.plus);
   plus.title = "New session";
-  plus.onclick = () => navigate("");
+  plus.onclick = () => newSessionTab();
   bar.appendChild(plus);
 }
 
@@ -728,9 +898,16 @@ function applySidebar() {
   }
 }
 
-function setSidebar(open) {
+// `transient` changes the sidebar without touching the persisted preference —
+// used when the board panel borrows the sidebar's slot (the user's choice is
+// restored when the panel closes). An explicit (non-transient) change cancels
+// that pending restore.
+function setSidebar(open, transient = false) {
   S.sidebarOpen = open;
-  try { localStorage.setItem("intellexor.sidebar", open ? "1" : "0"); } catch {}
+  if (!transient) {
+    boardPanelHoldsSidebar = false;
+    try { localStorage.setItem("intellexor.sidebar", open ? "1" : "0"); } catch {}
+  }
   applySidebar();
 }
 
@@ -742,23 +919,196 @@ function initSidebar() {
   applySidebar();
 }
 
+/* ---------- board side panel (rail toggle) ---------- */
+
+// A compact left-hand panel listing the In Progress and Open cards, one line
+// each; the full card text shows in a tooltip on hover. Mirrors the sidebar
+// collapse pattern: state + apply + localStorage persistence, inline collapse
+// on desktop and an overlay drawer (from the left) on small screens. It sits
+// between the rail and the sidebar, so while it is open the sidebar is
+// collapsed — transiently, the user's sidebar preference comes back on close.
+
+// In Progress first — active work is what you glance at — then Open. Done is
+// intentionally absent: the panel is a working queue, not an archive.
+const BOARD_PANEL_COLUMNS = [
+  { id: "inprogress", label: "In Progress" },
+  { id: "open", label: "Open" },
+];
+
+// True while the board panel is holding the slot the sidebar was occupying:
+// the sidebar is collapsed for that time and restored when the panel closes.
+let boardPanelHoldsSidebar = false;
+
+function applyBoardPanel() {
+  const app = $("#app");
+  if (!app) return;
+  app.classList.toggle("board-panel-collapsed", !S.boardPanelOpen);
+  app.classList.toggle("board-panel-open", S.boardPanelOpen);
+  let bd = $("#board-panel-backdrop");
+  if (isNarrow() && S.boardPanelOpen) {
+    if (!bd) {
+      bd = el("div", "sidebar-backdrop");
+      bd.id = "board-panel-backdrop";
+      bd.onclick = () => setBoardPanel(false);
+      document.body.appendChild(bd);
+    }
+  } else if (bd) {
+    bd.remove();
+  }
+  if (!S.boardPanelOpen) hideBoardPanelTip();
+}
+
+function setBoardPanel(open) {
+  S.boardPanelOpen = open;
+  try { localStorage.setItem("intellexor.boardPanel", open ? "1" : "0"); } catch {}
+  // The panel takes over the sidebar's slot on the left: collapse the sidebar
+  // for as long as the panel is open, and hand the slot back on close. Both
+  // directions are transient so the user's persisted sidebar preference is
+  // never overwritten by the swap; an explicit sidebar toggle while the panel
+  // is open cancels the restore (see setSidebar).
+  if (open && S.sidebarOpen) {
+    boardPanelHoldsSidebar = true;
+    setSidebar(false, true);
+  } else if (!open && boardPanelHoldsSidebar) {
+    boardPanelHoldsSidebar = false;
+    setSidebar(true, true);
+  }
+  applyBoardPanel();
+  if (open) loadBoard(); // fresh data on every open; loadBoard re-renders the panel
+}
+
+function initBoardPanel() {
+  let saved = null;
+  try { saved = localStorage.getItem("intellexor.boardPanel"); } catch {}
+  S.boardPanelOpen = saved === "1"; // default closed — an optional panel
+  // Runs after initSidebar, so the resolved sidebar state is known: if the
+  // panel boots open, it takes the slot and the sidebar waits.
+  if (S.boardPanelOpen && S.sidebarOpen) {
+    boardPanelHoldsSidebar = true;
+    setSidebar(false, true);
+  }
+  applyBoardPanel();
+}
+
+// The tooltip: one fixed-position element reused for every hovered row, so
+// hover churn never stacks nodes. Shows the full card text the 1-line row
+// truncates, plus the card id and column.
+let boardPanelTip = null;
+
+function hideBoardPanelTip() {
+  if (boardPanelTip) {
+    boardPanelTip.remove();
+    boardPanelTip = null;
+  }
+}
+
+function showBoardPanelTip(row, c) {
+  hideBoardPanelTip();
+  const col = BOARD_COLUMNS.find((k) => k.id === c.column);
+  boardPanelTip = el("div", "board-panel-tip");
+  const head = el("div", "board-panel-tip-head");
+  head.innerHTML = `<span class="kanban-card-id">#${esc(c.id)}</span><span class="board-panel-tip-col">${esc(col ? col.label : c.column)}</span>`;
+  boardPanelTip.appendChild(head);
+  boardPanelTip.appendChild(el("div", "board-panel-tip-body", esc(c.title)));
+  boardPanelTip.style.visibility = "hidden";
+  document.body.appendChild(boardPanelTip);
+  const r = row.getBoundingClientRect();
+  const t = boardPanelTip.getBoundingClientRect();
+  // prefer the right of the row (the panel hugs the left edge); when there is
+  // no room, drop the tooltip below the row instead
+  let left = r.right + 8;
+  let top = r.top;
+  if (left + t.width > window.innerWidth - 8) {
+    left = Math.max(8, Math.min(r.right, window.innerWidth - t.width - 8));
+    top = r.bottom + 6;
+  }
+  top = Math.max(8, Math.min(top, window.innerHeight - t.height - 8));
+  boardPanelTip.style.left = left + "px";
+  boardPanelTip.style.top = top + "px";
+  boardPanelTip.style.visibility = "";
+}
+
+function renderBoardPanel() {
+  const list = $("#board-panel-list");
+  if (!list || !S.boardPanelOpen) return;
+  hideBoardPanelTip();
+  list.innerHTML = "";
+  let total = 0;
+  for (const col of BOARD_PANEL_COLUMNS) {
+    const cards = boardCardsIn(col.id);
+    total += cards.length;
+    const group = el("div", "board-panel-group");
+    group.dataset.column = col.id;
+    const label = el("div", "board-panel-group-label");
+    label.innerHTML = `${esc(col.label)}<span class="board-panel-group-count">${cards.length}</span>`;
+    group.appendChild(label);
+    if (!cards.length) group.appendChild(el("div", "board-panel-empty", "No cards"));
+    for (const c of cards) {
+      const row = el("div", "board-panel-card");
+      row.dataset.id = c.id;
+      row.appendChild(el("span", "board-panel-dot" + (col.id === "inprogress" ? " inprogress" : "")));
+      row.appendChild(el("span", "kanban-card-id", "#" + esc(c.id)));
+      row.appendChild(el("span", "board-panel-card-title", esc(c.title)));
+      // scheduled start: same clock emoji + time as the board cards
+      if (c.startAt) {
+        row.appendChild(el("span", "board-panel-schedule", "🕐 " + esc(fmtSchedule(c.startAt))));
+      }
+      // same busy indicator as the board cards: spinner while the linked
+      // session is actively working on this in-progress card
+      if (c.column === "inprogress" && c.sessionID && sessionBusy(c.sessionID)) {
+        row.appendChild(el("span", "spinner", ICONS.spinner));
+      }
+      row.onclick = () => {
+        if (c.sessionID) viewCard(c);
+        else navigate("/board"); // open cards have no session yet — show the full board
+      };
+      row.onmouseenter = () => showBoardPanelTip(row, c);
+      row.onmouseleave = hideBoardPanelTip;
+      group.appendChild(row);
+    }
+    list.appendChild(group);
+  }
+  $("#board-panel-count").textContent = total;
+}
+
 function renderSidebar() {
   const list = $("#session-list");
   list.innerHTML = "";
-  if (!S.sessions.length) {
+  // The workspace mirrors the tab bar: real sessions come from the server
+  // session store, and pending tabs (sessions not created yet, e.g. when the
+  // create failed) are rendered alongside them so both views always show
+  // the same set of sessions.
+  const items = [];
+  for (const s of S.sessions) {
+    if (s.parentID) continue;
+    items.push({ id: s.id, title: s.title, updated: s.time.updated, sess: s });
+  }
+  for (const id of S.tabs) {
+    if (!isPendingTab(id)) continue;
+    items.push({ id, title: "New session", updated: Date.now(), pending: true });
+  }
+  items.sort((a, b) => b.updated - a.updated);
+  if (!items.length) {
     list.appendChild(el("div", "empty-sessions", "Nothing here yet<br>Create a session to get started"));
     return;
   }
   let lastGroup = "";
-  for (const s of S.sessions) {
-    if (s.parentID) continue;
-    const g = groupDay(s.time.updated);
+  for (const it of items) {
+    const g = groupDay(it.updated);
     if (g !== lastGroup) {
       lastGroup = g;
       list.appendChild(el("div", "session-group", esc(g)));
     }
-    const row = el("div", "session-row" + (s.id === S.current ? " active" : ""));
-    row.onclick = () => navigate("/" + s.id);
+    const row = el("div", "session-row" + (it.id === S.current ? " active" : ""));
+    row.onclick = () => navigate("/" + it.id);
+    if (it.pending) {
+      // not on the server yet: nothing to rename or archive
+      row.appendChild(el("span", "dot", "&nbsp;"));
+      row.appendChild(el("span", "title", esc(it.title)));
+      list.appendChild(row);
+      continue;
+    }
+    const s = it.sess;
     row.oncontextmenu = (e) => {
       e.preventDefault();
       openContextMenu(e.clientX, e.clientY, [
@@ -794,11 +1144,47 @@ function navigate(path) {
   location.hash = path === "" ? "" : "#" + path;
 }
 
-// Only the last MESSAGE_WINDOW messages are fetched and rendered. Long
-// sessions stay smooth (the timeline is fully rebuilt on every render) and
-// a page refresh transfers a bounded payload. Older messages are simply not
-// shown; SSE events for them are ignored so they can't land out of order.
+// Only the last MESSAGE_WINDOW display units are fetched and rendered. The
+// unit count follows the chat's display rules — a user prompt, a response
+// text, a thinking block and a tool call are each one message; auxiliary
+// parts (step markers, patches, ...) are free. The server trims whole
+// messages, so a fetch can return slightly more than the window; the client
+// re-trims to at most the window (see trimWindow). Long sessions stay smooth
+// (the timeline is fully rebuilt on every render) and a page refresh
+// transfers a bounded payload. Older messages are simply not shown; SSE
+// events for them are ignored so they can't land out of order.
 const MESSAGE_WINDOW = 100;
+
+// Display-unit accounting for one message, mirroring the server's rule and
+// what renderPart/renderUserMessage actually draw.
+function countUnits(store, mid) {
+  const info = store.info[mid];
+  if (!info) return 0;
+  const parts = Object.values(store.parts[mid] || {});
+  if (info.role === "user") {
+    return parts.some((p) => p.type === "file" || (p.type === "text" && !p.synthetic)) ? 1 : 0;
+  }
+  return parts.filter((p) =>
+    p.type === "tool" || p.type === "reasoning" ||
+    (p.type === "text" && !p.synthetic && !p.ignored)
+  ).length;
+}
+
+// Keeps a live timeline bounded: as new messages and parts stream in, the
+// oldest whole messages are dropped once the window exceeds MESSAGE_WINDOW
+// units. The newest message is never dropped (a single message may alone
+// exceed the window), mirroring the server's whole-message trim.
+function trimWindow(store) {
+  let total = 0;
+  for (const mid of store.order) total += countUnits(store, mid);
+  while (total > MESSAGE_WINDOW && store.order.length > 1) {
+    const mid = store.order[0];
+    total -= countUnits(store, mid);
+    store.order.shift();
+    delete store.info[mid];
+    delete store.parts[mid];
+  }
+}
 
 async function loadMessages(sid) {
   const msgs = await get(`/session/${sid}/message?limit=${MESSAGE_WINDOW}`);
@@ -827,6 +1213,9 @@ async function loadMessages(sid) {
       store.parts[m.info.id][part.id] = part;
     }
   }
+  // the server guarantees at least the window, in whole messages; enforce
+  // the strict cap here so the display never exceeds it either
+  trimWindow(store);
 }
 
 /* ---------- main view ---------- */
@@ -847,7 +1236,7 @@ function renderMain() {
   // strength — full on the landing (new session) view, dimmed behind the
   // panels everywhere else (see style.css). The setActive re-assert is a
   // no-op unless the canvas was wiped from the DOM and re-attached.
-  const landing = S.view === "sessions" && !S.current;
+  const landing = S.view === "sessions" && (!S.current || isPendingTab(S.current));
   document.body.classList.toggle("bg-live", landing);
   document.body.classList.toggle("bg-dim", !landing);
   if (window.IntellexorBG) IntellexorBG.setActive(true);
@@ -855,7 +1244,11 @@ function renderMain() {
     renderBoardView(main);
     return;
   }
-  if (!S.current) {
+  if (S.view === "cron") {
+    renderCronView(main);
+    return;
+  }
+  if (!S.current || isPendingTab(S.current)) {
     renderNewSessionView(main);
   } else {
     renderSessionView(main);
@@ -1133,14 +1526,24 @@ async function renderTimeline() {
       inner.appendChild(renderAssistantMessage(info, parts));
     }
   }
-  // thinking indicator
+  // thinking indicator — the agent · model label lives inside the bar
+  // (right-aligned) instead of on its own line under it
   const st = S.statuses[S.current];
   if (st && (st.type === "busy" || st.type === "retry")) {
     const think = el("div", "assistant-block");
+    const runMeta = thinkMeta(currentRunLabel(store));
     if (st.type === "retry") {
-      think.appendChild(el("div", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
+      const row = el("div", "thinking-row");
+      row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
+      if (runMeta) row.appendChild(runMeta);
+      think.appendChild(row);
     } else if (!lastBlockHasText(store)) {
-      think.appendChild(el("div", "shimmer", "Thinking"));
+      const row = el("div", "thinking-row");
+      row.appendChild(el("span", "ricon", "🧠"));
+      row.appendChild(el("span", "shimmer", "Thinking"));
+      row.appendChild(thinkingDots(true));
+      if (runMeta) row.appendChild(runMeta);
+      think.appendChild(row);
     }
     inner.appendChild(think);
   }
@@ -1162,6 +1565,29 @@ function lastBlockHasText(store) {
     }
   }
   return false;
+}
+
+// "agent · model" for the run in progress — taken from the streaming
+// assistant message when it exists (it is the last one and not yet
+// completed), else from the composer selection
+function currentRunLabel(store) {
+  for (let i = store.order.length - 1; i >= 0; i--) {
+    const info = store.info[store.order[i]];
+    if (info && info.role === "assistant") {
+      if (!(info.time && info.time.completed)) {
+        return [info.agent, info.modelID].filter(Boolean).join(" · ");
+      }
+      break;
+    }
+  }
+  return [S.agent, S.model && S.model.modelID].filter(Boolean).join(" · ");
+}
+
+// right-aligned agent · model label embedded at the end of a thinking bar
+// (null when there is nothing to show)
+function thinkMeta(text) {
+  if (!text) return null;
+  return el("span", "think-meta", esc(text));
 }
 
 function renderUserMessage(info, parts) {
@@ -1244,7 +1670,10 @@ function renderAssistantMessage(info, parts) {
     }
   };
   meta.appendChild(fork);
-  if (hasVisible) block.appendChild(meta);
+  // while the message is still streaming, the agent · model label is embedded
+  // in the thinking bar instead; the meta line (with duration) appears once
+  // the message completes
+  if (hasVisible && info.time && info.time.completed) block.appendChild(meta);
   return block;
 }
 
@@ -1252,6 +1681,14 @@ function durationText(a, b) {
   const s = Math.max(0, Math.round((b - a) / 1000));
   if (s < 60) return s + "s";
   return Math.floor(s / 60) + "m " + (s % 60) + "s";
+}
+
+// Three-dot ellipsis used after the "Thinking" and tool row labels; animated
+// only while `on` (the part is still streaming / the tool is still running).
+function thinkingDots(on) {
+  const d = el("span", "dots" + (on ? " animate" : ""));
+  for (let i = 0; i < 3; i++) d.appendChild(el("i"));
+  return d;
 }
 
 function renderPart(p, info) {
@@ -1263,15 +1700,46 @@ function renderPart(p, info) {
       node.dataset.part = p.id;
       return node;
     }
-    case "reasoning":
-      if (!(p.text || "").trim()) return null; {
-        const r = el("div", "reasoning");
-        r.appendChild(el("div", "rlabel", "Thought"));
-        const node = el("div", "assistant-text", renderMarkdown(p.text));
-        node.dataset.part = p.id;
-        r.appendChild(node);
-        return r;
+    case "reasoning": {
+      const streaming = S.streaming.has(p.id);
+      if (!(p.text || "").trim() && !streaming) return null;
+      const r = el("div", "reasoning" + (streaming ? " streaming" : ""));
+      // collapsed header: 🧠 Thinking [chars] ... — dots animate while streaming
+      const row = el("div", "reasoning-row");
+      row.appendChild(el("span", "ricon", "🧠"));
+      row.appendChild(el("span", "rname", "Thinking"));
+      const count = el("span", "rcount", `[${fmtNum((p.text || "").length)}]`);
+      count.title = `${(p.text || "").length} characters of reasoning`;
+      count.dataset.rcount = p.id;
+      row.appendChild(count);
+      row.appendChild(thinkingDots(streaming));
+      const chev = el("span", "chev", ICONS.chev);
+      row.appendChild(chev);
+      // while this bar is the live one, the agent · model label lives here
+      // (right-aligned) instead of in a meta line under the message — the
+      // part is open (no end time) and the message not completed yet
+      if (!(info.time && info.time.completed) && !(p.time && p.time.end)) {
+        const m = thinkMeta([info.agent, info.modelID].filter(Boolean).join(" · "));
+        if (m) row.appendChild(m);
       }
+      const body = el("div", "reasoning-body");
+      const node = el("div", "assistant-text", renderMarkdown(p.text || ""));
+      node.dataset.part = p.id;
+      body.appendChild(node);
+      // collapsed by default; an explicit user choice wins and survives re-renders
+      const open = S.reasoningOpen.has(p.id) ? S.reasoningOpen.get(p.id) : false;
+      body.style.display = open ? "block" : "none";
+      chev.classList.toggle("open", open);
+      row.onclick = () => {
+        const o = body.style.display === "block";
+        S.reasoningOpen.set(p.id, !o);
+        body.style.display = o ? "none" : "block";
+        chev.classList.toggle("open", !o);
+      };
+      r.appendChild(row);
+      r.appendChild(body);
+      return r;
+    }
     case "tool":
       return renderTool(p, info);
     case "file": {
@@ -1384,23 +1852,28 @@ function renderTool(p, info) {
       bodyFn = () => { const pre = el("pre"); pre.textContent = st.output || ""; return pre; };
   }
 
-  if (running && !sub) {
-    titleRow.classList.add("shimmer");
-  }
   const body = el("div", "tool-body");
-  titleRow.appendChild(el("span", "tname", esc(title) + (running && !taskLink ? "…" : "")));
+  // header mirrors the reasoning row: 🔨 Name [sub] with the animated ellipsis
+  // dots while the tool is running (same design as 🧠 Thinking [N] ...)
+  titleRow.appendChild(el("span", "ricon", "🔨"));
+  titleRow.appendChild(el("span", "tname", esc(title)));
   if (sub) titleRow.appendChild(el("span", "tsub", esc(sub)));
+  if (!taskLink) titleRow.appendChild(thinkingDots(running));
   if (taskLink) {
     titleRow.classList.add("task-link");
-    // while the subagent session is still ongoing, a spinner at the beginning
-    // of the line tells the user it is still working; the row itself stays
+    // while the subagent session is still ongoing, a spinner after the 🔨
+    // tells the user it is still working; the row itself stays
     // clickable and opens the session (read-only)
     const childRunning = sessionBusy(taskLink);
     titleRow.title = childRunning
       ? "Subagent still working — click to open its session (read-only)"
       : "Open subagent session (read-only)";
     if (childRunning) {
-      titleRow.prepend(el("span", "spinner", ICONS.spinner));
+      // keep the 🔨 at the beginning of the line; the spinner goes right after it
+      const sp = el("span", "spinner", ICONS.spinner);
+      const icon = titleRow.firstChild;
+      if (icon) titleRow.insertBefore(sp, icon.nextSibling);
+      else titleRow.prepend(sp);
     }
     titleRow.appendChild(el("span", "tsub ro-open", "open ↗"));
     titleRow.appendChild(el("span", "spacer"));
@@ -1505,13 +1978,49 @@ const BOARD_COLUMNS = [
 
 let boardCards = [];
 
+// Cards that just started are detected by comparing columns across loads: a
+// card that moved from open to inprogress with a session attached was
+// started (via a link trigger, the agent, or another client/window) and gets
+// a tab like the Start button creates — without switching to it. The first
+// load only seeds the snapshot, so nothing fires spuriously.
+let boardColByCard = {};
+
+async function trackStartedCards(cards) {
+  const prev = boardColByCard;
+  const next = {};
+  const started = [];
+  for (const c of cards) {
+    next[c.id] = c.column;
+    if (c.column === "inprogress" && c.sessionID && prev[c.id] === "open") started.push(c.sessionID);
+  }
+  boardColByCard = next;
+  for (const sid of started) {
+    // the session normally arrives via its session.created event before the
+    // board update; fetch it if it slipped through
+    if (!S.sessions.some((s) => s.id === sid)) await refreshSession(sid).catch(() => {});
+    openTab(sid);
+  }
+  if (started.length) renderTabs();
+}
+
+async function loadBoard() {
+  try {
+    const cards = (await get("/board")) || [];
+    await trackStartedCards(cards);
+    boardCards = cards;
+  } catch {
+    boardCards = [];
+  }
+  renderBoardPanel(); // keep the side panel in sync wherever the board changes
+}
+
 async function renderBoardView(main) {
   const header = el("header", "chat-header");
   header.appendChild(el("div", "title", "Board"));
   header.appendChild(el("div", "spacer"));
-  header.appendChild(el("span", "board-hint", "Drag cards between columns · double-click a title to edit"));
+  header.appendChild(el("span", "board-hint", "Drag cards to move · drag ⌖ onto an Open card to link · double-click an Open card title to edit"));
   const addBtn = el("button", "btn secondary board-add", ICONS.plus + "<span>Add card</span>");
-  addBtn.title = "Create a new card";
+  addBtn.title = "Create a new card in Open";
   addBtn.onclick = () => openAddCardModal();
   header.appendChild(addBtn);
   main.appendChild(header);
@@ -1537,39 +2046,62 @@ function openModal(title, build) {
   return ov;
 }
 
+// Cards can only be created in the Open column (work starts by moving a
+// card to In Progress), so there is no column picker here. The title is
+// multiline: Enter creates the card, Ctrl+Enter (or Shift+Enter) inserts a
+// newline. Images/files can be attached or pasted, same as the composer.
 function openAddCardModal() {
   openModal("Add card", (modal, ov) => {
     const field = el("div", "m-field");
-    field.appendChild(el("label", "m-label", "Title"));
-    const input = el("input");
-    input.type = "text";
+    field.appendChild(el("label", "m-label", "Task"));
+    const input = el("textarea", "m-textarea");
+    input.rows = 1;
     input.placeholder = "Describe the task for the agent…";
-    input.maxLength = 500;
     field.appendChild(input);
     modal.appendChild(field);
 
-    const colField = el("div", "m-field");
-    colField.appendChild(el("label", "m-label", "Column"));
-    const sel = el("select", "m-select");
-    for (const col of BOARD_COLUMNS) {
-      const opt = el("option", "", col.label);
-      opt.value = col.id;
-      if (col.id === "open") opt.selected = true;
-      sel.appendChild(opt);
-    }
-    colField.appendChild(sel);
-    modal.appendChild(colField);
+    const files = [];
+    const attachRow = el("div", "attach-row");
+    const redraw = () => {
+      renderAttachChipsInto(attachRow, files, (a) => {
+        files.splice(files.indexOf(a), 1);
+        redraw();
+      });
+      autosize(input);
+    };
+    const addFiles = async (fl) => {
+      files.push(...(await filesToAttachments(fl)));
+      redraw();
+    };
+    // paste images/files straight in (screenshots, copied files)
+    input.onpaste = (e) => {
+      const fl = e.clipboardData && e.clipboardData.files;
+      if (!fl || !fl.length) return; // plain text paste: default behaviour
+      e.preventDefault();
+      addFiles([...fl]);
+    };
+    input.oninput = () => autosize(input);
 
     const actions = el("div", "m-actions");
+    const attachBtn = el("button", "c-btn", ICONS.plus);
+    attachBtn.title = "Attach files";
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+    fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
+    attachBtn.onclick = () => fileInput.click();
+    const spacer = el("span");
+    spacer.style.flex = "1";
     const cancel = el("button", "btn ghost", "Cancel");
     cancel.onclick = () => ov.remove();
     const create = el("button", "btn primary", "Create card");
-    create.onclick = async () => {
+    const commit = async () => {
       const title = input.value.trim();
       if (!title) { input.focus(); return; }
       create.disabled = true;
       try {
-        await post("/board/card", { title, column: sel.value });
+        await post("/board/card", { title, column: "open", attachments: files });
         ov.remove();
         await loadBoard();
         renderBoard();
@@ -1579,8 +2111,132 @@ function openAddCardModal() {
         toast(e.message || String(e), true);
       }
     };
-    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); create.click(); } };
-    actions.append(cancel, create);
+    create.onclick = commit;
+    input.onkeydown = (e) => {
+      // Enter creates; Ctrl+Enter (and Shift+Enter) inserts a newline
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); commit(); }
+    };
+    actions.append(attachBtn, fileInput, spacer, cancel, create);
+    modal.appendChild(attachRow);
+    modal.appendChild(actions);
+    setTimeout(() => { autosize(input); input.focus(); }, 0);
+  });
+}
+
+/* ---------- schedule a timed start ---------- */
+
+// A card in Open can be given a startAt (unix ms): a background scheduler on
+// the server starts it when the time passes — same flow as the Start button,
+// so it works with no client connected. The dialog offers quick offsets plus
+// a free date/time picker.
+
+// Local timestamp formatted for the card badge: just the time today, a
+// "tomorrow" prefix the next day, otherwise a short date.
+function fmtSchedule(ts) {
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (ts >= today.getTime() && ts < today.getTime() + 86400000) return time;
+  if (ts >= today.getTime() + 86400000 && ts < today.getTime() + 2 * 86400000) return "tomorrow " + time;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time;
+}
+
+// Coarse relative time for tooltips/toasts: "in 2h 5m", "in 45m", "3d ago".
+function relTime(ts) {
+  let s = Math.round((ts - Date.now()) / 1000);
+  const past = s < 0;
+  s = Math.abs(s);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  const parts = [];
+  if (d) parts.push(d + "d");
+  if (h) parts.push(h + "h");
+  if (m) parts.push(m + "m");
+  if (!parts.length) return past ? "just now" : "in <1m";
+  const txt = parts.join(" ");
+  return past ? txt + " ago" : "in " + txt;
+}
+
+// datetime-local inputs want "YYYY-MM-DDTHH:mm" in the local zone.
+function toLocalInputValue(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function openScheduleModal(c) {
+  openModal(`Schedule card #${esc(c.id)}`, (modal, ov) => {
+    const field = el("div", "m-field");
+    field.appendChild(el("label", "m-label", "Start at"));
+    const input = el("input");
+    input.type = "datetime-local";
+    input.step = 60;
+    input.min = toLocalInputValue(new Date());
+    field.appendChild(input);
+    modal.appendChild(field);
+
+    // quick offsets set the picker; the picker stays the source of truth so
+    // a preset can still be fine-tuned by hand before saving
+    const presets = el("div", "schedule-presets");
+    for (const [label, ms] of [["In 1 hour", 36e5], ["In 2 hours", 2 * 36e5], ["In 8 hours", 8 * 36e5], ["In 24 hours", 24 * 36e5]]) {
+      const b = el("button", "kanban-card-btn", "<span>" + label + "</span>");
+      b.type = "button";
+      b.onclick = () => { input.value = toLocalInputValue(new Date(Date.now() + ms)); updatePreview(); };
+      presets.appendChild(b);
+    }
+    modal.appendChild(presets);
+
+    const preview = el("div", "schedule-preview");
+    const updatePreview = () => {
+      const ts = input.value ? new Date(input.value).getTime() : 0;
+      preview.textContent = ts ? `The agent starts this card ${relTime(ts)} — ${new Date(ts).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : "Pick a date and time";
+    };
+    input.oninput = updatePreview;
+    if (c.startAt) { input.value = toLocalInputValue(new Date(c.startAt)); }
+    updatePreview();
+
+    const actions = el("div", "m-actions");
+    const spacer = el("span");
+    spacer.style.flex = "1";
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    actions.append(spacer, cancel);
+
+    // an existing schedule can be removed right here
+    if (c.startAt) {
+      const remove = el("button", "btn ghost", "Remove");
+      remove.onclick = async () => {
+        remove.disabled = true;
+        try {
+          await patch("/board/card/" + c.id, { startAt: 0 });
+          ov.remove();
+          await loadBoard();
+          renderBoard();
+          toast(`Schedule removed from card #${c.id}`);
+        } catch (err) {
+          remove.disabled = false;
+          toast(err.message || String(err), true);
+        }
+      };
+      actions.insertBefore(remove, cancel);
+    }
+
+    const save = el("button", "btn primary", "Save");
+    save.onclick = async () => {
+      const ts = input.value ? new Date(input.value).getTime() : 0;
+      if (!ts) { input.focus(); return; }
+      save.disabled = true;
+      try {
+        await patch("/board/card/" + c.id, { startAt: ts });
+        ov.remove();
+        await loadBoard();
+        renderBoard();
+        toast(`Card #${c.id} scheduled — the agent starts it ${relTime(ts)}`);
+      } catch (err) {
+        save.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); save.click(); } };
+    actions.appendChild(save);
     modal.appendChild(actions);
     setTimeout(() => input.focus(), 0);
   });
@@ -1600,10 +2256,14 @@ async function startCard(c) {
     if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
     const sess = await post("/session", body);
     await patch("/board/card/" + c.id, { column: "inprogress", sessionID: sess.id });
+    // the card's task goes in as the plain user message, its attachments
+    // (if any) ride along as file parts — same shape the composer sends
+    const parts = [{ type: "text", text: c.title }];
+    if (c.attachments && c.attachments.length) parts.push(...c.attachments);
     await post(`/session/${sess.id}/prompt_async`, {
       agent: S.agent,
       model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
-      parts: [{ type: "text", text: c.title }],
+      parts,
     });
     await refreshSession(sess.id).catch(() => {});
     // Create a tab for the new session without activating it — like View,
@@ -1625,14 +2285,6 @@ async function viewCard(c) {
   navigate("/" + c.sessionID);
 }
 
-async function loadBoard() {
-  try {
-    boardCards = (await get("/board")) || [];
-  } catch {
-    boardCards = [];
-  }
-}
-
 function boardCardsIn(column) {
   return boardCards.filter((c) => c.column === column).sort((a, b) => a.order - b.order);
 }
@@ -1647,6 +2299,7 @@ function renderBoard() {
   for (const col of BOARD_COLUMNS) {
     board.appendChild(buildBoardColumn(col));
   }
+  drawLinkLines(); // repaint the border-to-border lines between linked cards
 }
 
 function buildBoardColumn(col) {
@@ -1662,33 +2315,79 @@ function buildBoardColumn(col) {
   for (const c of cards) list.appendChild(boardCardNode(c));
   colEl.appendChild(list);
 
-  // add-card input pinned to the bottom of the column
-  const add = el("div", "kanban-add");
-  const input = el("input", "kanban-add-input");
-  input.placeholder = "Add card…";
-  input.maxLength = 500;
-  const commit = async () => {
-    const title = input.value.trim();
-    if (!title) return;
-    input.value = "";
-    try {
-      await post("/board/card", { title, column: col.id });
-      await loadBoard();
-      renderBoard();
-      const next = $(`#kanban .kanban-col[data-column="${col.id}"] .kanban-add-input`);
-      if (next) next.focus();
-    } catch (e) {
-      toast(e.message || String(e), true);
-    }
-  };
-  input.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); commit(); }
-  };
-  add.appendChild(input);
-  colEl.appendChild(add);
+  // add-card input pinned to the bottom of the Open column — cards can only
+  // be created in open (work starts by moving a card to In Progress). Enter
+  // creates the card, Ctrl+Enter inserts a newline; images/files can be
+  // attached or pasted, same as the composer.
+  if (col.id === "open") {
+    const add = el("div", "kanban-add");
+    const input = el("textarea", "kanban-add-input");
+    input.rows = 1;
+    input.placeholder = "Add card…";
+    const files = [];
+    const attachRow = el("div", "attach-row");
+    const redraw = () => {
+      renderAttachChipsInto(attachRow, files, (a) => {
+        files.splice(files.indexOf(a), 1);
+        redraw();
+      });
+      autosize(input);
+    };
+    const addFiles = async (fl) => {
+      files.push(...(await filesToAttachments(fl)));
+      redraw();
+    };
+    input.onpaste = (e) => {
+      const fl = e.clipboardData && e.clipboardData.files;
+      if (!fl || !fl.length) return; // plain text paste: default behaviour
+      e.preventDefault();
+      addFiles([...fl]);
+    };
+    input.oninput = () => autosize(input);
+    const attachBtn = el("button", "kanban-add-attach", ICONS.plus);
+    attachBtn.title = "Attach files";
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+    fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
+    attachBtn.onclick = () => fileInput.click();
+    const row = el("div", "kanban-add-row");
+    row.append(attachBtn, input, fileInput);
+    add.append(attachRow, row);
+    colEl.appendChild(add);
+    const commit = async () => {
+      const title = input.value.trim();
+      if (!title) return;
+      const attachments = [...files];
+      try {
+        await post("/board/card", { title, column: "open", attachments });
+        input.value = "";
+        files.length = 0;
+        redraw();
+        await loadBoard();
+        renderBoard();
+        const next = $(`#kanban .kanban-col[data-column="open"] .kanban-add-input`);
+        if (next) next.focus();
+      } catch (e) {
+        toast(e.message || String(e), true);
+      }
+    };
+    input.onkeydown = (e) => {
+      // Enter creates; Ctrl+Enter (and Shift+Enter) inserts a newline
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); commit(); }
+    };
+    setTimeout(() => autosize(input), 0);
+  }
 
-  // drop target: insert before the card under the pointer, else at the end
-  colEl.ondragover = (e) => { e.preventDefault(); colEl.classList.add("drag-over"); };
+  // drop target: insert before the card under the pointer, else at the end.
+  // Link drags (the ⌖ icon) target cards, not columns, so they are ignored
+  // here — the cards themselves handle them.
+  colEl.ondragover = (e) => {
+    if (e.dataTransfer.types.includes(LINK_MIME)) return;
+    e.preventDefault();
+    colEl.classList.add("drag-over");
+  };
   colEl.ondragleave = (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove("drag-over"); };
   colEl.ondrop = (e) => {
     e.preventDefault();
@@ -1705,6 +2404,12 @@ function buildBoardColumn(col) {
   return colEl;
 }
 
+// Cards are linked with a custom drag type so a link drag never moves the
+// dragged card itself; linkDragSource tracks the drag within the page (the
+// payload is unreadable during dragover).
+const LINK_MIME = "application/x-board-link";
+let linkDragSource = null;
+
 function boardCardNode(c) {
   const card = el("div", "kanban-card");
   card.draggable = true;
@@ -1715,15 +2420,53 @@ function boardCardNode(c) {
   if (c.column === "inprogress" && c.sessionID && sessionBusy(c.sessionID)) {
     head.appendChild(el("span", "spinner", ICONS.spinner));
   }
+  // short numeric ID so cards are easy to reference (links, chat, commits)
+  head.appendChild(el("span", "kanban-card-id", "#" + esc(c.id)));
   const title = el("div", "kanban-card-title", esc(c.title));
-  title.title = "Double-click to edit";
+  if (c.column === "open") title.title = "Double-click to edit";
   head.appendChild(title);
+  // sessions watching this card get pinged when it is marked done
+  if (c.watchers && c.watchers.length) {
+    const n = c.watchers.length;
+    const w = el("span", "kanban-watchers", ICONS.eye + (n > 1 ? n : ""));
+    w.title = `Watched by ${n} session${n > 1 ? "s" : ""} — they are notified when the card is marked done`;
+    head.appendChild(w);
+  }
   card.appendChild(head);
 
+  // scheduled start: clock emoji + expected start time; clicking it reopens
+  // the schedule dialog (open cards only — started cards have none left)
+  if (c.startAt) {
+    const sched = el("div", "kanban-card-schedule", "🕐 <span>" + esc(fmtSchedule(c.startAt)) + "</span>");
+    sched.title = `Scheduled start: ${new Date(c.startAt).toLocaleString()} (${relTime(c.startAt)})`;
+    if (c.column === "open") {
+      sched.classList.add("clickable");
+      sched.onclick = (e) => { e.stopPropagation(); openScheduleModal(c); };
+    }
+    card.appendChild(sched);
+  }
+
+  // attachments (usually screenshots) attached at creation — shown as chips,
+  // and prompted to the session when the card is started
+  if (c.attachments && c.attachments.length) {
+    const atts = el("div", "kanban-card-attachments");
+    for (const a of c.attachments) {
+      const chip = el("div", "attach-chip");
+      if (a.mime && a.mime.startsWith("image/")) {
+        chip.innerHTML = `<img src="${esc(a.url)}"><span>${esc(a.filename || "image")}</span>`;
+      } else {
+        chip.innerHTML = ICONS.file + `<span>${esc(a.filename || "file")}</span>`;
+      }
+      atts.appendChild(chip);
+    }
+    card.appendChild(atts);
+  }
+
   const actions = el("div", "kanban-card-actions");
-  // Cards in "In Progress" are already started, so they must not offer a
-  // Start button (View below opens the session working on them).
-  if (c.column !== "inprogress") {
+  // Only cards waiting in Open offer Start: In Progress cards are already
+  // being worked on (View below opens the session working on them), and
+  // Done cards are finished — restarting them makes no sense.
+  if (c.column === "open") {
     const start = el("button", "kanban-card-btn", ICONS.play + "<span>Start</span>");
     start.title = "Start the agent on this card in a new session";
     start.onclick = async (e) => {
@@ -1734,6 +2477,12 @@ function boardCardNode(c) {
       renderBoard(); // re-render restores the real buttons
     };
     actions.appendChild(start);
+    // schedule a timed start: the server starts the card when the time
+    // passes, with no client needing to be connected
+    const sched = el("button", "kanban-card-btn", ICONS.clock + "<span>Schedule</span>");
+    sched.title = "Set a date and time for this card to start automatically";
+    sched.onclick = (e) => { e.stopPropagation(); openScheduleModal(c); };
+    actions.appendChild(sched);
   }
   if (c.sessionID) {
     const view = el("button", "kanban-card-btn", ICONS.eye + "<span>View</span>");
@@ -1741,23 +2490,26 @@ function boardCardNode(c) {
     view.onclick = (e) => { e.stopPropagation(); viewCard(c); };
     actions.appendChild(view);
   }
-  if (actions.children.length) card.appendChild(actions);
+  // Only Open cards are editable: In Progress and Done cards are locked —
+  // no Edit button, and their titles can't be double-click-edited either.
+  if (c.column === "open") {
+    const edit = el("button", "kanban-card-btn", ICONS.edit + "<span>Edit</span>");
+    edit.title = "Edit this card";
+    edit.onclick = (e) => { e.stopPropagation(); openEditCardModal(c); };
+    actions.appendChild(edit);
+  }
+  actions.appendChild(linkPill(c));
+  card.appendChild(actions);
 
   const delBtn = el("button", "kanban-card-del", ICONS.close);
   delBtn.title = "Delete card";
-  delBtn.onclick = async (e) => {
+  delBtn.onclick = (e) => {
     e.stopPropagation();
-    try {
-      await del("/board/card/" + c.id);
-      await loadBoard();
-      renderBoard();
-    } catch (err) {
-      toast(err.message || String(err), true);
-    }
+    confirmDeleteCard(c);
   };
   card.appendChild(delBtn);
 
-  title.ondblclick = () => {
+  if (c.column === "open") title.ondblclick = () => {
     title.contentEditable = "true";
     title.focus();
     document.getSelection().selectAllChildren(title);
@@ -1766,7 +2518,7 @@ function boardCardNode(c) {
     if (title.contentEditable !== "true") return;
     title.contentEditable = "false";
     const v = title.textContent.trim();
-    if (!v || v === c.title) { title.textContent = esc(c.title); return; }
+    if (!v || v === c.title) { title.textContent = c.title; return; }
     c.title = v;
     try {
       await patch("/board/card/" + c.id, { title: v });
@@ -1786,7 +2538,267 @@ function boardCardNode(c) {
     card.classList.add("dragging");
   };
   card.ondragend = () => card.classList.remove("dragging");
+
+  // link drop target: only cards still waiting in Open can be targeted
+  card.ondragover = (e) => {
+    if (!e.dataTransfer.types.includes(LINK_MIME)) return;
+    if (c.column !== "open" || c.id === linkDragSource) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "link";
+    card.classList.add("link-over");
+  };
+  card.ondragleave = () => card.classList.remove("link-over");
+  card.ondrop = async (e) => {
+    card.classList.remove("link-over");
+    const src = e.dataTransfer.getData(LINK_MIME);
+    if (!src || src === c.id || c.column !== "open") return;
+    e.preventDefault();
+    e.stopPropagation(); // a link drop must not move the card
+    try {
+      await patch("/board/card/" + src, { link: c.id });
+      await loadBoard();
+      renderBoard();
+      toast(`Card ${src} is now linked to card ${c.id} — it starts when ${src} is done`);
+    } catch (err) {
+      toast(err.message || String(err), true);
+    }
+  };
   return card;
+}
+
+// The link pill: a small target icon next to the other card buttons. Drag it
+// onto a card in Open to link the two — once the source card is done, the
+// target starts automatically in a fresh session. While linked, the pill
+// reads "Will start Card X"; clicking it removes the link.
+function linkPill(c) {
+  const pill = el("button", "kanban-card-btn kanban-link");
+  pill.draggable = true;
+  if (c.link) {
+    pill.classList.add("linked");
+    pill.innerHTML = ICONS.target + "<span>Will start Card " + esc(c.link) + "</span>";
+    pill.title = `When this card is done, card ${c.link} starts automatically. Click to remove the link.`;
+    pill.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await patch("/board/card/" + c.id, { link: "" });
+        await loadBoard();
+        renderBoard();
+        toast("Link removed");
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    };
+  } else {
+    pill.innerHTML = ICONS.target;
+    pill.title = "Drag onto a card in Open to link it — it starts automatically when this card is done";
+  }
+  pill.ondragstart = (e) => {
+    e.stopPropagation(); // drag the link, not the card
+    linkDragSource = c.id;
+    e.dataTransfer.setData(LINK_MIME, c.id);
+    e.dataTransfer.effectAllowed = "link";
+    pill.classList.add("dragging-link");
+  };
+  pill.ondragend = () => {
+    linkDragSource = null;
+    pill.classList.remove("dragging-link");
+  };
+  return pill;
+}
+
+/* ---------- link lines between linked cards ---------- */
+
+// Linked cards are connected border-to-border with a dashed animated line,
+// painted by an SVG overlay above the board. The overlay lives in the board's
+// scrollable content space, so lines move with the board's own scroll; column
+// scrolls, resizes and re-renders redraw it. The line is dim by default and
+// turns green while the source or the target card is hovered.
+const SVG_NS = "http://www.w3.org/2000/svg";
+let linkLineRO = null; // keeps lines aligned while the board box changes
+let linkLineROBoard = null;
+
+function drawLinkLines() {
+  const board = $("#kanban");
+  if (!board) return;
+  if (!linkLineRO) linkLineRO = new ResizeObserver(() => drawLinkLines());
+  if (linkLineROBoard !== board) {
+    if (linkLineROBoard) linkLineRO.unobserve(linkLineROBoard);
+    linkLineRO.observe(board);
+    linkLineROBoard = board;
+  }
+  if (!board._linkLinesBound) {
+    board._linkLinesBound = true;
+    // column scrolls move cards within content space; capture catches the
+    // (non-bubbling) scroll events of the column card lists
+    board.addEventListener("scroll", () => drawLinkLines(), true);
+    // hovering the source or the target card lights its line up green
+    board.addEventListener("mouseover", (e) => {
+      const card = e.target.closest(".kanban-card");
+      hotLinkLines(card ? card.dataset.id : null);
+    });
+    board.addEventListener("mouseleave", () => hotLinkLines(null));
+  }
+  const sources = boardCards.filter((c) => c.link);
+  let svg = board.querySelector("svg.kanban-links");
+  if (!sources.length) {
+    if (svg) svg.remove();
+    return;
+  }
+  if (!svg) {
+    svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "kanban-links");
+    board.appendChild(svg);
+  }
+  // cover the whole scrollable content, so lines reach cards that are
+  // scrolled out of view instead of being cut at the viewport edge
+  const w = Math.max(board.scrollWidth, board.clientWidth);
+  const h = Math.max(board.scrollHeight, board.clientHeight);
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("width", w);
+  svg.setAttribute("height", h);
+  const brect = board.getBoundingClientRect();
+  // card box in board-content coordinates — the SVG overlay's own space
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+    return {
+      left: r.left - brect.left + board.scrollLeft,
+      right: r.right - brect.left + board.scrollLeft,
+      top: r.top - brect.top + board.scrollTop,
+      bottom: r.bottom - brect.top + board.scrollTop,
+    };
+  };
+  svg.replaceChildren();
+  for (const c of sources) {
+    const sNode = board.querySelector(`.kanban-card[data-id="${CSS.escape(c.id)}"]`);
+    const tNode = board.querySelector(`.kanban-card[data-id="${CSS.escape(c.link)}"]`);
+    if (!sNode || !tNode) continue; // dangling link (target deleted)
+    const s = box(sNode), t = box(tNode);
+    const scx = (s.left + s.right) / 2, scy = (s.top + s.bottom) / 2;
+    const tcx = (t.left + t.right) / 2, tcy = (t.top + t.bottom) / 2;
+    // anchor on the two facing borders: horizontally when the cards sit side
+    // by side (different columns), vertically when stacked in one column
+    let d;
+    if (Math.abs(tcx - scx) >= Math.abs(tcy - scy)) {
+      const dir = tcx >= scx ? 1 : -1;
+      const sx = dir > 0 ? s.right : s.left, tx = dir > 0 ? t.left : t.right;
+      const k = Math.max(38, Math.abs(tx - sx) / 2);
+      d = `M ${sx} ${scy} C ${sx + dir * k} ${scy}, ${tx - dir * k} ${tcy}, ${tx} ${tcy}`;
+    } else {
+      const dir = tcy >= scy ? 1 : -1;
+      const sy = dir > 0 ? s.bottom : s.top, ty = dir > 0 ? t.top : t.bottom;
+      const k = Math.max(38, Math.abs(ty - sy) / 2);
+      d = `M ${scx} ${sy} C ${scx} ${sy + dir * k}, ${tcx} ${ty - dir * k}, ${tcx} ${ty}`;
+    }
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("class", "kanban-link-line");
+    path.dataset.src = c.id;
+    path.dataset.dst = c.link;
+    svg.appendChild(path);
+  }
+}
+
+// Lights up the lines touching the hovered card (id), dims all others.
+function hotLinkLines(id) {
+  const board = $("#kanban");
+  if (!board) return;
+  for (const p of board.querySelectorAll(".kanban-link-line")) {
+    p.classList.toggle("hot", !!id && (p.dataset.src === id || p.dataset.dst === id));
+  }
+}
+
+// Edit dialog: title and column, pre-filled with the card's current values.
+// The title is a multiline textarea (Enter saves, Ctrl+Enter a newline) so
+// multiline card titles stay editable.
+function openEditCardModal(c) {
+  openModal("Edit card", (modal, ov) => {
+    const field = el("div", "m-field");
+    field.appendChild(el("label", "m-label", "Title"));
+    const input = el("textarea", "m-textarea");
+    input.rows = 1;
+    input.value = c.title;
+    field.appendChild(input);
+    modal.appendChild(field);
+
+    const colField = el("div", "m-field");
+    colField.appendChild(el("label", "m-label", "Column"));
+    const sel = el("select", "m-select");
+    for (const col of BOARD_COLUMNS) {
+      const opt = el("option", "", col.label);
+      opt.value = col.id;
+      if (col.id === c.column) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    colField.appendChild(sel);
+    modal.appendChild(colField);
+
+    const actions = el("div", "m-actions");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const save = el("button", "btn primary", "Save");
+    save.onclick = async () => {
+      const title = input.value.trim();
+      if (!title) { input.focus(); return; }
+      save.disabled = true;
+      try {
+        const body = { title };
+        if (sel.value !== c.column) body.column = sel.value;
+        await patch("/board/card/" + c.id, body);
+        ov.remove();
+        await loadBoard();
+        renderBoard();
+        toast("Card updated");
+      } catch (e) {
+        save.disabled = false;
+        toast(e.message || String(e), true);
+      }
+    };
+    input.onkeydown = (e) => {
+      // Enter saves; Ctrl+Enter (and Shift+Enter) inserts a newline
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); save.click(); }
+    };
+    input.oninput = () => autosize(input);
+    actions.append(cancel, save);
+    modal.appendChild(actions);
+    setTimeout(() => { autosize(input); input.focus(); input.setSelectionRange(input.value.length, input.value.length); }, 0);
+  });
+}
+
+// Generic confirmation dialog: a message with Cancel/confirm buttons that
+// resolves true only when the confirm button is clicked (backdrop click
+// counts as cancel).
+function confirmModal(title, message, confirmLabel) {
+  return new Promise((resolve) => {
+    openModal(title, (modal, ov) => {
+      ov.onclick = (e) => { if (e.target === ov) { ov.remove(); resolve(false); } };
+      modal.appendChild(el("p", "m-sub", message));
+      const actions = el("div", "m-actions");
+      const cancel = el("button", "btn ghost", "Cancel");
+      cancel.onclick = () => { ov.remove(); resolve(false); };
+      const ok = el("button", "btn danger", confirmLabel);
+      ok.onclick = () => { ov.remove(); resolve(true); };
+      actions.append(cancel, ok);
+      modal.appendChild(actions);
+    });
+  });
+}
+
+// Deletion asks for confirmation — a dropped card is gone for good.
+async function confirmDeleteCard(c) {
+  const ok = await confirmModal(
+    "Delete card",
+    `Delete card #${esc(c.id)} "${esc(c.title)}"? This cannot be undone.`,
+    "Delete"
+  );
+  if (!ok) return;
+  try {
+    await del("/board/card/" + c.id);
+    await loadBoard();
+    renderBoard();
+    toast("Card deleted");
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
 }
 
 async function moveBoardCard(id, column, beforeID) {
@@ -1802,6 +2814,16 @@ async function moveBoardCard(id, column, beforeID) {
     const curIdx = boardCardsIn(column).findIndex((x) => x.id === id);
     if (curIdx === targetIdx) return; // dropped back where it was
   }
+  // Leaving In Progress — to Done, or back to Open — stops the agent working
+  // on the card, so ask before pulling the rug out from under it.
+  if (card.column === "inprogress" && (column === "done" || column === "open")) {
+    const ok = await confirmModal(
+      "Stop the agent?",
+      `Moving card #${esc(card.id)} "${esc(card.title)}" from In Progress to ${column === "done" ? "Done" : "Open"} will stop the agent. Are you sure you want to stop the current progress?`,
+      "Stop & move"
+    );
+    if (!ok) return;
+  }
   // optimistic: reposition locally, then reconcile with the server
   col.splice(targetIdx, 0, card);
   col.forEach((c, i) => { c.column = column; c.order = i; });
@@ -1813,6 +2835,299 @@ async function moveBoardCard(id, column, beforeID) {
     toast(e.message || String(e), true);
   }
   renderBoard();
+}
+
+/* ---------- cron jobs (second fixed tab) ---------- */
+
+// Cron jobs run a prompt on a schedule: every run starts a fresh session
+// titled after the job and prompts it with the job's prompt. Managed by the
+// backend (internal/cron + a sweep in internal/app), so jobs and their
+// state survive browser refreshes — the UI here is a thin list over
+// GET/POST/PATCH/DELETE /cron.
+
+let cronJobs = [];
+
+async function loadCron() {
+  try {
+    cronJobs = (await get("/cron")) || [];
+  } catch {
+    cronJobs = [];
+  }
+}
+
+// A job is "running" while any of its recent runs' sessions is busy — the
+// hourglass emoji next to the title marks those.
+function cronRunning(j) {
+  return (j.sessions || []).some((sid) => sessionBusy(sid));
+}
+
+// The session the View button targets: the newest run still working, else
+// the newest run (the last finished one). Jobs that never ran have no
+// target — and no View button.
+function cronViewTarget(j) {
+  const sids = j.sessions || [];
+  for (let i = sids.length - 1; i >= 0; i--) {
+    if (sessionBusy(sids[i])) return sids[i];
+  }
+  return sids[sids.length - 1] || null;
+}
+
+async function renderCronView(main) {
+  const header = el("header", "chat-header");
+  header.appendChild(el("div", "title", "Cron jobs"));
+  header.appendChild(el("div", "spacer"));
+  header.appendChild(el("span", "board-hint", "Every run starts a fresh session with the prompt · schedules follow the server's timezone"));
+  const addBtn = el("button", "btn secondary board-add", ICONS.plus + "<span>New cron job</span>");
+  addBtn.title = "Create a new cron job";
+  addBtn.onclick = () => openCronModal();
+  header.appendChild(addBtn);
+  main.appendChild(header);
+  const list = el("div", "cron-list");
+  list.id = "cron-list";
+  main.appendChild(list);
+  await loadCron();
+  renderCronList();
+}
+
+function renderCronList() {
+  const list = $("#cron-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!cronJobs.length) {
+    list.appendChild(el("div", "cron-empty", "No cron jobs yet<br>Create one to run a prompt on a schedule"));
+    return;
+  }
+  for (const j of cronJobs) list.appendChild(cronRow(j));
+}
+
+function cronRow(j) {
+  const row = el("div", "cron-row" + (j.paused ? " paused" : ""));
+  const main = el("div", "cron-row-main");
+
+  const head = el("div", "cron-row-head");
+  if (cronRunning(j)) {
+    const hg = el("span", "cron-hourglass", "⏳");
+    hg.title = "A run is in progress";
+    head.appendChild(hg);
+  }
+  head.appendChild(el("span", "cron-title", esc(j.title || "Untitled")));
+  if (j.paused) {
+    const p = el("span", "cron-badge", "paused");
+    p.title = "Paused — the next run will not fire until resumed";
+    head.appendChild(p);
+  }
+  main.appendChild(head);
+
+  const meta = el("div", "cron-row-meta");
+  const spec = el("span", "cron-spec", esc(j.spec));
+  spec.title = "Schedule (cron expression, server timezone)";
+  meta.appendChild(spec);
+  if (j.nextRun && !j.paused) {
+    meta.appendChild(el("span", "cron-meta-sep", "·"));
+    const n = el("span", "cron-next", "next " + relTime(j.nextRun));
+    n.title = "Next run: " + new Date(j.nextRun).toLocaleString();
+    meta.appendChild(n);
+  }
+  if (j.lastRun) {
+    meta.appendChild(el("span", "cron-meta-sep", "·"));
+    const l = el("span", "cron-last", "last " + relTime(j.lastRun));
+    l.title = "Last run: " + new Date(j.lastRun).toLocaleString();
+    meta.appendChild(l);
+  }
+  if (j.runs) {
+    meta.appendChild(el("span", "cron-meta-sep", "·"));
+    meta.appendChild(el("span", "cron-runs", j.runs + (j.runs === 1 ? " run" : " runs")));
+  }
+  main.appendChild(meta);
+
+  const prompt = el("div", "cron-row-prompt", esc(j.prompt));
+  prompt.title = j.prompt;
+  main.appendChild(prompt);
+  row.appendChild(main);
+
+  const actions = el("div", "cron-row-actions");
+  // Pause holds only the NEXT run: a session already started by an earlier
+  // run keeps working. Play re-arms the job without firing it now.
+  if (j.paused) {
+    const play = el("button", "kanban-card-btn", ICONS.play + "<span>Play</span>");
+    play.title = "Resume — arms the job for its next scheduled run (does not run now)";
+    play.onclick = async (e) => {
+      e.stopPropagation();
+      play.disabled = true;
+      try {
+        const updated = await patch("/cron/" + j.id, { paused: false });
+        await loadCron();
+        renderCronList();
+        toast(`"${j.title || "Untitled"}" resumed — next run ${updated && updated.nextRun ? relTime(updated.nextRun) : "scheduled"}`);
+      } catch (err) {
+        play.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    actions.appendChild(play);
+  } else {
+    const pause = el("button", "kanban-card-btn", ICONS.pause + "<span>Pause</span>");
+    pause.title = "Pause — the current run (if any) keeps going, only the next run is held";
+    pause.onclick = async (e) => {
+      e.stopPropagation();
+      pause.disabled = true;
+      try {
+        await patch("/cron/" + j.id, { paused: true });
+        await loadCron();
+        renderCronList();
+        toast(`"${j.title || "Untitled"}" paused`);
+      } catch (err) {
+        pause.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    actions.appendChild(pause);
+  }
+  const target = cronViewTarget(j);
+  if (target) {
+    const view = el("button", "kanban-card-btn", ICONS.eye + "<span>View</span>");
+    view.title = "Open the latest active session (or the last finished one)";
+    view.onclick = async (e) => {
+      e.stopPropagation();
+      await refreshSession(target).catch(() => {});
+      navigate("/" + target);
+    };
+    actions.appendChild(view);
+  }
+  const edit = el("button", "kanban-card-btn", ICONS.edit + "<span>Edit</span>");
+  edit.title = "Edit the title, prompt or schedule";
+  edit.onclick = (e) => { e.stopPropagation(); openCronModal(j); };
+  actions.appendChild(edit);
+  const delBtn = el("button", "kanban-card-btn cron-del", ICONS.trash + "<span>Delete</span>");
+  delBtn.title = "Delete this cron job";
+  delBtn.onclick = async (e) => {
+    e.stopPropagation();
+    const ok = await confirmModal(
+      "Delete cron job",
+      `Delete cron job "${esc(j.title || "Untitled")}"? Its past sessions are kept. This cannot be undone.`,
+      "Delete"
+    );
+    if (!ok) return;
+    try {
+      await del("/cron/" + j.id);
+      await loadCron();
+      renderCronList();
+      toast("Cron job deleted");
+    } catch (err) {
+      toast(err.message || String(err), true);
+    }
+  };
+  actions.appendChild(delBtn);
+  row.appendChild(actions);
+  return row;
+}
+
+// Create (j undefined) or edit (j given) a cron job. The schedule field
+// takes a cron expression, an @macro or "@every <duration>"; presets fill
+// it in and a live preview validates it against the server (GET
+// /cron/preview) and shows the next fire time.
+function openCronModal(j) {
+  const editing = !!j;
+  openModal(editing ? "Edit cron job" : "New cron job", (modal, ov) => {
+    const titleField = el("div", "m-field");
+    titleField.appendChild(el("label", "m-label", "Title"));
+    const title = el("input");
+    title.type = "text";
+    title.placeholder = "e.g. Nightly dependency check";
+    title.maxLength = 200;
+    if (editing) title.value = j.title || "";
+    titleField.appendChild(title);
+    modal.appendChild(titleField);
+
+    const promptField = el("div", "m-field");
+    promptField.appendChild(el("label", "m-label", "Prompt"));
+    const prompt = el("textarea", "m-textarea");
+    prompt.rows = 3;
+    prompt.placeholder = "Sent to a fresh session on every run…";
+    if (editing) prompt.value = j.prompt || "";
+    promptField.appendChild(prompt);
+    modal.appendChild(promptField);
+
+    const specField = el("div", "m-field");
+    specField.appendChild(el("label", "m-label", "Schedule"));
+    const spec = el("input");
+    spec.type = "text";
+    spec.spellcheck = false;
+    spec.placeholder = "0 9 * * * — cron, @hourly, @every 30m…";
+    if (editing) spec.value = j.spec || "";
+    specField.appendChild(spec);
+    modal.appendChild(specField);
+
+    const presets = el("div", "schedule-presets");
+    for (const [label, s] of [
+      ["Every hour", "0 * * * *"],
+      ["Every 30 min", "*/30 * * * *"],
+      ["Daily 09:00", "0 9 * * *"],
+      ["Weekdays 09:00", "0 9 * * 1-5"],
+      ["Weekly Mon 09:00", "0 9 * * 1"],
+    ]) {
+      const b = el("button", "kanban-card-btn", "<span>" + label + "</span>");
+      b.type = "button";
+      b.onclick = () => { spec.value = s; updatePreview(); };
+      presets.appendChild(b);
+    }
+    modal.appendChild(presets);
+
+    const preview = el("div", "schedule-preview");
+    modal.appendChild(preview);
+    let previewTimer = 0, previewSeq = 0;
+    const updatePreview = () => {
+      const s = spec.value.trim();
+      const my = ++previewSeq;
+      if (!s) {
+        preview.classList.remove("err");
+        preview.textContent = "Pick a schedule";
+        return;
+      }
+      preview.classList.remove("err");
+      preview.textContent = "…";
+      get("/cron/preview?spec=" + encodeURIComponent(s)).then((r) => {
+        if (my !== previewSeq) return;
+        preview.textContent = `Next run: ${new Date(r.next).toLocaleString()} (${relTime(r.next)})`;
+      }).catch((e) => {
+        if (my !== previewSeq) return;
+        preview.classList.add("err");
+        preview.textContent = e.message || "Invalid schedule";
+      });
+    };
+    spec.oninput = () => { clearTimeout(previewTimer); previewTimer = setTimeout(updatePreview, 250); };
+
+    const actions = el("div", "m-actions");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const save = el("button", "btn primary", editing ? "Save" : "Create cron job");
+    save.onclick = async () => {
+      const t = title.value.trim();
+      const p = prompt.value.trim();
+      const s = spec.value.trim();
+      if (!t) { title.focus(); return; }
+      if (!p) { prompt.focus(); return; }
+      if (!s) { spec.focus(); return; }
+      save.disabled = true;
+      try {
+        if (editing) await patch("/cron/" + j.id, { title: t, prompt: p, spec: s });
+        else await post("/cron", { title: t, prompt: p, spec: s });
+        ov.remove();
+        await loadCron();
+        renderCronList();
+        toast(editing ? "Cron job updated" : "Cron job created");
+      } catch (e) {
+        save.disabled = false;
+        toast(e.message || String(e), true);
+      }
+    };
+    title.onkeydown = prompt.onkeydown = spec.onkeydown = (e) => {
+      if (e.key === "Enter" && e.target !== prompt) { e.preventDefault(); save.click(); }
+    };
+    actions.append(cancel, save);
+    modal.appendChild(actions);
+    setTimeout(() => { title.focus(); updatePreview(); }, 0);
+  });
 }
 
 /* ---------- composer ---------- */
@@ -2009,7 +3324,7 @@ function buildComposerRegion(region) {
     : "No Git";
   inner.appendChild(hint);
 
-  setTimeout(() => { autosize(ta); if (!S.current) ta.focus(); }, 0);
+  setTimeout(() => { autosize(ta); if (!S.current || isPendingTab(S.current)) ta.focus(); }, 0);
 }
 
 function autosize(ta) {
@@ -2045,14 +3360,7 @@ async function doSend() {
   composerFiles.delete(draftKey());
 
   try {
-    let sid = S.current;
-    if (!sid) {
-      const body = { agent: S.agent };
-      if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
-      const sess = await post("/session", body);
-      sid = sess.id;
-      navigate("/" + sid);
-    }
+    let sid = await ensureSessionId();
     await loadMessages(sid).catch(() => {});
     const slash = !isCmd && text.startsWith("/") ? cmdQuery(text) : null;
     const known = slash && (S.commands || []).some((c) => c.name === slash.name);
@@ -2086,22 +3394,37 @@ async function refreshSession(sid) {
   } catch {}
 }
 
-async function onFilesPicked(files) {
+// Read picked files into composer-style attachment parts ({type, mime, url,
+// filename} with a data URL) — the shape prompt_async expects, and the shape
+// stored on board cards so Start can pass them to the session prompt.
+async function filesToAttachments(files) {
+  const out = [];
   for (const f of files) {
     const dataUrl = await new Promise((res) => {
       const rd = new FileReader();
       rd.onload = () => res(rd.result);
       rd.readAsDataURL(f);
     });
-    currentAttachments().push({ type: "file", mime: f.type || "text/plain", url: dataUrl, filename: f.name });
+    out.push({ type: "file", mime: f.type || "text/plain", url: dataUrl, filename: f.name });
   }
+  return out;
+}
+
+async function onFilesPicked(files) {
+  const atts = await filesToAttachments(files);
+  currentAttachments().push(...atts);
   renderComposerRegion();
   const ta = $("#composer-region textarea");
   if (ta) ta.focus();
 }
 
-function renderAttachChips(row) {
-  for (const a of currentAttachments()) {
+// Attachment chips for a plain array (the composer's list lives in
+// composerFiles and goes through renderAttachChips below; the add-card
+// modal and the board's inline input keep local lists). onRemove is called
+// with the removed attachment so the owner can update its list.
+function renderAttachChipsInto(row, list, onRemove) {
+  row.innerHTML = "";
+  for (const a of list) {
     const chip = el("div", "attach-chip");
     if (a.mime && a.mime.startsWith("image/")) {
       chip.innerHTML = `<img src="${esc(a.url)}"><span>${esc(a.filename)}</span>`;
@@ -2109,13 +3432,17 @@ function renderAttachChips(row) {
       chip.innerHTML = ICONS.file + `<span>${esc(a.filename)}</span>`;
     }
     const x = el("button", "", "✕");
-    x.onclick = () => {
-      composerFiles.set(draftKey(), currentAttachments().filter((t) => t !== a));
-      renderComposerRegion();
-    };
+    x.onclick = () => onRemove && onRemove(a);
     chip.appendChild(x);
     row.appendChild(chip);
   }
+}
+
+function renderAttachChips(row) {
+  renderAttachChipsInto(row, currentAttachments(), (a) => {
+    composerFiles.set(draftKey(), currentAttachments().filter((t) => t !== a));
+    renderComposerRegion();
+  });
 }
 
 /* ---------- agent / model selectors ---------- */
@@ -2468,14 +3795,7 @@ function pickCmd(ta, c) {
 
 async function runCommand(name, args) {
   try {
-    let sid = S.current;
-    if (!sid) {
-      const body = { agent: S.agent };
-      if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
-      const sess = await post("/session", body);
-      sid = sess.id;
-      navigate("/" + sid);
-    }
+    const sid = await ensureSessionId();
     await post(`/session/${sid}/command`, { command: name, arguments: args, agent: S.agent });
     await refreshSession(sid);
     renderSidebar();
@@ -2487,14 +3807,14 @@ async function runCommand(name, args) {
 }
 
 async function runUICommand(name) {
-  if (name === "new") { navigate(""); return; }
+  if (name === "new") { newSessionTab(); return; }
   if (name === "models") {
     const anchor = $("#composer-region .c-select") || $("#composer-region");
     if (anchor) openModelPicker(anchor);
     return;
   }
   if (name === "undo" || name === "redo") {
-    if (!S.current) { toast("No session to " + name, true); return; }
+    if (!S.current || isPendingTab(S.current)) { toast("No session to " + name, true); return; }
     try {
       if (name === "undo") {
         const store = msgStore(S.current);
@@ -2721,13 +4041,17 @@ async function route() {
   if (id === "board") {
     S.view = "board";
     S.current = null;
+  } else if (id === "cron") {
+    S.view = "cron";
+    S.current = null;
   } else {
     S.view = "sessions";
     S.current = id || null;
   }
   // a subagent session opened from a task part is not in the session list —
   // fetch its info so the read-only view can resolve parentID/title
-  if (S.current && !S.sessions.find((s) => s.id === S.current) && !S.subagents.has(S.current)) {
+  if (S.current && !isPendingTab(S.current) &&
+      !S.sessions.find((s) => s.id === S.current) && !S.subagents.has(S.current)) {
     await get("/session/" + S.current)
       .then((info) => { if (info && info.id) S.subagents.set(info.id, info); })
       .catch(() => {});
@@ -2736,7 +4060,7 @@ async function route() {
   renderSidebar();
   renderMain();
   updateTab();
-  if (S.current) {
+  if (S.current && !isPendingTab(S.current)) {
     loadSession(S.current);
   }
 }
@@ -2816,12 +4140,17 @@ async function boot() {
     });
   }
 
-  $("#btn-new-session").onclick = () => navigate("");
-  $("#rail-new").onclick = () => navigate("");
+  $("#btn-new-session").onclick = () => newSessionTab();
+  $("#rail-new").onclick = () => newSessionTab();
   $("#rail-settings").onclick = openSettings;
   $("#rail-sidebar").onclick = () => setSidebar(!S.sidebarOpen);
+  $("#rail-board-panel").onclick = () => setBoardPanel(!S.boardPanelOpen);
+  $("#board-panel-expand").onclick = () => navigate("/board");
+  $("#board-panel-list").onscroll = hideBoardPanelTip; // a scrolled-away row must not keep its tooltip
   initSidebar();
-  window.addEventListener("resize", applySidebar); // keep drawer/backdrop correct across the breakpoint
+  initBoardPanel();
+  if (S.boardPanelOpen) loadBoard(); // seed the panel with cards on boot
+  window.addEventListener("resize", () => { applySidebar(); applyBoardPanel(); }); // keep drawer/backdrop correct across the breakpoint
   const name = (S.dir || "Project").split("/").filter(Boolean).pop() || "P";
   $("#rail-avatar").textContent = name[0].toUpperCase();
   $("#sidebar-title").textContent = name;

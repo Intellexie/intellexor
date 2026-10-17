@@ -19,7 +19,17 @@ Highlights:
   pickers, attachments, `!` shell mode, context-usage indicator, a
   client-side speech-to-text mic button and a kanban board tab — starting a
   card links it to a new session and the agent moves it to done (via the
-  `board` tool) when the task is finished.
+  `board` tool) when the task is finished. The agent can also `watch` cards
+  (it is messaged on behalf of the user when a watched card is marked done)
+  and `start` cards itself, exactly like the board's Start button.
+- **Cron jobs**: a dedicated tab where each job pairs a prompt with a
+  schedule (cron expression, `@macros` or `@every <duration>`, server
+  timezone); every run starts a fresh session prompted with the job's
+  prompt. Jobs are managed by the backend (they survive browser refreshes
+  and server restarts), can be titled/edited, paused (holding only the next
+  run — a session already started keeps going) and resumed (re-armed without
+  firing), deleted, and viewed (jumps to the latest active — or last
+  finished — run's session; running jobs show an hourglass).
 - **All permissions granted by default** — Intellexor never blocks on tool
   approval. `permission.*` config keys and the `/permission` endpoints exist
   for compatibility but have no effect.
@@ -144,6 +154,11 @@ values as bare JSON. Highlights:
 - Sessions: CRUD, children, todo, diff, messages, abort, fork, shell,
   command, share stub, message/part delete; `prompt_async` (204) and blocking
   `POST /session/:id/message` (returns the message with parts)
+- Cron jobs: `GET /cron`, `POST /cron` `{title, prompt, spec}`,
+  `PATCH /cron/:id` `{title?|prompt?|spec?|paused?}`, `DELETE /cron/:id`,
+  and `GET /cron/preview?spec=` (validates an expression, returns its next
+  fire time). A background sweep starts a fresh session per due job and
+  broadcasts `cron.updated` on the hub.
 - `POST /session/:id/revert` / `unrevert` — rewind the conversation to a
   message: later messages are hidden (purged on the next prompt) and file
   changes made by them are restored from per-message backups taken before
@@ -156,7 +171,7 @@ values as bare JSON. Highlights:
 - Events: `session.{created,updated,deleted,status,idle,error,diff}`,
   `message.{updated,removed,part.updated,part.delta}`,
   `permission.{asked,replied}`, `question.{asked,replied,rejected}`,
-  `todo.updated`, `command.executed`
+  `todo.updated`, `command.executed`, `board.updated`, `cron.updated`
 - `GET /provider`, `GET/PUT/DELETE /auth/:id`, `/config`,
   `/config/providers`, `/permission` + reply, `/question` + reply/reject,
   `/path`, `/vcs*`, `/agent`, `/command`, `/mcp`, `/file*`,
@@ -182,6 +197,7 @@ main.go                 entry point (serve + acp)
 internal/acp/        ACP JSON-RPC transport, methods, event mapping
 internal/app/        instance, agents, prompt loop, processor, history
 internal/config/     global/project config loading and merging
+internal/cron/       cron jobs: schedule parsing, per-project storage
 internal/provider/   provider catalog, OpenAI-compatible streaming client
 internal/tool/       built-in tools + truncation + validation
 internal/session/    wire types (Session/Message/Part) + file storage

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/Intellexie/intellexor/internal/store"
@@ -25,17 +26,60 @@ var ErrBadColumn = errors.New("unknown column")
 // ErrNotFound is returned when a card ID does not exist.
 var ErrNotFound = errors.New("card not found")
 
-// Card is a single kanban card. Order positions it within its column
+// ErrBadLink is returned when a card cannot be linked to the requested
+// target: the target does not exist, is the card itself, or is not waiting
+// in the open column (only open cards can be targeted).
+var ErrBadLink = errors.New("card can only be linked to a card in the open column")
+
+// ErrNotOpen is returned when a start schedule is set on a card that is not
+// waiting in the open column — only cards that have not started yet can be
+// scheduled (clearing a schedule is always allowed).
+var ErrNotOpen = errors.New("only cards in the open column can be scheduled")
+
+// OnMovedToDone, when set, is called after a card is moved into the done
+// column from another column — from any entry point (the agent's board tool,
+// the HTTP API, ACP), since they all go through Update. It is called without
+// the board lock held (handlers may call back into this package) and is used
+// to notify watcher sessions.
+var OnMovedToDone func(projectID string, card Card)
+
+// Attachment is a file (usually an image) attached to a card when it is
+// created — the same shape the chat composer sends as a prompt part
+// (type/mime/url/filename with a data URL), so attachments can be passed to
+// the session prompt verbatim when the card is started.
+type Attachment struct {
+	Type     string `json:"type"`
+	MIME     string `json:"mime"`
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+}
+
+// Card is a single kanban card. IDs are plain numbers ("1", "2", …) so
+// users can reference them easily; they are assigned max+1 and never
+// repurposed while any card exists (cards created before IDs became
+// numeric are renumbered on load). Order positions it within its column
 // (ascending); it is renumbered densely on every mutation so clients can
 // always sort by it. SessionID optionally links the card to the session
-// working on it (set when the card is started from the board).
+// working on it (set when the card is started from the board). Watchers
+// lists session IDs watching the card: when it is marked done, each of them
+// is prompted with a message on behalf of the user. Link is the ID of the
+// card this one triggers: when it is moved to done, that card is started
+// automatically (the Start-button flow). Attachments are files (usually
+// images) attached at creation, passed to the session prompt on start.
+// StartAt is an optional scheduled start time (unix milliseconds, like
+// Created): when it passes, a background scheduler starts the card the same
+// way the Start button does; it is cleared once the card has started.
 type Card struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Column    string `json:"column"`
-	Order     int    `json:"order"`
-	Created   int64  `json:"created"`
-	SessionID string `json:"sessionID,omitempty"`
+	ID          string       `json:"id"`
+	Title       string       `json:"title"`
+	Column      string       `json:"column"`
+	Order       int          `json:"order"`
+	Created     int64        `json:"created"`
+	SessionID   string       `json:"sessionID,omitempty"`
+	Watchers    []string     `json:"watchers,omitempty"`
+	Link        string       `json:"link,omitempty"`
+	StartAt     int64        `json:"startAt,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 var mu sync.Mutex
@@ -56,7 +100,52 @@ func load(projectID string) ([]Card, error) {
 	if err := json.Unmarshal(b, &cards); err != nil {
 		return nil, err
 	}
+	// cards created before IDs became plain numbers keep working, but are
+	// renumbered (and the renumber persisted) the first time they are loaded
+	if normalizeIDs(cards) {
+		if err := save(projectID, cards); err != nil {
+			return nil, err
+		}
+	}
 	return cards, nil
+}
+
+// normalizeIDs assigns a numeric ID to every card that still carries a
+// legacy non-numeric one, filling the smallest free numbers. It reports
+// whether anything was renumbered.
+func normalizeIDs(cards []Card) bool {
+	used := map[int]bool{}
+	for _, c := range cards {
+		if n, err := strconv.Atoi(c.ID); err == nil && n > 0 {
+			used[n] = true
+		}
+	}
+	next := 1
+	changed := false
+	for i := range cards {
+		if n, err := strconv.Atoi(cards[i].ID); err == nil && n > 0 {
+			continue
+		}
+		for used[next] {
+			next++
+		}
+		cards[i].ID = strconv.Itoa(next)
+		used[next] = true
+		changed = true
+	}
+	return changed
+}
+
+// nextID returns the next free numeric card ID: one past the largest number
+// in use, so existing cards keep their ID and new ones count up from 1.
+func nextID(cards []Card) string {
+	max := 0
+	for _, c := range cards {
+		if n, err := strconv.Atoi(c.ID); err == nil && n > max {
+			max = n
+		}
+	}
+	return strconv.Itoa(max + 1)
 }
 
 func save(projectID string, cards []Card) error {
@@ -148,11 +237,11 @@ func ForSession(projectID, sessionID string) (Card, bool, error) {
 	return Card{}, false, nil
 }
 
-// Add creates a card at the end of the given column.
-func Add(projectID, title, column string) (Card, error) {
-	if !validColumn(column) {
-		return Card{}, ErrBadColumn
-	}
+// Add creates a card at the end of the open column. Cards can only be
+// created in open — work begins by moving a card to inprogress (which links
+// the session working on it), never by creating it there. Attachments, when
+// given, ride along and are prompted to the session when the card starts.
+func Add(projectID, title string, attachments []Attachment) (Card, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	cards, err := load(projectID)
@@ -160,11 +249,12 @@ func Add(projectID, title, column string) (Card, error) {
 		return Card{}, err
 	}
 	card := Card{
-		ID:      util.ID("card"),
-		Title:   title,
-		Column:  column,
-		Order:   len(inColumn(cards, column)), // end of the column
-		Created: util.Now(),
+		ID:          nextID(cards),
+		Title:       title,
+		Column:      "open",
+		Order:       len(inColumn(cards, "open")), // end of the column
+		Created:     util.Now(),
+		Attachments: attachments,
 	}
 	cards = append(cards, card)
 	renumber(cards)
@@ -182,16 +272,27 @@ func Add(projectID, title, column string) (Card, error) {
 // Update edits a card's title, links it to a session, and/or moves it.
 // When column is set the card is placed before the card with ID before
 // (end of the column when before is empty or missing from it). Both
-// affected columns are renumbered.
+// affected columns are renumbered. Moving a card out of open clears its
+// start schedule (a schedule only makes sense for a waiting card — starting
+// it, by hand or by the scheduler, consumes it). Moving a card into done
+// fires OnMovedToDone (after the lock is released).
 func Update(projectID, id string, title *string, column, before, sessionID *string) (Card, error) {
+	card, movedDone, err := updateLocked(projectID, id, title, column, before, sessionID)
+	if err == nil && movedDone && OnMovedToDone != nil {
+		OnMovedToDone(projectID, card)
+	}
+	return card, err
+}
+
+func updateLocked(projectID, id string, title *string, column, before, sessionID *string) (Card, bool, error) {
 	if column != nil && !validColumn(*column) {
-		return Card{}, ErrBadColumn
+		return Card{}, false, ErrBadColumn
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	cards, err := load(projectID)
 	if err != nil {
-		return Card{}, err
+		return Card{}, false, err
 	}
 	idx := -1
 	for i := range cards {
@@ -201,7 +302,7 @@ func Update(projectID, id string, title *string, column, before, sessionID *stri
 		}
 	}
 	if idx < 0 {
-		return Card{}, ErrNotFound
+		return Card{}, false, ErrNotFound
 	}
 	if title != nil {
 		cards[idx].Title = *title
@@ -209,10 +310,18 @@ func Update(projectID, id string, title *string, column, before, sessionID *stri
 	if sessionID != nil {
 		cards[idx].SessionID = *sessionID
 	}
+	movedDone := false
 	if column != nil {
 		from := cards[idx].Column
 		to := *column
+		movedDone = to == "done" && from != "done"
 		cards[idx].Column = to
+		// leaving open consumes the start schedule: the card is no longer
+		// waiting, whether it was started by hand, by the scheduler, or by
+		// a done-link trigger
+		if from == "open" && to != "open" {
+			cards[idx].StartAt = 0
+		}
 		// target column in display order, without the moved card
 		col := inColumn(cards, to)
 		for i := range col {
@@ -247,12 +356,136 @@ func Update(projectID, id string, title *string, column, before, sessionID *stri
 		}
 	}
 	if err := save(projectID, cards); err != nil {
+		return Card{}, false, err
+	}
+	return cards[idx], movedDone, nil
+}
+
+// Watch adds the session to (watch=true) or removes it from (watch=false)
+// the card's watchers.
+func Watch(projectID, cardID, sessionID string, watch bool) (Card, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	idx := -1
+	for i := range cards {
+		if cards[i].ID == cardID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Card{}, ErrNotFound
+	}
+	has := false
+	for _, w := range cards[idx].Watchers {
+		if w == sessionID {
+			has = true
+			break
+		}
+	}
+	if watch == has {
+		return cards[idx], nil // already in the wanted state
+	}
+	if watch {
+		cards[idx].Watchers = append(cards[idx].Watchers, sessionID)
+	} else {
+		out := cards[idx].Watchers[:0]
+		for _, w := range cards[idx].Watchers {
+			if w != sessionID {
+				out = append(out, w)
+			}
+		}
+		cards[idx].Watchers = out
+	}
+	if err := save(projectID, cards); err != nil {
 		return Card{}, err
 	}
 	return cards[idx], nil
 }
 
-// Delete removes a card and renumbers its column.
+// SetLink points card at target: when the card is moved to done, the target
+// is started automatically in a fresh session (the Start-button flow). An
+// empty target clears the link. The target must be an existing card other
+// than the card itself, and it must still be waiting in the open column —
+// only open cards can be targeted.
+func SetLink(projectID, id, target string) (Card, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	idx := -1
+	for i := range cards {
+		if cards[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Card{}, ErrNotFound
+	}
+	if target != "" {
+		if target == id {
+			return Card{}, ErrBadLink
+		}
+		tIdx := -1
+		for i := range cards {
+			if cards[i].ID == target {
+				tIdx = i
+				break
+			}
+		}
+		if tIdx < 0 || cards[tIdx].Column != "open" {
+			return Card{}, ErrBadLink
+		}
+	}
+	cards[idx].Link = target
+	if err := save(projectID, cards); err != nil {
+		return Card{}, err
+	}
+	return cards[idx], nil
+}
+
+// SetSchedule sets the card's scheduled start time (unix milliseconds): a
+// background scheduler starts the card when the time passes, exactly like
+// the Start button. startAt == 0 clears the schedule (always allowed, so a
+// start can consume it on any column). Setting a schedule is only allowed
+// while the card is still waiting in open — a card that already started
+// cannot be scheduled.
+func SetSchedule(projectID, id string, startAt int64) (Card, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	idx := -1
+	for i := range cards {
+		if cards[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Card{}, ErrNotFound
+	}
+	if startAt != 0 && (cards[idx].Column != "open" || cards[idx].SessionID != "") {
+		return Card{}, ErrNotOpen
+	}
+	cards[idx].StartAt = startAt
+	if err := save(projectID, cards); err != nil {
+		return Card{}, err
+	}
+	return cards[idx], nil
+}
+
+// Delete removes a card, clears links pointing at it and renumbers its
+// column.
 func Delete(projectID, id string) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -266,6 +499,9 @@ func Delete(projectID, id string) error {
 		if c.ID == id {
 			found = true
 			continue
+		}
+		if c.Link == id {
+			c.Link = "" // the trigger target is gone
 		}
 		kept = append(kept, c)
 	}
