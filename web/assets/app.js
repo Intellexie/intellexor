@@ -268,75 +268,43 @@ function updateTab() {
 
 /* ============================== markdown ============================== */
 
-function inlineMd(s) {
-  s = esc(s);
-  s = s.replace(/`([^`]+)`/g, '<code class="inline">$1</code>');
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-  s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, "$1<i>$2</i>");
-  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-  return s;
-}
+// Full markdown via the vendored marked parser (web/assets/marked.min.js),
+// sanitized with DOMPurify (web/assets/purify.min.js) — model output is
+// untrusted, so nothing reaches innerHTML without passing the allowlist.
+const md = new marked.Marked({
+  gfm: true, // tables, strikethrough, task lists, autolinks
+  breaks: true, // single newlines become <br> (chat-style soft wrap)
+  renderer: {
+    code({ text, lang }) {
+      return `<pre><button class="copy-code" type="button">copy</button><code data-lang="${esc(lang || "")}">${esc(text)}</code></pre>`;
+    },
+    codespan({ text }) {
+      return `<code class="inline">${esc(text)}</code>`;
+    },
+    link({ href, title, tokens }) {
+      const t = title ? ` title="${esc(title)}"` : "";
+      return `<a href="${esc(href)}"${t} target="_blank" rel="noopener">${this.parser.parseInline(tokens)}</a>`;
+    },
+  },
+});
 
 function renderMarkdown(src) {
   if (!src) return "";
-  const lines = src.split("\n");
-  let out = [];
-  let inCode = false, codeLang = "", codeBuf = [];
-  let listType = null, para = [];
-  const flushPara = () => {
-    if (para.length) { out.push("<p>" + inlineMd(para.join(" ")) + "</p>"); para = []; }
-  };
-  const flushList = () => {
-    if (listType) { out.push(listType === "ul" ? "</ul>" : "</ol>"); listType = null; }
-  };
-  for (let raw of lines) {
-    const line = raw;
-    if (/^```/.test(line.trim())) {
-      if (!inCode) {
-        flushPara(); flushList();
-        inCode = true; codeLang = line.trim().slice(3); codeBuf = [];
-      } else {
-        out.push(
-          `<pre><button class="copy-code" onclick="copyCode(this)">${"copy"}</button><code data-lang="${esc(codeLang)}">${esc(codeBuf.join("\n"))}</code></pre>`
-        );
-        inCode = false;
-      }
-      continue;
-    }
-    if (inCode) { codeBuf.push(raw); continue; }
-    const h = line.match(/^(#{1,6})\s+(.*)$/);
-    if (h) { flushPara(); flushList(); out.push(`<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`); continue; }
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
-    if (ul || ol) {
-      flushPara();
-      const t = ul ? "ul" : "ol";
-      if (listType !== t) { flushList(); out.push(t === "ul" ? "<ul>" : "<ol>"); listType = t; }
-      out.push("<li>" + inlineMd((ul || ol)[1]) + "</li>");
-      continue;
-    }
-    if (/^>\s?/.test(line)) {
-      flushPara(); flushList();
-      out.push("<blockquote>" + inlineMd(line.replace(/^>\s?/, "")) + "</blockquote>");
-      continue;
-    }
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
-      flushPara(); flushList(); out.push("<hr>"); continue;
-    }
-    if (line.trim() === "") { flushPara(); flushList(); continue; }
-    para.push(line.trim());
-  }
-  if (inCode) out.push(`<pre><code>${esc(codeBuf.join("\n"))}</code></pre>`);
-  flushPara(); flushList();
-  return out.join("\n");
+  if (!window.marked || !window.DOMPurify) return esc(src); // assets missing — plain text
+  return DOMPurify.sanitize(md.parse(src), { ADD_ATTR: ["target"] });
 }
 
-window.copyCode = (btn) => {
-  const code = btn.parentElement.querySelector("code");
+// Copy buttons are injected by the code renderer; DOMPurify strips inline
+// onclick handlers, so copy clicks are handled by delegation instead.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".copy-code");
+  if (!btn) return;
+  const code = btn.parentElement && btn.parentElement.querySelector("code");
+  if (!code) return;
   navigator.clipboard.writeText(code.textContent);
   btn.textContent = "copied";
-};
+  setTimeout(() => { btn.textContent = "copy"; }, 1200);
+});
 
 function renderDiff(patch) {
   const box = el("div", "diff");
@@ -835,6 +803,14 @@ const MESSAGE_WINDOW = 100;
 async function loadMessages(sid) {
   const msgs = await get(`/session/${sid}/message?limit=${MESSAGE_WINDOW}`);
   const store = msgStore(sid);
+  // Text/reasoning parts are persisted server-side only at their start (empty
+  // text) and end (full text) — deltas are SSE-only events. Re-fetching
+  // mid-stream must not wipe what the client has buffered so far, or switching
+  // back to a tab where the agent is thinking would show only the tokens that
+  // arrive after the switch. Keep whichever text is longer: while a part is
+  // streaming the local buffer is ahead (server has ""), and once it ends both
+  // hold the same full text.
+  const prevParts = store.parts;
   store.order = [];
   store.info = {};
   store.parts = {};
@@ -843,6 +819,11 @@ async function loadMessages(sid) {
     store.info[m.info.id] = m.info;
     store.parts[m.info.id] = {};
     for (const part of m.parts || []) {
+      const old = prevParts[m.info.id] && prevParts[m.info.id][part.id];
+      if (old && (part.type === "text" || part.type === "reasoning") &&
+          (old.text || "").length > (part.text || "").length) {
+        part.text = old.text;
+      }
       store.parts[m.info.id][part.id] = part;
     }
   }
@@ -861,8 +842,11 @@ function renderMain() {
   main.innerHTML = "";
   main.appendChild(buildTabBar());
   renderTabs();
-  // the animated background is global: full strength on the landing (new
-  // session) view, dimmed behind the panels everywhere else (see style.css)
+  // the animated background is global: bg.js applies it at the root level and
+  // starts it on load, so it is visible on every view. Here we only pick the
+  // strength — full on the landing (new session) view, dimmed behind the
+  // panels everywhere else (see style.css). The setActive re-assert is a
+  // no-op unless the canvas was wiped from the DOM and re-attached.
   const landing = S.view === "sessions" && !S.current;
   document.body.classList.toggle("bg-live", landing);
   document.body.classList.toggle("bg-dim", !landing);
@@ -1606,23 +1590,20 @@ function openAddCardModal() {
 
 // Start the agent on a card: create a fresh session, link the card to it
 // (and move it to In Progress) BEFORE prompting so the agent already knows
-// its card from the first step, then prompt it with the card's task.
+// its card from the first step, then prompt it with the card's task. The
+// task title goes in as the plain user message — all card handling guidance
+// (how to work the card, moving it to done) is injected server-side into the
+// system prompt, keeping the message the user sees clean.
 async function startCard(c) {
   try {
     const body = { agent: S.agent, title: c.title };
     if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
     const sess = await post("/session", body);
     await patch("/board/card/" + c.id, { column: "inprogress", sessionID: sess.id });
-    const prompt =
-      `A task was created on the project kanban board:\n\n` +
-      `"${c.title}"\n\n` +
-      `The task's card ID is ${c.id} (the card is linked to this session). ` +
-      `When you finish working on it, move the card to the done column with the board tool.\n\n` +
-      `Start working on this task now. Explore the codebase as needed, implement it end to end, and verify your work (build and tests where applicable). Keep going until the task is complete.`;
     await post(`/session/${sess.id}/prompt_async`, {
       agent: S.agent,
       model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
-      parts: [{ type: "text", text: prompt }],
+      parts: [{ type: "text", text: c.title }],
     });
     await refreshSession(sess.id).catch(() => {});
     // Create a tab for the new session without activating it — like View,

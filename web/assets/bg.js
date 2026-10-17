@@ -3,15 +3,22 @@
 /* ============================== animated background ============================== */
 
 // IntellexorBG paints a slow "aurora" — drifting color fields and rising
-// sparkles — onto a fixed canvas behind the app (#bg in index.html). It runs
-// on every view: renderMain() keeps it active and toggles body.bg-live on the
-// landing (new session) view for full strength, body.bg-dim everywhere else
-// so the panels stay readable (see the matching section in style.css).
+// sparkles — onto a fixed canvas behind the app (#bg in index.html). The
+// canvas lives at the root level (position:fixed, inset:0) and the module
+// starts itself as soon as this script loads, so the background is visible
+// on every view from the first paint. renderMain() never starts or stops
+// it; it only toggles body.bg-live on the landing (new session) view for
+// full strength and body.bg-dim everywhere else so the panels stay readable
+// (see the matching section in style.css).
 //
 // The render loop pauses while the tab is hidden, stops itself if the canvas
 // ever leaves the DOM, re-reads its palette when the color scheme changes,
 // and renders a single static frame when the user prefers reduced motion.
-const IntellexorBG = (() => {
+//
+// NOTE: assigned to window explicitly — a top-level `const` only creates a
+// global lexical binding, not a window property, and app.js gates on
+// window.IntellexorBG.
+window.IntellexorBG = (() => {
   const canvas = document.getElementById("bg-canvas");
   if (!canvas) return { setActive() {} };
   const ctx = canvas.getContext("2d");
@@ -138,7 +145,15 @@ const IntellexorBG = (() => {
 
   function setActive(on) {
     on = !!on;
-    if (on === active) return;
+    if (on === active) {
+      // Re-assert while already on: if the canvas left the DOM and was
+      // re-attached, the loop is dead — revive it without resetting state.
+      if (on && !raf && canvas.isConnected && !reduced.matches) {
+        last = performance.now();
+        raf = requestAnimationFrame(frame);
+      }
+      return;
+    }
     active = on;
     if (on) start(); else stop();
   }
@@ -169,6 +184,12 @@ const IntellexorBG = (() => {
 
   readPalette();
   resize();
+
+  // Root-level activation: the background belongs to the document, not to
+  // any single view — start it here so it is visible everywhere, even before
+  // app.js boots (and if app.js never gets that far, the loop still stops
+  // cleanly on its own once the canvas is gone from the DOM).
+  setActive(true);
 
   return { setActive };
 })();

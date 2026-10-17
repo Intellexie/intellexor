@@ -124,7 +124,8 @@ func TestBoardToolListAndExplicitCard(t *testing.T) {
 }
 
 // The system prompt must tell the agent which card it is working on — with
-// its ID — so it can move the card to done when finished.
+// its ID — so it can move the card to done when finished, plus how to work
+// the card (the card's task itself arrives as the plain user message).
 func TestBoardContextIncludesCardID(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 
@@ -139,6 +140,9 @@ func TestBoardContextIncludesCardID(t *testing.T) {
 	}
 	if !strings.Contains(bc, "done") {
 		t.Fatalf("board context missing done-column guidance:\n%s", bc)
+	}
+	if !strings.Contains(bc, "user's message") {
+		t.Fatalf("board context missing task-message guidance:\n%s", bc)
 	}
 }
 

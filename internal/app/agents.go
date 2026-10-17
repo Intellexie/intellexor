@@ -146,7 +146,9 @@ func yn(b bool) string {
 
 // boardContext describes the kanban card linked to the session (the card the
 // agent was started from on the board), so the agent knows which card it is
-// working on — including its ID — and can move it to done when finished.
+// working on — including its ID — and how to work on it. The card's task
+// itself arrives as the user's first message; everything about *how* to work
+// with cards lives here in the system prompt, keeping the user message clean.
 // Returns "" for sessions without a linked card (and for subagents, whose
 // session IDs never match the link).
 func boardContext(i *Instance, s *session.Session) string {
@@ -157,5 +159,6 @@ func boardContext(i *Instance, s *session.Session) string {
 	title := strings.ReplaceAll(card.Title, "\n", " ")
 	return `# Kanban board
 You are working on the kanban card "` + title + `" (id: ` + card.ID + `, column: ` + card.Column + `).
+The user's message is the card's task: start working on it now. Explore the codebase as needed, implement it end to end, and verify your work (build and tests where applicable). Keep going until the task is complete.
 When you have finished the task, move the card to the done column with the board tool: {"action": "move", "column": "done"} — the card is resolved from this session automatically, or pass its ID explicitly.`
 }

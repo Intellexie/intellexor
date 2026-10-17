@@ -31,3 +31,5 @@ Tests are fully local (httptest fake providers streaming SSE) — no network or 
 - Providers speak OpenAI-compatible SSE (`/chat/completions`); client, catalog, and fallbacks live in `internal/provider`.
 - HTTP API follows opencode v1 shapes: errors as `{name, data}`, success as bare JSON.
 - `internal/server/templates/*.txt` are the built-in command prompts (e.g. `/init`, `/review`).
+
+You are runniong as the process "intellexor", if you kill it you will kill the session completely.
