@@ -44,6 +44,16 @@ func registryFor(i *Instance) *tool.Registry {
 		return startCard(i, projectID, cardID)
 	}}
 	questionTool := tool.QuestionTool{Svc: i.Quest}
+	alarmTool := tool.AlarmTool{OnUpdate: func() {
+		// same broadcast the cron HTTP routes send, so connected clients
+		// refresh when the agent sets or cancels an alarm
+		i.Hub.Publish("alarm.updated", map[string]any{"directory": i.Directory})
+	}}
+	cronTool := tool.CronTool{OnUpdate: func() {
+		// same broadcast the cron HTTP routes send, so every connected
+		// client refreshes when the agent mutates a cron job
+		i.Hub.Publish("cron.updated", map[string]any{"directory": i.Directory})
+	}}
 	r := tool.NewRegistry(
 		tool.InvalidTool{},
 		questionTool,
@@ -58,6 +68,8 @@ func registryFor(i *Instance) *tool.Registry {
 		todo,
 		tool.ApplyPatchTool{},
 		boardTool,
+		alarmTool,
+		cronTool,
 	)
 	regInst[i] = r
 	return r
@@ -80,8 +92,17 @@ func activeToolNames(dir string, agent AgentDef) []string {
 	for _, d := range merged.DisabledTools {
 		disabled[d] = true
 	}
-	applyPatch := false
-	for _, n := range []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board"} {
+	// agents with an explicit Tools list get exactly that (still respecting
+	// disabled_tools) — the model is never offered anything else
+	if len(agent.Tools) > 0 {
+		for _, n := range agent.Tools {
+			if !disabled[n] {
+				names = append(names, n)
+			}
+		}
+		return names
+	}
+	for _, n := range []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board", "alarm"} {
 		if n == "apply_patch" {
 			continue // only for gpt models
 		}
@@ -90,11 +111,10 @@ func activeToolNames(dir string, agent AgentDef) []string {
 		}
 		names = append(names, n)
 	}
-	_ = applyPatch
 	return names
 }
 
-func toolNamesForModel(modelID string, names []string) []string {
+func toolNamesForModel(modelID string, names []string, allowApplyPatch bool) []string {
 	// apply_patch for gpt-5 style models, drop edit/write (matches opencode)
 	if strings.Contains(modelID, "gpt-") && !strings.Contains(modelID, "oss") && !strings.Contains(modelID, "gpt-4") {
 		var out []string
@@ -108,7 +128,8 @@ func toolNamesForModel(modelID string, names []string) []string {
 			}
 			out = append(out, n)
 		}
-		if !hasPatch {
+		// agents restricted away from apply_patch (no build tools) never get it
+		if allowApplyPatch && !hasPatch {
 			out = append(out, "apply_patch")
 		}
 		return out

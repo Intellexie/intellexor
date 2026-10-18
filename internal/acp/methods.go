@@ -58,7 +58,7 @@ func (c *conn) request(method string, params json.RawMessage) (any, *rpcError) {
 
 var acpModes = map[string]any{
 	"current":   "build",
-	"available": []map[string]string{{"id": "build", "name": "Build"}, {"id": "plan", "name": "Plan"}},
+	"available": []map[string]string{{"id": "build", "name": "Build"}, {"id": "plan", "name": "Plan"}, {"id": "orchestrator", "name": "Orchestrator"}},
 }
 
 func (c *conn) newSession(params json.RawMessage) (any, *rpcError) {

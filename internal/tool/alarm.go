@@ -1,0 +1,117 @@
+package tool
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/Intellexie/intellexor/internal/alarm"
+	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
+)
+
+// AlarmTool lets an agent set a one-shot wake-up for its own session: at
+// the given timestamp the system injects a user message ("alarm-triggered")
+// into the session, so the agent can continue itself after starting a long
+// background job. Alarms are persisted per project and survive restarts.
+type AlarmTool struct {
+	// OnUpdate, when set, is called after every mutation so the instance
+	// can broadcast a refresh to connected clients.
+	OnUpdate func()
+}
+
+func (AlarmTool) Name() string { return "alarm" }
+
+func (AlarmTool) Description() string {
+	return `Set a one-shot alarm that wakes this session up at a given time. When the timestamp is reached, the system sends a user message ("alarm-triggered") into this session, letting you continue your work — ideal after starting a long-running background job: launch the job, set an alarm for when it should be done, end your turn, and the alarm brings you back to check the result.
+
+- "timestamp" is a unix epoch in MILLISECONDS and must be in the future
+- "note" is optional context delivered with the wake-up message (what to check, what was started, ...)
+- "action" defaults to "set"; use "list" to see this session's alarms or "cancel" (with "alarm_id") to disarm one`
+}
+
+func (AlarmTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"timestamp": map[string]any{"type": "number", "description": "Unix epoch timestamp in milliseconds when the alarm should fire (must be in the future)"},
+			"note":      map[string]any{"type": "string", "description": "Optional context delivered with the wake-up message, e.g. what background job to check"},
+			"action":    map[string]any{"type": "string", "enum": []any{"set", "list", "cancel"}, "description": "Operation: set (default), list, or cancel"},
+			"alarm_id":  map[string]any{"type": "string", "description": "Alarm ID to cancel (required for action=cancel)"},
+		},
+	}
+}
+
+func (t AlarmTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
+	var p struct {
+		Timestamp float64 `json:"timestamp"`
+		Note      string  `json:"note"`
+		Action    string  `json:"action"`
+		AlarmID   string  `json:"alarm_id"`
+	}
+	_ = json.Unmarshal(args, &p)
+	if p.Action == "" {
+		p.Action = "set"
+	}
+	projectID := store.ProjectID(c.Directory)
+
+	switch p.Action {
+	case "list":
+		alarms, err := alarm.List(projectID, c.SessionID, false)
+		if err != nil {
+			return Result{}, err
+		}
+		out, _ := json.MarshalIndent(alarms, "", "  ")
+		return Result{
+			Title:    "List alarms",
+			Metadata: map[string]any{"count": len(alarms)},
+			Output:   string(out),
+		}, nil
+
+	case "cancel":
+		if p.AlarmID == "" {
+			return Result{}, errors.New("alarm_id is required for action=cancel")
+		}
+		if err := alarm.Cancel(projectID, c.SessionID, p.AlarmID); err != nil {
+			return Result{}, err
+		}
+		t.notify()
+		return Result{
+			Title:    "Cancel alarm",
+			Metadata: map[string]any{"alarmID": p.AlarmID},
+			Output:   "Alarm " + p.AlarmID + " cancelled.",
+		}, nil
+
+	case "set":
+		if p.Timestamp <= 0 {
+			return Result{}, errors.New("timestamp is required (unix epoch in milliseconds)")
+		}
+		if int64(p.Timestamp) <= util.Now() {
+			return Result{}, errors.New("timestamp must be in the future (unix epoch in milliseconds)")
+		}
+		a, err := alarm.Add(projectID, c.SessionID, int64(p.Timestamp), p.Note)
+		if err != nil {
+			return Result{}, err
+		}
+		t.notify()
+		fireIn := time.Duration(a.TriggerAt-util.Now()) * time.Millisecond
+		return Result{
+			Title: "Alarm at " + time.UnixMilli(a.TriggerAt).Format(time.RFC3339),
+			Metadata: map[string]any{
+				"alarmID":   a.ID,
+				"triggerAt": a.TriggerAt,
+			},
+			Output: fmt.Sprintf("Alarm %s set for %s (fires in %s). You will receive a user message \"alarm-triggered\" when it goes off; end your turn now and continue then.", a.ID, time.UnixMilli(a.TriggerAt).Format(time.RFC3339), fireIn.Round(time.Second)),
+		}, nil
+
+	default:
+		return Result{}, fmt.Errorf("unknown action %q (expected set, list or cancel)", p.Action)
+	}
+}
+
+func (t AlarmTool) notify() {
+	if t.OnUpdate != nil {
+		t.OnUpdate()
+	}
+}

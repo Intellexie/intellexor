@@ -130,12 +130,12 @@ func TestBoardToolListAndExplicitCard(t *testing.T) {
 func TestBoardContextIncludesCardID(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 
-	if bc := boardContext(i, s); bc != "" {
+	if bc := boardContext(i, s, "build"); bc != "" {
 		t.Fatalf("expected no board context without a linked card, got %q", bc)
 	}
 
 	card := linkCard(t, i, s, "Write the parser", "inprogress")
-	bc := boardContext(i, s)
+	bc := boardContext(i, s, "build")
 	if !strings.Contains(bc, card.ID) {
 		t.Fatalf("board context missing card id %s:\n%s", card.ID, bc)
 	}

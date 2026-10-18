@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Intellexie/intellexor/internal/board"
 	"github.com/Intellexie/intellexor/internal/store"
@@ -45,7 +46,8 @@ func (BoardTool) Description() string {
 - "add": creates a card with "title" in the open column (cards can only be created there; move it afterwards to start work).
 - "watch" / "unwatch": start/stop watching a card — pass "card" to watch a specific card by ID, or omit it to use the card linked to the current session. Watchers are messaged when the card is marked done. Watching the card linked to this session is rejected: you are already working on it.
 - "link" / "unlink": point "card" (or the session's card) at "target" so the target starts automatically when the card is done; "unlink" removes the link.
-- "start": start a new agent session on card "card"; the card's title becomes the new session's task.`
+- "schedule": set a timed start on a card — a background scheduler starts it (exactly like "start") when the time passes. Only cards still waiting in the open column can be scheduled; startAt 0 clears the schedule.
+- "start": start a new agent session on card "card"; the card's title becomes the new session's task. The orchestrator agent automatically watches every card it starts.`
 }
 
 func (BoardTool) Schema() map[string]any {
@@ -54,7 +56,7 @@ func (BoardTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"enum":        []any{"list", "move", "add", "watch", "unwatch", "link", "unlink", "start"},
+				"enum":        []any{"list", "move", "add", "watch", "unwatch", "link", "unlink", "schedule", "start"},
 				"description": "The board operation to perform",
 			},
 			"card": map[string]any{
@@ -74,6 +76,14 @@ func (BoardTool) Schema() map[string]any {
 				"type":        "string",
 				"description": "Card ID to link to (action link): it starts automatically when the source card is done",
 			},
+			"startAt": map[string]any{
+				"type":        "integer",
+				"description": "Scheduled start time in unix milliseconds (action schedule); 0 clears the schedule",
+			},
+			"in": map[string]any{
+				"type":        "string",
+				"description": "Alternative to startAt (action schedule): a duration from now, e.g. \"30m\", \"2h\", \"1d\"",
+			},
 		},
 		"required": []any{"action"},
 	}
@@ -81,11 +91,13 @@ func (BoardTool) Schema() map[string]any {
 
 func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 	var p struct {
-		Action string `json:"action"`
-		Card   string `json:"card"`
-		Column string `json:"column"`
-		Title  string `json:"title"`
-		Target string `json:"target"`
+		Action  string `json:"action"`
+		Card    string `json:"card"`
+		Column  string `json:"column"`
+		Title   string `json:"title"`
+		Target  string `json:"target"`
+		StartAt int64  `json:"startAt"`
+		In      string `json:"in"`
 	}
 	_ = json.Unmarshal(args, &p)
 	if c.Ask != nil {
@@ -246,6 +258,46 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			Output:   fmt.Sprintf("Card %s (%q) is now linked to card %s: when it is moved to done, that card starts automatically in a fresh session.", card.ID, card.Title, target),
 		}, nil
 
+	case "schedule":
+		id := p.Card
+		if id == "" {
+			return Result{}, errors.New("schedule requires a card ID (see action list)")
+		}
+		startAt := p.StartAt
+		if p.In != "" {
+			if startAt != 0 {
+				return Result{}, errors.New("pass either startAt or in, not both")
+			}
+			d, err := parseDuration(p.In)
+			if err != nil {
+				return Result{}, fmt.Errorf("invalid duration %q: %v", p.In, err)
+			}
+			startAt = time.Now().Add(d).UnixMilli()
+		}
+		card, err := board.SetSchedule(projectID, id, startAt)
+		if err == board.ErrNotFound {
+			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
+		}
+		if err == board.ErrNotOpen {
+			return Result{}, errors.New("only cards still waiting in the open column can be scheduled")
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		t.notify()
+		if startAt == 0 {
+			return Result{
+				Title:    "Unscheduled " + card.Title,
+				Metadata: map[string]any{"card": card},
+				Output:   fmt.Sprintf("Cleared the start schedule of card %s (%q).", card.ID, card.Title),
+			}, nil
+		}
+		return Result{
+			Title:    "Scheduled " + card.Title,
+			Metadata: map[string]any{"card": card},
+			Output:   fmt.Sprintf("Card %s (%q) is scheduled to start at %s: a background scheduler will start it then, exactly like the Start button.", card.ID, card.Title, time.UnixMilli(startAt).Format(time.RFC1123)),
+		}, nil
+
 	case "start":
 		if p.Card == "" {
 			return Result{}, errors.New("start requires a card ID (see action list)")
@@ -271,15 +323,42 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
+		out := fmt.Sprintf("Started a new agent session (%s) on card %s (%q): the card is linked to it, moved to inprogress, and its title is the session's task.", sessID, p.Card, title)
+		// the orchestrator automatically watches every ticket it starts:
+		// when the card's own session marks it done, the orchestrator is
+		// pinged with a short "Ticket X is done." message so it can
+		// coordinate follow-ups without being asked
+		if c.Agent == "orchestrator" {
+			if _, werr := board.Watch(projectID, p.Card, c.SessionID, true); werr == nil {
+				t.notify()
+				out += "\nYou are now watching this card: when its session marks it done, you will receive a message on behalf of the user."
+			}
+		}
 		return Result{
 			Title:    "Started: " + title,
 			Metadata: map[string]any{"sessionID": sessID, "cardID": p.Card},
-			Output:   fmt.Sprintf("Started a new agent session (%s) on card %s (%q): the card is linked to it, moved to inprogress, and its title is the session's task.", sessID, p.Card, title),
+			Output:   out,
 		}, nil
 
 	default:
-		return Result{}, fmt.Errorf("unknown action %q (valid: list, move, add, watch, unwatch, link, unlink, start)", p.Action)
+		return Result{}, fmt.Errorf("unknown action %q (valid: list, move, add, watch, unwatch, link, unlink, schedule, start)", p.Action)
 	}
+}
+
+// parseDuration parses a duration string for the schedule action's "in"
+// parameter: time.ParseDuration syntax plus a plain-number-of-days form
+// ("1d", "2d") that Go does not support.
+func parseDuration(s string) (time.Duration, error) {
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+	if n := len(s); n > 1 && s[n-1] == 'd' {
+		var days int
+		if _, err := fmt.Sscanf(s[:n-1], "%d", &days); err == nil && days > 0 {
+			return time.Duration(days) * 24 * time.Hour, nil
+		}
+	}
+	return 0, fmt.Errorf("not a duration")
 }
 
 func (t BoardTool) notify() {

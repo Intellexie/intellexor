@@ -21,7 +21,11 @@ Highlights:
   card links it to a new session and the agent moves it to done (via the
   `board` tool) when the task is finished. The agent can also `watch` cards
   (it is messaged on behalf of the user when a watched card is marked done)
-  and `start` cards itself, exactly like the board's Start button.
+  and `start` cards itself, exactly like the board's Start button — the
+  orchestrator automatically watches every ticket it starts and is pinged
+  with a "Ticket X is done." message when its session finishes. The
+  orchestrator chat beside the board is horizontally resizable (drag its
+  right edge; double-click resets).
 - **Cron jobs**: a dedicated tab where each job pairs a prompt with a
   schedule (cron expression, `@macros` or `@every <duration>`, server
   timezone); every run starts a fresh session prompted with the job's
@@ -191,12 +195,13 @@ values as bare JSON. Highlights:
 
 ## Agents
 
-Four agents ship compiled in:
+Five agents ship compiled in:
 
 | Name      | Mode      | Purpose                                                        |
 | --------- | --------- | -------------------------------------------------------------- |
 | `build`   | primary   | Default agent, full tool access                                |
 | `plan`    | primary   | Read-only planning; edit/write denied                          |
+| `orchestrator` | primary | Coordinates work: kanban board, starting cards, cron jobs (board/webfetch/todowrite/task/cron only) |
 | `general` | subagent  | Multi-step research and parallelizable work                    |
 | `explore` | subagent  | Fast codebase search (grep/glob/read/bash/webfetch only)       |
 

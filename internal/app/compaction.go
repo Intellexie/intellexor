@@ -285,6 +285,18 @@ func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolv
 	}
 	if asst.Error == nil && strings.TrimSpace(sb.String()) != "" {
 		asst.Summary = true
+		// The next request replays [system, summary, resume] instead of the
+		// compacted history, so reset the context estimate to the summary's
+		// own footprint (its output tokens). Without this the UI context
+		// circle keeps showing the pre-compaction size until the next step's
+		// finishStep overwrites it — indefinitely on the manual /compact path.
+		if usage != nil {
+			if fresh, err := i.Mgr.Update(s.ID, func(u *session.Session) {
+				u.Context = usage.Output + usage.Reasoning
+			}); err == nil {
+				*s = *fresh
+			}
+		}
 		// divider part: the web UI renders it as a "Session compacted" line
 		divider := session.Part{ID: util.ID("prt"), SessionID: s.ID, MessageID: asst.ID, Type: "compaction"}
 		_ = i.Mgr.SavePart(s, divider)

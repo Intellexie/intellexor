@@ -123,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	handle("GET /config/entries", s.configEntries)
 	handle("PUT /config/provider/{providerID}", s.putConfigProvider)
 	handle("DELETE /config/provider/{providerID}", s.deleteConfigProvider)
+	handle("PUT /config/provider/{providerID}/model/{modelID}", s.putConfigProviderModel)
+	handle("DELETE /config/provider/{providerID}/model/{modelID}", s.deleteConfigProviderModel)
 	handle("PUT /config/agent/{agentID}", s.putConfigAgent)
 	handle("DELETE /config/agent/{agentID}", s.deleteConfigAgent)
 	handle("POST /provider/{providerID}/oauth/authorize", func(w http.ResponseWriter, r *http.Request) *apiError {

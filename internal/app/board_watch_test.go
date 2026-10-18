@@ -260,6 +260,80 @@ func TestBoardToolStartValidation(t *testing.T) {
 	}
 }
 
+// The orchestrator watches every ticket it starts: starting a card as the
+// orchestrator agent adds the orchestrator session to the card's watchers,
+// and when the card's own session marks it done the orchestrator receives
+// the short default "Ticket X is done." message. Other agents get no
+// auto-watch.
+func TestOrchestratorStartedCardIsWatchedAndPinged(t *testing.T) {
+	i, s := setupAbortTest(t, textSSE("Coordinating follow-up."))
+	projectID := store.ProjectID(i.Directory)
+	orch := &session.Session{ProjectID: projectID, Directory: i.Directory, Title: "Orchestrator", Agent: "orchestrator"}
+	if err := i.Mgr.Create(orch); err != nil {
+		t.Fatal(err)
+	}
+	card, err := board.Add(projectID, "Implement the parser", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := board.Add(projectID, "Started by a plain agent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bt, _ := registryFor(i).Get("board")
+	res, err := bt.Run(&tool.Ctx{SessionID: orch.ID, Directory: i.Directory, Agent: "orchestrator"},
+		json.RawMessage(`{"action":"start","card":"`+card.ID+`"}`))
+	if err != nil {
+		t.Fatalf("orchestrator start failed: %v", err)
+	}
+	// a plain agent starting a card is not watched automatically
+	if _, err := bt.Run(&tool.Ctx{SessionID: s.ID, Directory: i.Directory},
+		json.RawMessage(`{"action":"start","card":"`+plain.ID+`"}`)); err != nil {
+		t.Fatalf("plain start failed: %v", err)
+	}
+
+	cards, _ := board.Get(projectID)
+	byID := map[string]board.Card{}
+	for _, c := range cards {
+		byID[c.ID] = c
+	}
+	if w := byID[card.ID].Watchers; len(w) != 1 || w[0] != orch.ID {
+		t.Fatalf("orchestrator-started card watchers = %v, want [%s]", w, orch.ID)
+	}
+	if w := byID[plain.ID].Watchers; len(w) != 0 {
+		t.Fatalf("plain-started card should have no watchers, got %v", w)
+	}
+
+	// the card's own session marks it done → the orchestrator is pinged
+	// with the default message (not the verbose watcher text)
+	col := "done"
+	if _, err := board.Update(projectID, card.ID, nil, &col, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		return hasUserText(i, orch, "Ticket "+card.ID+" is done.")
+	})
+	if !hasUserText(i, orch, "Ticket "+card.ID+" is done.") {
+		msgs, _ := i.Mgr.LoadMessages(orch)
+		t.Fatalf("orchestrator was not pinged with the default message, messages: %+v", msgs)
+	}
+	// wait for the replies to finish streaming too: the prompts run
+	// asynchronously and the temp dir cleanup races with part files still
+	// being written when the test ends (flaky "directory not empty")
+	waitUntil(t, 5*time.Second, func() bool { return watcherReplied(i, orch, "Coordinating follow-up.") })
+	if !watcherReplied(i, orch, "Coordinating follow-up.") {
+		t.Fatal("orchestrator session never ran the model on the notification")
+	}
+	if childID, _ := res.Metadata["sessionID"].(string); childID != "" {
+		child, err := i.Mgr.Find(childID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitUntil(t, 5*time.Second, func() bool { return watcherReplied(i, child, "Coordinating follow-up.") })
+	}
+}
+
 // hasUserText reports whether the session has a user message whose text
 // contains all given substrings.
 func hasUserText(i *Instance, s *session.Session, want ...string) bool {

@@ -428,6 +428,12 @@ pre:hover .copy-code { opacity:1; }
 .modal .m-select:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
 .modal .m-select option { background:var(--bg-base); color:var(--text-base); }
 .modal .m-actions { display:flex; justify-content:flex-end; gap:8px; padding-top:14px; }
+/* settings model form: capability checkboxes in a 2-col grid */
+.modal .m-checks { display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; padding:8px 0; }
+.modal label.m-check { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--text-base); cursor:pointer; }
+.modal label.m-check input { accent-color:var(--accent); }
+.modal input[type=number] { flex:1; border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; transition:border-color .15s ease, box-shadow .15s ease; color:var(--text-base); }
+.modal input[type=number]:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
 /* schedule dialog: quick offset pills under the datetime picker, plus a live
    "the agent starts this card in …" preview line */
 .schedule-presets { display:flex; flex-wrap:wrap; gap:8px; padding:10px 0 2px; }
@@ -548,6 +554,36 @@ pre:hover .copy-code { opacity:1; }
   border:1px dashed var(--border-weak); border-radius:var(--radius-md);
 }
 
+/* column collapse: a toggle in the header shrinks the column to a vertical
+   button; collapsed columns gather in a rail on the left, stacked below one
+   another, and remain drop targets for cards */
+.kanban-rail { flex:0 0 auto; display:flex; flex-direction:column; gap:10px; }
+.kanban-col-toggle {
+  flex:none; display:flex; align-items:center; justify-content:center;
+  width:20px; height:20px; border-radius:var(--radius-md);
+  color:var(--text-faint);
+  transition:color .15s ease, background-color .15s ease;
+}
+.kanban-col-toggle:hover { color:var(--text); background:var(--layer-2); }
+.kanban-col-toggle svg { transform:rotate(180deg); } /* chevron points left = collapse */
+.kanban-col-collapsed {
+  writing-mode:sideways-lr; /* text reads bottom-to-top */
+  display:inline-flex; align-items:center; gap:8px;
+  padding:12px 9px;
+  background:linear-gradient(180deg, var(--layer-2), var(--layer-1) 96px);
+  border:1px solid var(--border-weak);
+  border-radius:var(--radius-xl2);
+  color:var(--text-muted); font:inherit; cursor:pointer;
+  transition:border-color .15s ease, box-shadow .15s ease, color .15s ease;
+}
+.kanban-col-collapsed:hover { border-color:var(--border-base); color:var(--text); }
+.kanban-col-collapsed.drag-over { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.kanban-col-collapsed .kanban-col-title { color:inherit; }
+.kanban-col-collapsed .kanban-count { margin:0; padding:4px 8px; }
+/* keep the per-status accents on the collapsed buttons too */
+.kanban-col-collapsed[data-column="inprogress"] .kanban-col-title { color:var(--ok-fg); }
+.kanban-col-collapsed[data-column="done"] .kanban-col-title { color:var(--purple-fg); }
+
 /* cards: elevated tiles that lift on hover and tilt while dragging */
 .kanban-card {
   position:relative;
@@ -625,6 +661,67 @@ pre:hover .copy-code { opacity:1; }
 .kanban-card-attachments { display:flex; flex-wrap:wrap; margin-top:8px; }
 .kanban-card-attachments .attach-chip { margin:0; max-width:100%; }
 .kanban-card-attachments .attach-chip span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* ---------- board chat (orchestrator, a column of the board) ---------- */
+/* The orchestrator chat is the last column of the kanban row: same flex
+   sizing, background, border and radius as the status columns, scrolling
+   with them instead of docking beside the board. */
+.board-chat {
+  position:relative;
+  flex:1 1 0; min-width:230px; max-width:420px;
+  display:flex; flex-direction:column; min-height:0;
+  background:linear-gradient(180deg, var(--layer-2), var(--layer-1) 96px);
+  border:1px solid var(--border-weak);
+  border-radius:var(--radius-xl2);
+  overflow:hidden;
+}
+/* horizontal resize: a slim grip along the chat's right edge (inside the
+   panel, which clips its children) — invisible until hovered or dragged,
+   then it shows an accent line; while dragging, text selection is off */
+.board-chat-resize {
+  position:absolute; top:0; bottom:0; right:0; width:7px;
+  cursor:col-resize; touch-action:none; z-index:5;
+}
+.board-chat-resize::after {
+  content:""; position:absolute; top:0; bottom:0; right:2px; width:3px;
+  border-radius:999px; background:transparent;
+  transition:background-color .15s ease;
+}
+.board-chat-resize:hover::after,
+body.board-chat-resizing .board-chat-resize::after { background:var(--accent); }
+body.board-chat-resizing { cursor:col-resize; user-select:none; }
+.board-chat-head { display:flex; align-items:center; gap:8px; padding:12px 12px 8px; border-bottom:1px solid var(--border-weak); }
+/* the orchestrator's agent color, matching the composer's agent dot */
+.board-chat-title { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--ok-fg); }
+.board-chat-spin { color:var(--accent); }
+.board-chat-spacer { flex:1; }
+.board-chat-btn { width:22px; height:22px; display:flex; align-items:center; justify-content:center; border-radius:var(--radius-md); color:var(--text-muted); }
+.board-chat-btn:hover { color:var(--text-base); background:var(--surface-hover); }
+/* the grip owns the panel's right edge, so the timeline scrolls without a
+   visible scrollbar (wheel/touch still scroll) rather than under it */
+.board-chat-timeline { flex:1; min-height:0; overflow-y:auto; padding:10px 0 6px; scrollbar-width:none; }
+.board-chat-timeline::-webkit-scrollbar { display:none; }
+.board-chat-timeline-inner { padding:0 12px; }
+.board-chat-empty { margin:14px 4px; font-size:12.5px; line-height:1.6; color:var(--text-faint); }
+.board-chat-composer { flex:0 0 auto; border-top:1px solid var(--border-weak); padding:8px 10px 10px; background:var(--layer-1); }
+.board-chat-composer textarea { width:100%; border:none; outline:none; background:transparent; resize:none; padding:4px 2px; max-height:160px; font-size:13px; line-height:150%; }
+.board-chat-composer textarea::placeholder { color:var(--text-faint); }
+.board-chat-actions { display:flex; align-items:center; gap:6px; margin-top:4px; }
+.board-chat-hint { flex:1; min-width:0; font-size:10.5px; color:var(--text-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* the chat reuses the main timeline's message styles; tighten them a little
+   for the narrow panel */
+.board-chat .msg-user .bubble { max-width:92%; font-size:13px; }
+.board-chat .assistant-text { font-size:13px; }
+.board-chat .assistant-text pre { max-height:260px; font-size:11.5px; }
+.board-chat .tool pre { max-height:260px; font-size:11.5px; }
+.board-chat .diff { max-height:260px; font-size:11.5px; }
+.board-chat .assistant-block, .board-chat .msg-user { margin:10px 0; }
+
+@media (max-width: 767px) {
+  /* narrow screens: the chat stays a column, just a narrower one that the
+     board's horizontal scroll reaches like any other column */
+  .board-chat { flex:0 0 300px; min-width:300px; max-width:none; }
+}
 
 /* ---------- cron jobs (second fixed tab) ---------- */
 .cron-list { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding:14px 18px 18px; width:100%; max-width:860px; margin:0 auto; }

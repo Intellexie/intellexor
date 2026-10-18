@@ -31,6 +31,7 @@ func registerInstance(i *Instance) {
 		board.OnMovedToDone = onCardDone
 		startScheduler()
 		startCronScheduler()
+		startAlarmScheduler()
 	})
 	instMu.Lock()
 	instReg = append(instReg, i)
@@ -123,6 +124,11 @@ func notifyWatchers(projectID string, card board.Card) {
 
 func promptWatcher(i *Instance, s *session.Session, card board.Card) {
 	msg := fmt.Sprintf("Card %q (id: %s) has been marked done.", card.Title, card.ID)
+	if s.Agent == "orchestrator" {
+		// the orchestrator coordinates by ticket ID and started the card
+		// itself, so the short default message is all it needs to react
+		msg = fmt.Sprintf("Ticket %s is done.", card.ID)
+	}
 	raw, _ := json.Marshal(map[string]any{"type": "text", "text": msg})
 	_, _ = i.Prompt(s, PromptInput{Parts: []json.RawMessage{raw}})
 }

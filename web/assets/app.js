@@ -372,6 +372,11 @@ function handleEvent(ev) {
       renderSidebar();
       updateTab();
       if (p.sessionID === S.current) navigate("");
+      // the board chat's session was archived — fall back to a fresh one
+      if (p.sessionID === boardChatSessionId()) {
+        setBoardChatSessionId("");
+        renderBoardChat();
+      }
       break;
     case "server.connected":
       // (re)connect: session statuses may have changed while the stream was
@@ -383,6 +388,7 @@ function handleEvent(ev) {
         renderComposer();
         renderTimeline();
         renderBoard();
+        renderBoardChat(); // the orchestrator chat's busy state may have changed
         updateTab();
       }).catch(() => {});
       break;
@@ -404,6 +410,7 @@ function handleEvent(ev) {
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       renderBoard(); // in-progress cards show a spinner while their session is busy
       renderBoardPanel();
+      if (p.sessionID === boardChatSessionId()) renderBoardChat(); // thinking indicator + stop button
       if (S.view === "cron") renderCronList(); // running crons show the hourglass
       updateTab();
       break;
@@ -420,6 +427,7 @@ function handleEvent(ev) {
       if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
       renderBoard(); // clear the spinner on the card this session was working on
       renderBoardPanel();
+      if (p.sessionID === boardChatSessionId()) renderBoardChat(); // clear the thinking indicator
       if (S.view === "cron") renderCronList(); // clear the hourglass on the finished run
       updateTab();
       // the agent finished working — chime, but only for real completions of
@@ -456,6 +464,9 @@ function handleEvent(ev) {
       if (info.role === "assistant" && info.error && p.sessionID === S.current) {
         renderTimeline();
       }
+      if (info.role === "assistant" && info.error && p.sessionID === boardChatSessionId()) {
+        renderBoardChat();
+      }
       if (info.role === "user" && p.sessionID !== S.current) {
         S.unseen.add(p.sessionID);
         renderSidebar();
@@ -477,6 +488,7 @@ function handleEvent(ev) {
       }
       trimWindow(store); // a new part can push the window over the cap
       if (p.sessionID === S.current) renderTimeline();
+      if (p.sessionID === boardChatSessionId()) renderBoardChat();
       break;
     }
     case "message.part.delta": {
@@ -503,7 +515,7 @@ function handleEvent(ev) {
       }
       if (p.field === "text" || p.field === "reasoning") {
         part.text = (part.text || "") + (p.delta || "");
-        if (p.sessionID === S.current) {
+        if (p.sessionID === S.current || p.sessionID === boardChatSessionId()) {
           S.streaming.set(p.partID, p.messageID);
           scheduleDeltaRender();
         }
@@ -520,6 +532,7 @@ function handleEvent(ev) {
         // an emptied session offers Import again
         if (!store.order.length) renderHeader();
       }
+      if (p.sessionID === boardChatSessionId()) renderBoardChat();
       break;
     }
     case "permission.asked":
@@ -607,6 +620,7 @@ function scheduleDeltaRender() {
   deltaRender = requestAnimationFrame(() => {
     deltaRender = 0;
     renderStreamingText();
+    renderBoardChatStreaming();
   });
 }
 
@@ -618,6 +632,9 @@ function renderStreamingText() {
   const store = msgStore(S.current);
   let needFull = false;
   for (const [pid, mid] of S.streaming) {
+    // parts of other timelines (e.g. the board chat's session) stream too —
+    // they are not this store's business and must not trigger a rebuild here
+    if (!store.info[mid]) continue;
     const part = store.parts[mid] && store.parts[mid][pid];
     if (!part) { needFull = true; continue; }
     const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
@@ -1694,7 +1711,11 @@ function thinkMeta(text) {
   return el("span", "think-meta", esc(text));
 }
 
-function renderUserMessage(info, parts) {
+// sid: the session the message belongs to. Defaults to S.current (the main
+// timeline); the board chat passes its orchestrator session so revert/fork
+// act on the right conversation.
+function renderUserMessage(info, parts, sid) {
+  const target = sid || S.current;
   const wrap = el("div", "msg-user");
   const text = parts.filter((p) => p.type === "text" && !p.synthetic).map((p) => p.text || "").join("\n");
   const files = parts.filter((p) => p.type === "file");
@@ -1722,13 +1743,17 @@ function renderUserMessage(info, parts) {
   const revert = el("button", "msg-revert", ICONS.revert);
   revert.title = "Revert to here — removes this message and everything after it, restoring file changes";
   revert.onclick = async () => {
-    if (!S.current) return;
+    if (!target) return;
     try {
-      await post(`/session/${S.current}/revert`, { messageID: info.id });
-      await loadMessages(S.current);
-      await refreshSession(S.current);
-      renderTimeline();
-      if (text) setComposerText(text);
+      await post(`/session/${target}/revert`, { messageID: info.id });
+      await loadMessages(target);
+      await refreshSession(target);
+      if (target === S.current) renderTimeline();
+      else renderBoardChat();
+      if (text) {
+        if (target === S.current) setComposerText(text);
+        else if (target === boardChatSessionId()) setBoardChatText(text);
+      }
       toast("Reverted — message returned to the chat box, file changes restored");
     } catch (e) {
       toast(e.message || String(e), true);
@@ -1743,7 +1768,9 @@ function renderUserMessage(info, parts) {
   return wrap;
 }
 
-function renderAssistantMessage(info, parts) {
+// sid: the session the message belongs to — see renderUserMessage.
+function renderAssistantMessage(info, parts, sid) {
+  const target = sid || S.current;
   const block = el("div", "assistant-block");
   let hasVisible = false;
   for (const p of parts) {
@@ -1763,9 +1790,9 @@ function renderAssistantMessage(info, parts) {
   const fork = el("button", "msg-fork", ICONS.fork);
   fork.title = "Fork from here — clones the session up to this message into a new session";
   fork.onclick = async () => {
-    if (!S.current) return;
+    if (!target) return;
     try {
-      const dup = await post(`/session/${S.current}/fork`, { messageID: info.id });
+      const dup = await post(`/session/${target}/fork`, { messageID: info.id });
       await refreshSession(dup.id);
       navigate("/" + dup.id);
       toast("Session forked — you are now in the copy");
@@ -2087,6 +2114,18 @@ const BOARD_COLUMNS = [
   { id: "done", label: "Done" },
 ];
 
+// Per-column collapsed state, persisted like the other UI prefs. A collapsed
+// column renders as a narrow vertical button in a rail on the left of the
+// board; collapsed columns stack below one another and stay droppable.
+let boardCollapsed = {};
+try { boardCollapsed = JSON.parse(localStorage.getItem("intellexor.boardCollapsed") || "{}"); } catch { boardCollapsed = {}; }
+
+function setBoardCollapsed(id, collapsed) {
+  boardCollapsed[id] = collapsed;
+  try { localStorage.setItem("intellexor.boardCollapsed", JSON.stringify(boardCollapsed)); } catch {}
+  renderBoard();
+}
+
 let boardCards = [];
 
 // Cards that just started are detected by comparing columns across loads: a
@@ -2136,11 +2175,358 @@ async function renderBoardView(main) {
   addBtn.onclick = () => openAddCardModal();
   header.appendChild(addBtn);
   main.appendChild(header);
+  // the orchestrator chat is a column of the board: it lives in the same
+  // flex row as the status columns and scrolls with them
   const board = el("div", "kanban");
   board.id = "kanban";
   main.appendChild(board);
   await loadBoard();
   renderBoard();
+  board.appendChild(buildBoardChat());
+  initBoardChat();
+}
+
+/* ---------- board chat (orchestrator) ---------- */
+
+// A chat area beside the kanban columns, hardcoded to the orchestrator agent:
+// the coordination agent that curates the board, starts cards and schedules
+// cron jobs. The conversation lives in a real session (so it is fully
+// rendered by the same message renderers and streams over the same SSE
+// events); its id is kept per-project in localStorage so returning to the
+// board continues the same conversation. "New chat" starts a fresh session —
+// the old one stays in the workspace list.
+
+const ORCHESTRATOR_AGENT = "orchestrator";
+let boardChatLoaded = false; // messages fetched for the current board view
+
+function boardChatKey() {
+  return "intellexor.boardChat." + (S.dir || DIR || "");
+}
+
+function boardChatSessionId() {
+  try { return localStorage.getItem(boardChatKey()) || ""; } catch { return ""; }
+}
+
+function setBoardChatSessionId(id) {
+  try {
+    if (id) localStorage.setItem(boardChatKey(), id);
+    else localStorage.removeItem(boardChatKey());
+  } catch {}
+}
+
+function boardChatBusy() {
+  const sid = boardChatSessionId();
+  const st = sid && S.statuses[sid];
+  return !!(st && st.type !== "idle");
+}
+
+/* ---------- board chat resize ---------- */
+
+// The orchestrator chat column is horizontally resizable: dragging its right
+// edge adjusts the width (persisted in localStorage and re-applied on every
+// board render); double-clicking the edge resets to the default flex sizing.
+const BOARD_CHAT_MIN_W = 230;
+const BOARD_CHAT_MAX_W = 720;
+const BOARD_CHAT_WIDTH_KEY = "intellexor.boardChatWidth";
+
+function applyBoardChatWidth(panel, w) {
+  w = Math.round(Math.max(BOARD_CHAT_MIN_W, Math.min(BOARD_CHAT_MAX_W, w)));
+  // a resized chat is pinned to the dragged width — the default flex sizing
+  // (grow up to 420px) only applies until the user resizes it themselves
+  panel.style.flex = `0 0 ${w}px`;
+  panel.style.maxWidth = "none";
+  return w;
+}
+
+function initBoardChatResize(panel) {
+  const grip = el("div", "board-chat-resize");
+  grip.title = "Drag to resize · double-click to reset";
+  grip.ondblclick = (e) => {
+    e.preventDefault();
+    panel.style.flex = "";
+    panel.style.maxWidth = "";
+    try { localStorage.removeItem(BOARD_CHAT_WIDTH_KEY); } catch {}
+  };
+  grip.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = panel.getBoundingClientRect().width;
+    // the grip sits on the right edge: dragging right widens the chat
+    const move = (ev) => applyBoardChatWidth(panel, startW + (ev.clientX - startX));
+    const up = () => {
+      document.body.classList.remove("board-chat-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      const w = panel.getBoundingClientRect().width;
+      if (w > 0) {
+        try { localStorage.setItem(BOARD_CHAT_WIDTH_KEY, String(Math.round(w))); } catch {}
+      }
+    };
+    document.body.classList.add("board-chat-resizing");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+  panel.appendChild(grip);
+  let saved = 0;
+  try { saved = Number(localStorage.getItem(BOARD_CHAT_WIDTH_KEY)) || 0; } catch {}
+  if (saved > 0) applyBoardChatWidth(panel, saved);
+}
+
+// The chat panel skeleton: header, timeline and composer. Built once per
+// board view render; updates go through renderBoardChat, which only touches
+// the timeline and the chrome — typing is never interrupted.
+function buildBoardChat() {
+  boardChatLoaded = false;
+  const panel = el("aside", "board-chat");
+  panel.id = "board-chat";
+  const head = el("div", "board-chat-head");
+  head.innerHTML =
+    `<span class="agent-dot" style="background:#0d9f6f"></span>` +
+    `<span class="board-chat-title">Orchestrator</span>` +
+    `<span class="spinner board-chat-spin" id="board-chat-spin" style="display:none">${ICONS.spinner}</span>`;
+  const spacer = el("span", "board-chat-spacer");
+  head.appendChild(spacer);
+  const fresh = el("button", "board-chat-btn", ICONS.plus);
+  fresh.id = "board-chat-new";
+  fresh.title = "Start a fresh orchestrator conversation (the current one stays in the workspace)";
+  fresh.onclick = boardChatReset;
+  head.appendChild(fresh);
+  panel.appendChild(head);
+
+  const tl = el("div", "board-chat-timeline");
+  tl.id = "board-chat-timeline";
+  const inner = el("div", "board-chat-timeline-inner");
+  inner.id = "board-chat-timeline-inner";
+  tl.appendChild(inner);
+  panel.appendChild(tl);
+
+  panel.appendChild(buildBoardChatComposer());
+  initBoardChatResize(panel);
+  return panel;
+}
+
+function buildBoardChatComposer() {
+  const wrap = el("div", "board-chat-composer");
+  const ta = el("textarea");
+  ta.id = "board-chat-input";
+  ta.rows = 1;
+  ta.placeholder = "Ask the orchestrator to coordinate work…";
+  ta.oninput = () => autosize(ta);
+  ta.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      boardChatSend();
+    } else if (e.key === "Escape" && boardChatBusy()) {
+      e.preventDefault();
+      boardChatAbort();
+    }
+  };
+  wrap.appendChild(ta);
+  const row = el("div", "board-chat-actions");
+  const hint = el("span", "board-chat-hint", "manages the board · starts cards · schedules jobs");
+  const send = el("button", "c-btn send", ICONS.up);
+  send.id = "board-chat-send";
+  send.title = "Send";
+  send.onclick = () => (boardChatBusy() ? boardChatAbort() : boardChatSend());
+  row.append(hint, send);
+  wrap.appendChild(row);
+  setTimeout(() => autosize(ta), 0);
+  return wrap;
+}
+
+// Fetch the persisted conversation (verifying the session still exists —
+// it may have been archived) and render it.
+async function initBoardChat() {
+  boardChatLoaded = false;
+  const sid = boardChatSessionId();
+  if (sid) {
+    const ok = await get("/session/" + sid).then(() => true).catch(() => false);
+    if (ok) await loadMessages(sid).catch(() => {});
+    else setBoardChatSessionId("");
+  }
+  boardChatLoaded = true;
+  renderBoardChat();
+}
+
+// Session creation for the board chat, kept per call burst: a double-Enter
+// (or a send racing the create) must not mint two orchestrator sessions —
+// later sends await the same promise, like the pending-tab flow.
+let boardChatCreate = null;
+
+async function ensureBoardChatSession() {
+  const sid = boardChatSessionId();
+  if (sid) {
+    const ok = await get("/session/" + sid).then(() => true).catch(() => false);
+    if (ok) return sid;
+    setBoardChatSessionId(""); // archived/deleted meanwhile — start fresh
+  }
+  if (!boardChatCreate) {
+    boardChatCreate = post("/session", { agent: ORCHESTRATOR_AGENT, title: "Orchestrator" })
+      .then((sess) => {
+        trackSession(sess);
+        setBoardChatSessionId(sess.id);
+        return sess.id;
+      })
+      .finally(() => { boardChatCreate = null; });
+  }
+  return boardChatCreate;
+}
+
+async function boardChatSend() {
+  const ta = $("#board-chat-input");
+  if (!ta) return;
+  const text = ta.value.trim();
+  if (!text) return;
+  ta.value = "";
+  autosize(ta);
+  try {
+    const sid = await ensureBoardChatSession();
+    await loadMessages(sid).catch(() => {});
+    await post(`/session/${sid}/prompt_async`, { agent: ORCHESTRATOR_AGENT, parts: [{ type: "text", text }] });
+    await refreshSession(sid);
+    renderBoardChat();
+  } catch (e) {
+    if (ta && !ta.value) ta.value = text; // give the draft back — nothing was sent
+    autosize(ta);
+    toast(e.message || String(e), true);
+  }
+}
+
+async function boardChatAbort() {
+  const sid = boardChatSessionId();
+  if (!sid) return;
+  soundSuppressedUntil = Date.now() + 10000; // the user stopped it — no chime
+  await post(`/session/${sid}/abort`).catch(() => {});
+}
+
+// Fresh conversation: the old session is kept (it remains in the workspace
+// list), only the panel's pointer moves to a yet-to-be-created session.
+async function boardChatReset() {
+  const ok = await confirmModal(
+    "New orchestrator chat",
+    "Start a fresh orchestrator conversation? The current one stays in the workspace session list.",
+    "New chat"
+  );
+  if (!ok) return;
+  setBoardChatSessionId("");
+  renderBoardChat();
+  const ta = $("#board-chat-input");
+  if (ta) ta.focus();
+}
+
+// Put text into the board chat composer (the revert flow uses it).
+function setBoardChatText(text) {
+  const ta = $("#board-chat-input");
+  if (!ta) return;
+  ta.value = text;
+  autosize(ta);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = ta.value.length;
+}
+
+// True when the timeline is scrolled to (or near) the bottom — new content
+// should keep it there instead of yanking the user around.
+function boardChatNearBottom(tl) {
+  return !tl || tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
+}
+
+// Render the orchestrator conversation into the panel. A full rebuild, like
+// renderTimeline — cheap at chat scale and immune to partial-update bugs.
+function renderBoardChat() {
+  const inner = $("#board-chat-timeline-inner");
+  if (!inner) return;
+  const tl = $("#board-chat-timeline");
+  const stick = boardChatNearBottom(tl);
+  inner.innerHTML = "";
+  const sid = boardChatSessionId();
+  if (sid) {
+    const store = S.msgs.get(sid);
+    if (store) {
+      for (const mid of store.order) {
+        const info = store.info[mid];
+        if (!info) continue;
+        const parts = Object.values(store.parts[mid] || {}).sort((a, b) => (a.id < b.id ? -1 : 1));
+        if (info.role === "user") {
+          const node = renderUserMessage(info, parts, sid);
+          if (node) inner.appendChild(node);
+        } else {
+          inner.appendChild(renderAssistantMessage(info, parts, sid));
+        }
+      }
+    }
+    // thinking indicator while the orchestrator works
+    const st = S.statuses[sid];
+    if (st && (st.type === "busy" || st.type === "retry")) {
+      const think = el("div", "assistant-block");
+      const row = el("div", "thinking-row");
+      if (st.type === "retry") {
+        row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
+      } else if (!store || !lastBlockHasText(store)) {
+        row.appendChild(el("span", "ricon", "🧠"));
+        row.appendChild(el("span", "shimmer", "Thinking"));
+        row.appendChild(thinkingDots(true));
+      }
+      think.appendChild(row);
+      inner.appendChild(think);
+    }
+  } else if (boardChatLoaded) {
+    inner.appendChild(el("div", "board-chat-empty",
+      "Chat with the orchestrator — it coordinates the work on this board: breaking tasks into cards, starting sessions on them, linking follow-ups and scheduling cron jobs."));
+  }
+  updateBoardChatChrome();
+  if (tl && stick) tl.scrollTop = tl.scrollHeight;
+}
+
+// Send/stop button and header spinner follow the busy state.
+function updateBoardChatChrome() {
+  const busy = boardChatBusy();
+  const send = $("#board-chat-send");
+  if (send) {
+    send.className = "c-btn " + (busy ? "stop" : "send");
+    send.innerHTML = busy ? ICONS.stop : ICONS.up;
+    send.title = busy ? "Stop" : "Send";
+  }
+  const spin = $("#board-chat-spin");
+  if (spin) spin.style.display = busy ? "" : "none";
+}
+
+// Live text deltas for the board chat — the panel counterpart of
+// renderStreamingText. Only parts belonging to the orchestrator session are
+// touched; everything else in S.streaming belongs to another timeline.
+function renderBoardChatStreaming() {
+  const inner = $("#board-chat-timeline-inner");
+  if (!inner) return;
+  const sid = boardChatSessionId();
+  if (!sid) return;
+  const store = S.msgs.get(sid);
+  if (!store) return;
+  let touched = false, needFull = false;
+  for (const [pid, mid] of S.streaming) {
+    if (!store.info[mid]) continue; // another conversation's part
+    const part = store.parts[mid] && store.parts[mid][pid];
+    if (!part) { needFull = true; continue; }
+    const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
+    if (!node) { needFull = true; continue; }
+    node.innerHTML = renderMarkdown(part.text || "");
+    if (part.type === "reasoning") {
+      const c = inner.querySelector(`[data-rcount="${cssId(pid)}"]`);
+      if (c) {
+        c.textContent = `[${fmtNum((part.text || "").length)}]`;
+        c.title = `${(part.text || "").length} characters of reasoning`;
+      }
+    }
+    touched = true;
+  }
+  if (needFull) {
+    renderBoardChat();
+    return;
+  }
+  if (!touched) return;
+  const tl = $("#board-chat-timeline");
+  if (tl && boardChatNearBottom(tl)) tl.scrollTop = tl.scrollHeight;
 }
 
 // Export / Import links for the board header, styled like the session
@@ -2503,20 +2889,78 @@ function renderBoard() {
   // don't rebuild over an active title edit — it would destroy the
   // contenteditable node and lose the unsaved text
   if (board.querySelector('.kanban-card-title[contenteditable="true"]')) return;
+  // the orchestrator chat is a board column — keep it across rebuilds
+  const chat = $("#board-chat");
   board.innerHTML = "";
+  // collapsed columns live in a vertical rail on the left, stacked below
+  // each other; expanded columns fill the rest of the board
+  const rail = el("div", "kanban-rail");
   for (const col of BOARD_COLUMNS) {
-    board.appendChild(buildBoardColumn(col));
+    if (boardCollapsed[col.id]) rail.appendChild(buildBoardColumn(col));
   }
+  if (rail.children.length) board.appendChild(rail);
+  for (const col of BOARD_COLUMNS) {
+    if (!boardCollapsed[col.id]) board.appendChild(buildBoardColumn(col));
+  }
+  if (chat) board.appendChild(chat);
   drawLinkLines(); // repaint the border-to-border lines between linked cards
 }
 
+// Shared drop-target logic for expanded columns and collapsed buttons alike:
+// insert before the card under the pointer, else at the end. Link drags (the
+// ⌖ icon) target cards, not columns, so they are ignored here — the cards
+// themselves handle them. `list` is null for collapsed columns (drop = append).
+function attachBoardDrop(target, colId, list) {
+  target.ondragover = (e) => {
+    if (e.dataTransfer.types.includes(LINK_MIME)) return;
+    e.preventDefault();
+    target.classList.add("drag-over");
+  };
+  target.ondragleave = (e) => { if (!target.contains(e.relatedTarget)) target.classList.remove("drag-over"); };
+  target.ondrop = (e) => {
+    e.preventDefault();
+    target.classList.remove("drag-over");
+    const cid = e.dataTransfer.getData("text/plain");
+    if (!cid) return;
+    let beforeID = null;
+    if (list) {
+      for (const n of list.querySelectorAll(".kanban-card:not(.dragging)")) {
+        const r = n.getBoundingClientRect();
+        if (e.clientY < r.top + r.height / 2) { beforeID = n.dataset.id; break; }
+      }
+    }
+    moveBoardCard(cid, colId, beforeID);
+  };
+}
+
+// A collapsed column: a vertical button in the left rail. Clicking expands
+// the column again; dropping a card on it moves the card there (appended).
+function buildCollapsedBoardColumn(col, count) {
+  const btn = el("button", "kanban-col-collapsed");
+  btn.type = "button";
+  btn.dataset.column = col.id;
+  btn.title = `Expand ${col.label} — you can also drop cards here`;
+  // count first: sideways-lr flows bottom-to-top, so this keeps the pill at
+  // the bottom of the button while the title reads upward
+  btn.innerHTML = `<span class="kanban-count">${count}</span><span class="kanban-col-title">${esc(col.label)}</span>`;
+  btn.onclick = () => setBoardCollapsed(col.id, false);
+  attachBoardDrop(btn, col.id, null);
+  return btn;
+}
+
 function buildBoardColumn(col) {
+  const cards = boardCardsIn(col.id);
+  if (boardCollapsed[col.id]) return buildCollapsedBoardColumn(col, cards.length);
   const colEl = el("div", "kanban-col");
   colEl.dataset.column = col.id;
-  const cards = boardCardsIn(col.id);
 
   const head = el("div", "kanban-col-head");
   head.innerHTML = `<span class="kanban-col-title">${esc(col.label)}</span><span class="kanban-count">${cards.length}</span>`;
+  const toggle = el("button", "kanban-col-toggle", ICONS.chev);
+  toggle.type = "button";
+  toggle.title = "Collapse column";
+  toggle.onclick = (e) => { e.stopPropagation(); setBoardCollapsed(col.id, true); };
+  head.appendChild(toggle);
   colEl.appendChild(head);
 
   const list = el("div", "kanban-cards");
@@ -2588,27 +3032,8 @@ function buildBoardColumn(col) {
     setTimeout(() => autosize(input), 0);
   }
 
-  // drop target: insert before the card under the pointer, else at the end.
-  // Link drags (the ⌖ icon) target cards, not columns, so they are ignored
-  // here — the cards themselves handle them.
-  colEl.ondragover = (e) => {
-    if (e.dataTransfer.types.includes(LINK_MIME)) return;
-    e.preventDefault();
-    colEl.classList.add("drag-over");
-  };
-  colEl.ondragleave = (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove("drag-over"); };
-  colEl.ondrop = (e) => {
-    e.preventDefault();
-    colEl.classList.remove("drag-over");
-    const cid = e.dataTransfer.getData("text/plain");
-    if (!cid) return;
-    let beforeID = null;
-    for (const n of list.querySelectorAll(".kanban-card:not(.dragging)")) {
-      const r = n.getBoundingClientRect();
-      if (e.clientY < r.top + r.height / 2) { beforeID = n.dataset.id; break; }
-    }
-    moveBoardCard(cid, col.id, beforeID);
-  };
+  // drop target: see attachBoardDrop above
+  attachBoardDrop(colEl, col.id, list);
   return colEl;
 }
 
@@ -3657,14 +4082,14 @@ function renderAttachChips(row) {
 
 function buildAgentSelect() {
   const btn = el("button", "c-select");
-  const colors = { build: "#034cff", plan: "#a753ae", general: "#2090f5", explore: "#fcb239" };
+  const colors = { build: "#034cff", plan: "#a753ae", orchestrator: "#0d9f6f", general: "#2090f5", explore: "#fcb239" };
   btn.innerHTML =
     `<span class="agent-dot" style="background:${colors[S.agent] || "#999"}"></span>
      <span class="name">${esc(cap(S.agent))}</span>${ICONS.chev}`;
   btn.onclick = (e) => {
     e.stopPropagation();
     const pop = el("div", "popover");
-    for (const a of ["build", "plan", "general", "explore"]) {
+    for (const a of ["build", "plan", "orchestrator", "general", "explore"]) {
       const item = el("button", "p-item" + (S.agent === a ? " on" : ""));
       item.innerHTML = `<span class="agent-dot" style="background:${colors[a]}"></span><span>${cap(a)}</span>`;
       item.onclick = () => {
@@ -4258,6 +4683,15 @@ function setField(label, input, sub) {
   return f;
 }
 
+// opencode carries the provider type in the "npm" SDK package field; for now
+// only the OpenAI-compatible SDK is offered in the UI.
+const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible";
+
+function providerTypeLabel(npm) {
+  if (!npm || npm === OPENAI_COMPATIBLE_NPM) return "openai-compatible";
+  return npm;
+}
+
 function renderSettingsProviders(content, show) {
   const head = el("div", "set-page-head");
   head.appendChild(el("h3", "set-h", "Providers"));
@@ -4291,10 +4725,13 @@ function renderSettingsProviders(content, show) {
       top.appendChild(el("div", "si-name", esc(cfg.name || id)));
       const nModels = Object.keys(cfg.models || {}).length;
       if (nModels) top.appendChild(el("span", "si-badge", nModels + " model" + (nModels === 1 ? "" : "s")));
-      if (cfg.api) top.appendChild(el("span", "si-badge", esc(cfg.api)));
+      top.appendChild(el("span", "si-badge", esc(providerTypeLabel(cfg.npm))));
+      if (cfg.api && cfg.api !== "openai") top.appendChild(el("span", "si-badge", esc(cfg.api)));
       top.appendChild(el("span", "si-spacer"));
       const cfgBtn = el("button", "btn secondary si-btn", "Configure models");
       cfgBtn.onclick = () => show("models", id);
+      const editBtn = el("button", "btn secondary si-btn", "Edit");
+      editBtn.onclick = () => openProviderForm(load, { id, entry: cfg, file: e.file });
       const rm = el("button", "icon-btn", ICONS.trash);
       rm.title = "Remove provider";
       rm.onclick = async () => {
@@ -4308,7 +4745,7 @@ function renderSettingsProviders(content, show) {
           toast(err.message || String(err), true);
         }
       };
-      top.append(cfgBtn, rm);
+      top.append(cfgBtn, editBtn, rm);
       item.appendChild(top);
       const file = el("div", "si-file", esc(e.file));
       file.title = e.file;
@@ -4320,48 +4757,70 @@ function renderSettingsProviders(content, show) {
   addBtn.onclick = () => openProviderForm(load);
 }
 
-function openProviderForm(onSaved) {
-  openModal("Add provider", (modal, ov) => {
+// Add/edit provider. `existing` is {id, entry, file} when editing; the entry
+// is the raw config object, so models and opencode-only fields survive the
+// round-trip (the PUT replaces the whole entry).
+function openProviderForm(onSaved, existing) {
+  const editing = !!(existing && existing.id);
+  openModal(editing ? "Edit provider" : "Add provider", (modal, ov) => {
     const idIn = el("input");
     idIn.type = "text";
-    idIn.placeholder = "Provider ID, e.g. vllm or anthropic";
+    idIn.placeholder = "Provider ID, e.g. vllm or my-api";
+    idIn.value = editing ? existing.id : "";
+    if (editing) idIn.disabled = true;
     const nameIn = el("input");
     nameIn.type = "text";
     nameIn.placeholder = "Display name (optional)";
+    nameIn.value = editing ? existing.entry.name || "" : "";
+    // Provider type: only openai-compatible is supported for now. The value
+    // is the opencode npm package so the config stays schema-compatible.
+    const typeSel = el("select", "m-select");
+    const typeOpt = el("option");
+    typeOpt.value = OPENAI_COMPATIBLE_NPM;
+    typeOpt.textContent = "openai-compatible";
+    typeSel.appendChild(typeOpt);
+    typeSel.value = OPENAI_COMPATIBLE_NPM;
     const keyIn = el("input");
     keyIn.type = "text";
-    keyIn.placeholder = "API key (optional)";
+    keyIn.placeholder = "API key (optional for local endpoints)";
+    keyIn.value = editing ? (existing.entry.options || {}).apiKey || "" : "";
     const urlIn = el("input");
     urlIn.type = "text";
-    urlIn.placeholder = "Base URL, e.g. http://localhost:8080/v1 (optional)";
-    const protoSel = el("select", "m-select");
-    for (const [v, label] of [["", "Auto (OpenAI-compatible)"], ["openai", "OpenAI-compatible"], ["anthropic", "Anthropic"], ["gemini", "Gemini"]]) {
-      const o = el("option");
-      o.value = v;
-      o.textContent = label;
-      protoSel.appendChild(o);
-    }
+    urlIn.placeholder = "Endpoint URL, e.g. http://localhost:8080/v1";
+    urlIn.value = editing ? (existing.entry.options || {}).baseURL || "" : "";
     const fileSel = el("select", "m-select");
-    fillConfigFileSelect(fileSel).catch(() => {});
+    if (editing) {
+      // edits go back to the file the provider is defined in
+      fileSel.disabled = true;
+      const o = el("option");
+      o.value = existing.file;
+      o.textContent = existing.file;
+      fileSel.appendChild(o);
+    } else {
+      fillConfigFileSelect(fileSel).catch(() => {});
+    }
 
     const err = el("div", "set-form-err");
-    const save = el("button", "btn primary", "Save provider");
+    const save = el("button", "btn primary", editing ? "Save changes" : "Save provider");
     const cancel = el("button", "btn ghost", "Cancel");
     cancel.onclick = () => ov.remove();
     const commit = async () => {
-      const id = idIn.value.trim();
+      const id = editing ? existing.id : idIn.value.trim();
       if (!id) { err.textContent = "Provider ID is required."; idIn.focus(); return; }
       if (!fileSel.value) { err.textContent = "No config file available."; return; }
-      const entry = {};
-      const name = nameIn.value.trim();
-      if (name) entry.name = name;
-      if (protoSel.value) entry.api = protoSel.value;
-      const options = {};
-      const key = keyIn.value.trim();
-      if (key) options.apiKey = key;
       const url = urlIn.value.trim();
-      if (url) options.baseURL = url;
-      if (Object.keys(options).length) entry.options = options;
+      if (!url) { err.textContent = "Endpoint URL is required for openai-compatible providers."; urlIn.focus(); return; }
+      // start from the stored entry so models and unknown fields survive
+      const entry = editing ? JSON.parse(JSON.stringify(existing.entry || {})) : {};
+      entry.npm = typeSel.value;
+      const name = nameIn.value.trim();
+      if (name) entry.name = name; else delete entry.name;
+      const options = { ...(entry.options || {}) };
+      options.baseURL = url;
+      const key = keyIn.value.trim();
+      if (key) options.apiKey = key; else delete options.apiKey;
+      entry.options = options;
+      delete entry.api; // protocol is implied by the provider type
       save.disabled = true;
       try {
         await api("PUT", "/config/provider/" + encodeURIComponent(id), { file: fileSel.value, entry });
@@ -4380,28 +4839,208 @@ function openProviderForm(onSaved) {
     }
     modal.append(
       setField("ID", idIn, 'The key under "provider" in the config file.'),
+      setField("Provider type", typeSel, "Only openai-compatible is supported for now."),
       setField("Name", nameIn),
+      setField("Endpoint URL", urlIn, "Stored as options.baseURL."),
       setField("API key", keyIn, "Stored in the config file (options.apiKey)."),
-      setField("Base URL", urlIn),
-      setField("Protocol", protoSel),
-      setField("Config file", fileSel, "Which config file to save this provider into."),
+      setField("Config file", fileSel, editing ? undefined : "Which config file to save this provider into."),
       err
     );
     const actions = el("div", "m-actions");
     actions.append(cancel, save);
     modal.appendChild(actions);
-    setTimeout(() => idIn.focus(), 0);
+    setTimeout(() => (editing ? nameIn : idIn).focus(), 0);
   });
 }
 
-// Models page: reached per provider via "Configure models"; intentionally
-// empty for now.
+// Models page: reached per provider via "Configure models". Lists the
+// models configured for the provider (straight from the config files) and
+// allows adding, editing and removing them.
 function renderSettingsModels(content, show, providerID) {
   const back = el("button", "btn ghost si-back", "← Providers");
   back.onclick = () => show("providers");
   content.appendChild(back);
-  content.appendChild(el("h3", "set-h", "Models" + (providerID ? " — " + esc(cap(providerID)) : "")));
-  content.appendChild(el("div", "set-empty", "Model configuration is not available yet."));
+
+  const head = el("div", "set-page-head");
+  head.appendChild(el("h3", "set-h", "Models" + (providerID ? " — " + esc(cap(providerID)) : "")));
+  const addBtn = el("button", "btn primary", "Add model");
+  head.appendChild(addBtn);
+  content.appendChild(head);
+
+  const list = el("div", "set-list", '<div class="set-empty">Loading…</div>');
+  content.appendChild(list);
+
+  let curFile = null; // config file the provider lives in; set by load()
+
+  const load = async () => {
+    let data;
+    try {
+      data = await fetchConfigEntries();
+    } catch (e) {
+      list.innerHTML = "";
+      list.appendChild(el("div", "set-empty", "Failed to load config: " + esc(e.message || String(e))));
+      return;
+    }
+    const e = (data.providers || {})[providerID];
+    list.innerHTML = "";
+    if (!e) {
+      curFile = null;
+      addBtn.disabled = true;
+      list.appendChild(el("div", "set-empty", "Provider not found — it may have been removed."));
+      return;
+    }
+    curFile = e.file;
+    addBtn.disabled = false;
+    const models = (e.config || {}).models || {};
+    const ids = Object.keys(models).sort();
+    if (!ids.length) {
+      list.appendChild(el("div", "set-empty", "No models configured for this provider yet."));
+      return;
+    }
+    for (const mid of ids) {
+      const m = models[mid] || {};
+      const item = el("div", "set-item");
+      const top = el("div", "si-head");
+      top.appendChild(el("div", "si-name", esc(m.name || mid)));
+      top.appendChild(el("span", "si-badge", esc(mid)));
+      const caps = [];
+      if (m.tool_call) caps.push("tools");
+      if (m.reasoning) caps.push("reasoning");
+      if (m.attachment) caps.push("attachments");
+      if (m.temperature === false) caps.push("no temperature");
+      for (const c of caps) top.appendChild(el("span", "si-badge", c));
+      top.appendChild(el("span", "si-spacer"));
+      const editBtn = el("button", "btn secondary si-btn", "Edit");
+      editBtn.onclick = () => openModelForm(providerID, curFile, load, { id: mid, entry: m });
+      const rm = el("button", "icon-btn", ICONS.trash);
+      rm.title = "Remove model";
+      rm.onclick = async () => {
+        if (!(await confirmModal("Remove model", `Remove "${mid}" from ${providerID} (${e.file})?`, "Remove"))) return;
+        try {
+          await del(`/config/provider/${encodeURIComponent(providerID)}/model/${encodeURIComponent(mid)}?file=${encodeURIComponent(e.file)}`);
+          toast("Model removed");
+          refreshProviders();
+          load();
+        } catch (err) {
+          toast(err.message || String(err), true);
+        }
+      };
+      top.append(editBtn, rm);
+      item.appendChild(top);
+      const lim = m.limit || {};
+      const bits = [];
+      if (lim.context) bits.push("context " + lim.context);
+      if (lim.output) bits.push("output " + lim.output);
+      if (bits.length) item.appendChild(el("div", "si-sub", esc(bits.join(" · "))));
+      const fileEl = el("div", "si-file", esc(e.file));
+      fileEl.title = e.file;
+      item.appendChild(fileEl);
+      list.appendChild(item);
+    }
+  };
+  load();
+  addBtn.onclick = () => {
+    if (!curFile) { toast("Provider not found", true); return; }
+    openModelForm(providerID, curFile, load, null);
+  };
+}
+
+// Add/edit a single model inside a provider entry. `existing` is
+// {id, entry} when editing. The entry shape follows opencode's model schema
+// (name, tool_call, reasoning, attachment, temperature, limit); unknown
+// fields (cost, modalities, …) are preserved on edit.
+function openModelForm(providerID, file, onSaved, existing) {
+  const editing = !!(existing && existing.id);
+  openModal(editing ? "Edit model" : "Add model", (modal, ov) => {
+    const idIn = el("input");
+    idIn.type = "text";
+    idIn.placeholder = "Model ID, e.g. llama-3.3-70b-instruct";
+    idIn.value = editing ? existing.id : "";
+    if (editing) idIn.disabled = true;
+    const nameIn = el("input");
+    nameIn.type = "text";
+    nameIn.placeholder = "Display name (optional)";
+    nameIn.value = editing ? existing.entry.name || "" : "";
+
+    const mkCheck = (label, key, def) => {
+      const c = el("input");
+      c.type = "checkbox";
+      c.checked = editing ? !!existing.entry[key] : def;
+      const wrap = el("label", "m-check");
+      wrap.appendChild(c);
+      wrap.appendChild(el("span", "", label));
+      return { input: c, key, wrap };
+    };
+    const checks = [
+      mkCheck("Tool calling", "tool_call", true),
+      mkCheck("Reasoning", "reasoning", false),
+      mkCheck("Image attachments", "attachment", false),
+      mkCheck("Supports temperature", "temperature", true),
+    ];
+    const checkRow = el("div", "m-row m-checks");
+    for (const c of checks) checkRow.appendChild(c.wrap);
+
+    const numIn = (placeholder, val) => {
+      const n = el("input");
+      n.type = "number";
+      n.min = "0";
+      n.placeholder = placeholder;
+      if (val) n.value = val;
+      return n;
+    };
+    const ctxIn = numIn("e.g. 131072", editing ? (existing.entry.limit || {}).context : null);
+    const outIn = numIn("e.g. 8192", editing ? (existing.entry.limit || {}).output : null);
+
+    const err = el("div", "set-form-err");
+    const save = el("button", "btn primary", editing ? "Save changes" : "Add model");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const commit = async () => {
+      const mid = editing ? existing.id : idIn.value.trim();
+      if (!mid) { err.textContent = "Model ID is required."; idIn.focus(); return; }
+      if (!file) { err.textContent = "No config file available."; return; }
+      // start from the stored entry so cost/modalities/… survive
+      const entry = editing ? JSON.parse(JSON.stringify(existing.entry || {})) : {};
+      entry.id = mid;
+      const name = nameIn.value.trim();
+      if (name) entry.name = name; else delete entry.name;
+      for (const c of checks) entry[c.key] = c.input.checked;
+      const limit = { ...(entry.limit || {}) };
+      const ctx = parseInt(ctxIn.value, 10);
+      const out = parseInt(outIn.value, 10);
+      if (ctx > 0) limit.context = ctx; else delete limit.context;
+      if (out > 0) limit.output = out; else delete limit.output;
+      if (Object.keys(limit).length) entry.limit = limit; else delete entry.limit;
+      save.disabled = true;
+      try {
+        await api("PUT", `/config/provider/${encodeURIComponent(providerID)}/model/${encodeURIComponent(mid)}`, { file, entry });
+        ov.remove();
+        toast("Model " + mid + " saved");
+        refreshProviders();
+        if (onSaved) onSaved();
+      } catch (e) {
+        save.disabled = false;
+        err.textContent = e.message || String(e);
+      }
+    };
+    save.onclick = commit;
+    for (const inp of [idIn, nameIn, ctxIn, outIn]) {
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
+    }
+    modal.append(
+      setField("Model ID", idIn, 'The key under "models" in the provider entry.'),
+      setField("Name", nameIn),
+      checkRow,
+      el("div", "m-row", '<div class="m-label">Limits (tokens)</div>'),
+      setField("Context limit", ctxIn),
+      setField("Output limit", outIn),
+      err
+    );
+    const actions = el("div", "m-actions");
+    actions.append(cancel, save);
+    modal.appendChild(actions);
+    setTimeout(() => (editing ? nameIn : idIn).focus(), 0);
+  });
 }
 
 function renderSettingsAgents(content, show) {

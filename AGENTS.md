@@ -33,3 +33,5 @@ Tests are fully local (httptest fake providers streaming SSE) — no network or 
 - `internal/server/templates/*.txt` are the built-in command prompts (e.g. `/init`, `/review`).
 
 You are runniong as the process "intellexor", if you kill it you will kill the session completely.
+When the user asks you to "deploy it", commit eveything, increment the tag, point the "latest" tag to the latest commit and push.
+Github PAT is available in GITHUB_PAT env-var. 

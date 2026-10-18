@@ -151,6 +151,13 @@ func TestCompactManual(t *testing.T) {
 	if _, err := i.Prompt(s, PromptInput{Model: &ModelSel{ProviderID: "mock", ModelID: "test-model"}, Parts: []json.RawMessage{raw}}); err != nil {
 		t.Fatal(err)
 	}
+	before, err := i.Mgr.Find(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Context <= 0 {
+		t.Fatalf("expected a context estimate after the prompt, got %v", before.Context)
+	}
 
 	wp, err := i.Compact(s, "mock", "test-model")
 	if err != nil {
@@ -181,6 +188,14 @@ func TestCompactManual(t *testing.T) {
 	}
 	if fresh.Time.Compacting != nil {
 		t.Fatal("time.compacting must be cleared after compaction")
+	}
+	// the context estimate must reset to the summary's own footprint so the
+	// UI circle drops immediately instead of keeping the pre-compaction size
+	if fresh.Context != a.Tokens.Output+a.Tokens.Reasoning {
+		t.Fatalf("expected context reset to the summary footprint %v, got %v", a.Tokens.Output+a.Tokens.Reasoning, fresh.Context)
+	}
+	if fresh.Context >= before.Context {
+		t.Fatalf("expected compaction to shrink the context estimate: %v not < %v", fresh.Context, before.Context)
 	}
 	// history now replays from the summary alone
 	filtered := filterCompacted(msgs)

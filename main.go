@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/Intellexie/intellexor/internal/acp"
+	"github.com/Intellexie/intellexor/internal/config"
 	"github.com/Intellexie/intellexor/internal/server"
 	"github.com/Intellexie/intellexor/internal/session"
 )
@@ -33,6 +34,9 @@ func serveMain() {
 	if *dir != "" {
 		wd = *dir
 	}
+	// Eager load so broken config files are reported at startup, not on the
+	// first request (instances are created lazily).
+	_ = config.Merge(wd)
 
 	srv := server.New(wd, session.Version)
 	httpSrv := &http.Server{Handler: srv.Handler()}
@@ -67,6 +71,8 @@ func acpMain(args []string) {
 	if *dir != "" {
 		wd = *dir
 	}
+	// Eager load so broken config files are reported at startup.
+	_ = config.Merge(wd)
 
 	p := *port
 	if p == 0 {

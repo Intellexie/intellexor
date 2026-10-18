@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -316,6 +317,28 @@ var mu sync.Mutex
 var globalCache *Info
 var globalKey string
 
+// warned tracks config files whose load failure was already reported, so a
+// broken file is printed once instead of on every re-read (Project() runs on
+// each merge).
+var warnedMu sync.Mutex
+var warned = map[string]string{}
+
+// warnLoadFailure prints a warning for a config file that exists but failed
+// to load. Missing candidate paths are expected and stay silent.
+func warnLoadFailure(path string, err error) {
+	if _, statErr := os.Stat(path); statErr != nil {
+		return
+	}
+	msg := err.Error()
+	warnedMu.Lock()
+	defer warnedMu.Unlock()
+	if warned[path] == msg {
+		return
+	}
+	warned[path] = msg
+	fmt.Fprintf(os.Stderr, "config: ignoring %s: %v\n", path, err)
+}
+
 // Global config: ~/.config/intellexor/opencode.json | intellexor.json, plus legacy opencode dirs
 func configDirOf() string {
 	base := os.Getenv("XDG_CONFIG_HOME")
@@ -365,6 +388,8 @@ func Global() *Info {
 	for _, c := range candidates {
 		if info, err := LoadFile(c); err == nil {
 			merge(merged, info)
+		} else {
+			warnLoadFailure(c, err)
 		}
 	}
 	globalCache = merged
@@ -418,6 +443,8 @@ func Project(dir string) *Info {
 	for _, p := range ProjectFiles(dir) {
 		if info, err := LoadFile(p); err == nil {
 			merge(out, info)
+		} else {
+			warnLoadFailure(p, err)
 		}
 	}
 	return out
