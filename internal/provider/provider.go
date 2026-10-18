@@ -333,6 +333,26 @@ func Resolve(dir, providerID, modelID string) (*Resolved, Model, error) {
 	return r, m, nil
 }
 
+// PreferredModel is a provider's default model, matching the web UI's
+// picker fallback: a well-known flagship if the provider has one, else its
+// alphabetically-first model. Returns "" for a provider without models.
+func PreferredModel(r *Resolved) string {
+	for _, pref := range []string{"claude-sonnet-4-5", "gpt-5", "gemini-2.5-flash"} {
+		if _, ok := r.Models[pref]; ok {
+			return pref
+		}
+	}
+	ids := make([]string, 0, len(r.Models))
+	for mid := range r.Models {
+		ids = append(ids, mid)
+	}
+	sort.Strings(ids)
+	if len(ids) > 0 {
+		return ids[0]
+	}
+	return ""
+}
+
 func DecodeKey(a auth.Info) string { return a.Key }
 
 // b64 helpers for images

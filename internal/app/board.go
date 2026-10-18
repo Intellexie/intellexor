@@ -162,11 +162,22 @@ func startCard(i *Instance, projectID, cardID string) (string, error) {
 	if card.Column != "open" || card.SessionID != "" {
 		return "", errCardNotOpen
 	}
+	// pin the model exactly like the Start button does (model on the created
+	// session AND on the prompt): the UI-equivalent default — first connected
+	// provider with its preferred model — so a scheduled or tool-driven start
+	// lands on the same model a manual click would pick, never on whatever
+	// the prompt-time fallbacks (config model, pickDefault) would scrape
+	// together. With nothing connected, stay unpinned and let the prompt
+	// resolve (and error) as usual.
+	sel := defaultModelSel(i.Directory)
 	sess := &session.Session{
 		ProjectID: projectID,
 		Directory: i.Directory,
 		Title:     card.Title,
 		Agent:     "build",
+	}
+	if sel != nil {
+		sess.Model = &session.ModelRef{ID: sel.ModelID, ProviderID: sel.ProviderID}
 	}
 	if err := i.Mgr.Create(sess); err != nil {
 		return "", err
@@ -196,7 +207,7 @@ func startCard(i *Instance, projectID, cardID string) (string, error) {
 		parts = append(parts, b)
 	}
 	go func() {
-		_, _ = i.Prompt(sess, PromptInput{Agent: "build", Parts: parts})
+		_, _ = i.Prompt(sess, PromptInput{Agent: "build", Model: sel, Parts: parts})
 	}()
 	return sess.ID, nil
 }

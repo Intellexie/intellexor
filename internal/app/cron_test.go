@@ -2,7 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -213,5 +215,79 @@ func TestSweepCrons(t *testing.T) {
 	}
 	if byID[paused.ID].Runs != 0 {
 		t.Fatalf("paused job should not run: %+v", byID[paused.ID])
+	}
+}
+
+// A cron run must pin the same model a manual prompt would: the
+// UI-equivalent default on the session and the prompt — not the prompt-time
+// config fallback, which may name a provider the user cannot use. Here the
+// config model points at a provider that does not exist; the run must still
+// succeed on the connected default.
+func TestRunCronJobPinsDefaultModel(t *testing.T) {
+	os.Setenv("INTELLEXOR_DATA", t.TempDir())
+	store.ResetDataDirForTest()
+
+	srv := httptest.NewServer(textSSE("Working on it."))
+	t.Cleanup(srv.Close)
+
+	work := t.TempDir()
+	cfg := fmt.Sprintf(`{
+		"model": "minimax/bad",
+		"small_model": "test/m",
+		"provider": {"test": {"name": "test",
+			"options": {"baseURL": %q, "apiKey": "k"},
+			"models": {"m": {"name": "m", "tool_call": true,
+				"limit": {"context": 100000, "output": 4096}}}}}
+	}`, srv.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(work, "intellexor.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	i := New(work)
+	pid := store.ProjectID(i.Directory)
+
+	job, err := cron.Add(pid, "Cron model test", "hello from cron", "@every 1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// force the claim: pretend an hour passed so the job is due
+	claimed, ok, err := cron.ClaimDue(pid, job.ID, util.Now()+2*time.Hour.Milliseconds())
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+
+	runCronJob(i, pid, claimed) // synchronous: no polling needed
+
+	jobs, err := cron.Get(pid)
+	if err != nil || len(jobs) != 1 || len(jobs[0].Sessions) != 1 {
+		t.Fatalf("job not linked to its run: %v %+v", err, jobs)
+	}
+	sess, err := i.Mgr.Find(jobs[0].Sessions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the session carries the UI-equivalent default, not the config model
+	if sess.Model == nil || sess.Model.ProviderID != "test" || sess.Model.ID != "m" {
+		t.Fatalf("session model = %+v, want test/m", sess.Model)
+	}
+
+	// the turn ran on that model: the recorded user message proves the
+	// prompt resolved to the connected provider instead of erroring on the
+	// config's minimax
+	msgs, err := i.Mgr.LoadMessages(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range msgs {
+		if u, ok := m.Info.(session.UserMessage); ok {
+			found = true
+			if u.Model.ProviderID != "test" || u.Model.ModelID != "m" {
+				t.Fatalf("user message model = %+v, want test/m", u.Model)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no user message recorded")
 	}
 }

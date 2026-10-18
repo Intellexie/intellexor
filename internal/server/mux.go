@@ -81,6 +81,8 @@ func (s *Server) Handler() http.Handler {
 	handle("POST /session/{sessionID}/summarize", s.sessionSummarize)
 	handle("POST /session/{sessionID}/init", s.sessionInit)
 	handle("POST /session/{sessionID}/fork", s.sessionFork)
+	handle("GET /session/{sessionID}/export", s.exportSession)
+	handle("POST /session/import", s.importSession)
 	handle("POST /session/{sessionID}/revert", s.revertSession)
 	handle("POST /session/{sessionID}/unrevert", s.unrevertSession)
 	handle("POST /session/{sessionID}/share", s.shareSession)
@@ -99,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	handle("POST /board/card", s.createBoardCard)
 	handle("PATCH /board/card/{cardID}", s.patchBoardCard)
 	handle("DELETE /board/card/{cardID}", s.deleteBoardCard)
+	handle("GET /board/export", s.exportBoard)
+	handle("POST /board/import", s.importBoard)
 
 	// cron jobs (scheduled prompts that start fresh sessions)
 	handle("GET /cron", s.listCron)
@@ -115,6 +119,12 @@ func (s *Server) Handler() http.Handler {
 	handle("GET /config", s.getConfig)
 	handle("PATCH /config", s.patchConfig)
 	handle("GET /config/providers", s.getConfigProviders)
+	handle("GET /config/files", s.configFiles)
+	handle("GET /config/entries", s.configEntries)
+	handle("PUT /config/provider/{providerID}", s.putConfigProvider)
+	handle("DELETE /config/provider/{providerID}", s.deleteConfigProvider)
+	handle("PUT /config/agent/{agentID}", s.putConfigAgent)
+	handle("DELETE /config/agent/{agentID}", s.deleteConfigAgent)
 	handle("POST /provider/{providerID}/oauth/authorize", func(w http.ResponseWriter, r *http.Request) *apiError {
 		writeJSON(w, 200, nil)
 		return nil

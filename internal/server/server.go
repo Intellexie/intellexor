@@ -257,7 +257,7 @@ func providersHandler(s *Server) http.HandlerFunc {
 				Models:  res.Models,
 			})
 			connectedIDs = append(connectedIDs, id)
-			if pref := preferredModel(res); pref != "" {
+			if pref := provider.PreferredModel(res); pref != "" {
 				defaults[id] = pref
 				continue
 			}
@@ -272,24 +272,6 @@ func providersHandler(s *Server) http.HandlerFunc {
 		}
 		writeJSON(w, 200, map[string]any{"all": all, "default": defaults, "connected": connectedIDs})
 	}
-}
-
-func preferredModel(r *provider.Resolved) string {
-	for _, pref := range []string{"claude-sonnet-4-5", "gpt-5", "gemini-2.5-flash"} {
-		if _, ok := r.Models[pref]; ok {
-			return pref
-		}
-	}
-	// config-declared models first: short deterministic name if exactly one model
-	if len(r.Models) > 0 {
-		ids := make([]string, 0, len(r.Models))
-		for mid := range r.Models {
-			ids = append(ids, mid)
-		}
-		sort.Strings(ids)
-		return ids[0]
-	}
-	return ""
 }
 
 type providerInfo struct {

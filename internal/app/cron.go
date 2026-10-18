@@ -88,12 +88,20 @@ func sweepCrons(i *Instance, projectID string, now int64) {
 // The prompt runs synchronously in this goroutine: the sweep already
 // launched us per job, and recording the session before prompting keeps the
 // job's state consistent even if the provider errors out.
+//
+// Like startCard, the model is pinned on the session and the prompt — the
+// UI-equivalent default — so a run lands on the same model a manual prompt
+// would use instead of the config/pickDefault fallbacks.
 func runCronJob(i *Instance, projectID string, j cron.Job) {
+	sel := defaultModelSel(i.Directory)
 	sess := &session.Session{
 		ProjectID: projectID,
 		Directory: i.Directory,
 		Title:     j.Title,
 		Agent:     "build",
+	}
+	if sel != nil {
+		sess.Model = &session.ModelRef{ID: sel.ModelID, ProviderID: sel.ProviderID}
 	}
 	if err := i.Mgr.Create(sess); err != nil {
 		return
@@ -106,5 +114,5 @@ func runCronJob(i *Instance, projectID string, j cron.Job) {
 	// connected web clients refresh the cron list (new session, hourglass)
 	i.Hub.Publish("cron.updated", map[string]any{"directory": i.Directory})
 	raw, _ := json.Marshal(map[string]any{"type": "text", "text": j.Prompt})
-	_, _ = i.Prompt(sess, PromptInput{Agent: "build", Parts: []json.RawMessage{raw}})
+	_, _ = i.Prompt(sess, PromptInput{Agent: "build", Model: sel, Parts: []json.RawMessage{raw}})
 }

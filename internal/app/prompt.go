@@ -288,6 +288,26 @@ type partInput struct {
 	Agent       string `json:"agent,omitempty"`
 }
 
+// defaultModelSel resolves the default model the same way the web UI's
+// Start button does when the user has not pinned one in the picker
+// (refreshProviders): the first connected provider — keyed ones first,
+// local runtimes last — with its preferred model. Server-side starts
+// (scheduler, board tool, done-link) pin this on the session and the
+// prompt so they land on the same model a manual click would use, instead
+// of falling into the config/pickDefault fallbacks. Returns nil when
+// nothing usable is connected, leaving the choice to the prompt-time
+// fallbacks.
+func defaultModelSel(dir string) *ModelSel {
+	all, _ := provider.List(dir)
+	for _, id := range provider.SortedKeys(all) {
+		r := all[id]
+		if mid := provider.PreferredModel(r); mid != "" {
+			return &ModelSel{ProviderID: r.ID, ModelID: mid}
+		}
+	}
+	return nil
+}
+
 // deterministic default provider pick: keyed providers first, local runtimes last
 func pickDefault(all map[string]*provider.Resolved) string {
 	pref := []string{"anthropic", "openai", "google", "openrouter", "deepseek", "xai", "groq", "mistral"}

@@ -426,6 +426,43 @@ func (s *Server) sessionFork(w http.ResponseWriter, r *http.Request) *apiError {
 	return nil
 }
 
+// exportSession streams the full session (info + every message with all
+// parts + todo/diff state) as a downloadable JSON document.
+func (s *Server) exportSession(w http.ResponseWriter, r *http.Request) *apiError {
+	in, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
+	if err != nil {
+		return err
+	}
+	payload, xerr := in.ExportSession(sess)
+	if xerr != nil {
+		return badRequest(xerr.Error())
+	}
+	name := sess.Slug
+	if name == "" {
+		name = sess.ID
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="intellexor-session-%s.json"`, name))
+	writeJSON(w, 200, payload)
+	return nil
+}
+
+// importSession creates a brand-new session from an exported JSON document
+// (no session id involved): the payload's messages, tool calls and parts are
+// written under a fresh session in the request's directory.
+func (s *Server) importSession(w http.ResponseWriter, r *http.Request) *apiError {
+	in := s.Instance(directoryOf(r))
+	var payload app.ExportPayload
+	if e := decodeBody(r, &payload); e != nil {
+		return e
+	}
+	dup, ierr := in.ImportSession(&payload)
+	if ierr != nil {
+		return badRequest(ierr.Error())
+	}
+	writeJSON(w, 200, dup)
+	return nil
+}
+
 func (s *Server) deleteSessionMessage(w http.ResponseWriter, r *http.Request) *apiError {
 	in, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
 	if err != nil {

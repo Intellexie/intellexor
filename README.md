@@ -163,6 +163,16 @@ values as bare JSON. Highlights:
   message: later messages are hidden (purged on the next prompt) and file
   changes made by them are restored from per-message backups taken before
   each edit/write/apply_patch
+- `GET /session/:id/export` — download the full session (info, every message
+  with all parts/tool calls, todo and diff state) as a JSON file;
+  `POST /session/import` — body is such a file, creates a brand-new session
+  (new id, request's directory) with the complete history loaded; the web UI
+  offers Import in the session header only while the session has no messages
+- `GET /board/export` — download the whole board (every card with column,
+  order, done-links, schedule and attachments) as a JSON file;
+  `POST /board/import?mode=replace|merge` — body is such a file: replace
+  makes the board exactly the imported one, merge appends its cards with
+  fresh ids (done-links remapped); the board header offers both as a choice
 - `POST /session/:id/summarize` — compact the context now (also the `/compact`
   command): the conversation is summarized into a `summary: true` assistant
   message and later requests replay history from it; runs automatically

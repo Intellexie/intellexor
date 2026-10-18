@@ -326,9 +326,9 @@ func configDirOf() string {
 	return filepath.Join(base, "intellexor")
 }
 
-func Global() *Info {
-	mu.Lock()
-	defer mu.Unlock()
+// globalCandidatePaths returns the global config file paths in merge order
+// (later candidates override earlier ones).
+func globalCandidatePaths() []string {
 	home, _ := os.UserHomeDir()
 	candidates := []string{}
 	if home != "" {
@@ -346,6 +346,17 @@ func Global() *Info {
 			"/app/opencode.json",
 		)
 	}
+	return candidates
+}
+
+// GlobalCandidates exposes the global config paths in merge order for tooling
+// that needs to show or target the individual files.
+func GlobalCandidates() []string { return globalCandidatePaths() }
+
+func Global() *Info {
+	mu.Lock()
+	defer mu.Unlock()
+	candidates := globalCandidatePaths()
 	key := strings.Join(candidates, "|")
 	if globalCache != nil && globalKey == key {
 		return globalCache
@@ -367,25 +378,47 @@ func InvalidateGlobal() {
 	mu.Unlock()
 }
 
-// Project config: <dir>/opencode.json(.c) / intellexor.json(.c), merged upward to root
-func Project(dir string) *Info {
-	out := &Info{Provider: map[string]ProviderCfg{}, Agent: map[string]AgentCfg{}, Commands: map[string]CommandCfg{}}
-	var chain []*Info
+// ProjectFiles returns the project config files that apply to dir, ordered
+// the way Project merges them: root-most first, closest to dir last (closer
+// files override parents), and within one directory intellexor.json after
+// opencode.json. Only existing regular files are returned.
+func ProjectFiles(dir string) []string {
+	var levels [][]string // per directory level, merge-ordered
 	cur := dir
 	for {
+		var level []string
 		for _, name := range []string{"intellexor.json", "intellexor.jsonc", "opencode.json", "opencode.jsonc"} {
-			if info, err := LoadFile(filepath.Join(cur, name)); err == nil {
-				chain = append([]*Info{info}, chain...)
+			p := filepath.Join(cur, name)
+			if st, err := os.Stat(p); err == nil && !st.IsDir() {
+				level = append(level, p)
 			}
 		}
+		// within a level the last name in the search list wins, so reverse
+		for i, j := 0, len(level)-1; i < j; i, j = i+1, j-1 {
+			level[i], level[j] = level[j], level[i]
+		}
+		// prepend so the root-most level ends up first in the chain
+		levels = append([][]string{level}, levels...)
 		parent := filepath.Dir(cur)
 		if parent == cur {
 			break
 		}
 		cur = parent
 	}
-	for _, c := range chain {
-		merge(out, c)
+	var out []string
+	for _, l := range levels {
+		out = append(out, l...)
+	}
+	return out
+}
+
+// Project config: <dir>/opencode.json(.c) / intellexor.json(.c), merged upward to root
+func Project(dir string) *Info {
+	out := &Info{Provider: map[string]ProviderCfg{}, Agent: map[string]AgentCfg{}, Commands: map[string]CommandCfg{}}
+	for _, p := range ProjectFiles(dir) {
+		if info, err := LoadFile(p); err == nil {
+			merge(out, info)
+		}
 	}
 	return out
 }

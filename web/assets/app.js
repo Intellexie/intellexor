@@ -450,6 +450,9 @@ function handleEvent(ev) {
       if (store.info[info.id] === undefined) store.order.push(info.id);
       store.info[info.id] = Object.assign(store.info[info.id] || {}, info);
       trimWindow(store);
+      // the header's Import link is only offered while the session is empty —
+      // the first message must retire it without waiting for session.updated
+      if (p.sessionID === S.current && store.order.length === 1) renderHeader();
       if (info.role === "assistant" && info.error && p.sessionID === S.current) {
         renderTimeline();
       }
@@ -512,7 +515,11 @@ function handleEvent(ev) {
       store.order = store.order.filter((id) => id !== p.messageID);
       delete store.info[p.messageID];
       delete store.parts[p.messageID];
-      if (p.sessionID === S.current) renderTimeline();
+      if (p.sessionID === S.current) {
+        renderTimeline();
+        // an emptied session offers Import again
+        if (!store.order.length) renderHeader();
+      }
       break;
     }
     case "permission.asked":
@@ -901,12 +908,21 @@ function applySidebar() {
 // `transient` changes the sidebar without touching the persisted preference —
 // used when the board panel borrows the sidebar's slot (the user's choice is
 // restored when the panel closes). An explicit (non-transient) change cancels
-// that pending restore.
+// that pending restore — and mirrors the swap in the other direction: an
+// explicit open borrows the board panel's slot (collapsing it until the
+// sidebar closes again), an explicit close hands the slot back.
 function setSidebar(open, transient = false) {
   S.sidebarOpen = open;
   if (!transient) {
     boardPanelHoldsSidebar = false;
     try { localStorage.setItem("intellexor.sidebar", open ? "1" : "0"); } catch {}
+    if (open && S.boardPanelOpen) {
+      sidebarHoldsBoardPanel = true;
+      setBoardPanel(false, true);
+    } else if (!open && sidebarHoldsBoardPanel) {
+      sidebarHoldsBoardPanel = false;
+      setBoardPanel(true, true);
+    }
   }
   applySidebar();
 }
@@ -939,6 +955,12 @@ const BOARD_PANEL_COLUMNS = [
 // the sidebar is collapsed for that time and restored when the panel closes.
 let boardPanelHoldsSidebar = false;
 
+// The mirror image: true while the sidebar is holding the slot the board panel
+// was occupying — the panel is collapsed for that time and restored when the
+// sidebar closes. At most one of the two holds is ever active: each panel
+// opening collapses the other, so they never stand side by side.
+let sidebarHoldsBoardPanel = false;
+
 function applyBoardPanel() {
   const app = $("#app");
   if (!app) return;
@@ -958,9 +980,13 @@ function applyBoardPanel() {
   if (!S.boardPanelOpen) hideBoardPanelTip();
 }
 
-function setBoardPanel(open) {
+function setBoardPanel(open, transient = false) {
   S.boardPanelOpen = open;
-  try { localStorage.setItem("intellexor.boardPanel", open ? "1" : "0"); } catch {}
+  if (!transient) {
+    // an explicit panel change cancels a pending restore, mirroring setSidebar
+    sidebarHoldsBoardPanel = false;
+    try { localStorage.setItem("intellexor.boardPanel", open ? "1" : "0"); } catch {}
+  }
   // The panel takes over the sidebar's slot on the left: collapse the sidebar
   // for as long as the panel is open, and hand the slot back on close. Both
   // directions are transient so the user's persisted sidebar preference is
@@ -1337,8 +1363,86 @@ function buildHeader(sess) {
     header.appendChild(t);
   }
   header.appendChild(el("div", "spacer"));
+  // Export/Import sit after the spacer so they hug the right edge, exactly
+  // like the board header's links (title · spacer · actions).
+  if (sess) header.appendChild(buildHeaderActions(sess));
   header.appendChild(buildContextCircle(sess));
   return header;
+}
+
+// Export / Import links. Export downloads the full session as JSON; Import
+// is offered only while the session has no messages (a fresh session) and
+// loads an exported file into a brand-new session.
+function buildHeaderActions(sess) {
+  const wrap = el("div", "header-actions");
+  const exp = el("a", "header-link", "Export");
+  exp.href = "#";
+  exp.title = "Download the full session as a JSON file";
+  exp.onclick = (e) => { e.preventDefault(); exportSession(sess); };
+  wrap.appendChild(exp);
+  if (sessionImportable(sess.id)) {
+    const imp = el("a", "header-link", "Import");
+    imp.href = "#";
+    imp.title = "Import a session JSON file into a new session";
+    imp.onclick = (e) => { e.preventDefault(); importSessionFile(); };
+    wrap.appendChild(imp);
+  }
+  return wrap;
+}
+
+// Import is only available on an empty session: the message store must be
+// loaded (loadSession ran) and hold nothing. buildHeader runs again after
+// loadSession and on the first incoming message, so the link appears and
+// retires at the right moments.
+function sessionImportable(sid) {
+  if (!sid || isPendingTab(sid)) return false;
+  if (!S.msgs.has(sid)) return false;
+  return !S.msgs.get(sid).order.length;
+}
+
+// Download the full session (every message, tool call and part — not just
+// the rendered window) as a JSON file.
+async function exportSession(sess) {
+  try {
+    const data = await get(`/session/${sess.id}/export`);
+    const name = `intellexor-session-${sess.slug || sess.id}.json`;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Session exported");
+  } catch (e) {
+    toast("Export failed: " + (e && e.message ? e.message : e), true);
+  }
+}
+
+// Browse for an exported session JSON and load it as a completely new
+// session (fresh id, full history in the backend). Navigating to it renders
+// the usual last-100-units window, exactly like a page refresh would.
+function importSessionFile() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const dup = await post("/session/import", data);
+      if (!dup || !dup.id) throw new Error("server returned no session");
+      trackSession(dup);
+      toast("Session imported");
+      navigate("/" + dup.id);
+    } catch (e) {
+      toast("Import failed: " + (e && e.message ? e.message : e), true);
+    }
+  };
+  input.click();
 }
 
 // rebuild the header of the current session in place
@@ -1859,6 +1963,11 @@ function renderTool(p, info) {
   titleRow.appendChild(el("span", "tname", esc(title)));
   if (sub) titleRow.appendChild(el("span", "tsub", esc(sub)));
   if (!taskLink) titleRow.appendChild(thinkingDots(running));
+  // while this row is the live one, the agent · model label lives here
+  // (right-aligned) instead of in a meta line under the message — same as
+  // the thinking bar; it moves to the meta line once the message completes
+  const live = !(info.time && info.time.completed) && (st.status === "running" || st.status === "pending");
+  const runMeta = live ? thinkMeta([info.agent, info.modelID].filter(Boolean).join(" · ")) : null;
   if (taskLink) {
     titleRow.classList.add("task-link");
     // while the subagent session is still ongoing, a spinner after the 🔨
@@ -1877,6 +1986,7 @@ function renderTool(p, info) {
     }
     titleRow.appendChild(el("span", "tsub ro-open", "open ↗"));
     titleRow.appendChild(el("span", "spacer"));
+    if (runMeta) titleRow.appendChild(runMeta);
     titleRow.onclick = () => navigate("/" + taskLink);
     wrap.appendChild(titleRow);
     wrap.appendChild(body);
@@ -1888,6 +1998,7 @@ function renderTool(p, info) {
   titleRow.appendChild(chev);
   titleRow.appendChild(el("span", "spacer"));
   if (changes) titleRow.appendChild(changes);
+  if (runMeta) titleRow.appendChild(runMeta);
   if (running && st.metadata && st.metadata.exit !== undefined && st.metadata.exit !== null) {
     // bash exit indicator
   }
@@ -2019,6 +2130,7 @@ async function renderBoardView(main) {
   header.appendChild(el("div", "title", "Board"));
   header.appendChild(el("div", "spacer"));
   header.appendChild(el("span", "board-hint", "Drag cards to move · drag ⌖ onto an Open card to link · double-click an Open card title to edit"));
+  header.appendChild(buildBoardActions());
   const addBtn = el("button", "btn secondary board-add", ICONS.plus + "<span>Add card</span>");
   addBtn.title = "Create a new card in Open";
   addBtn.onclick = () => openAddCardModal();
@@ -2029,6 +2141,102 @@ async function renderBoardView(main) {
   main.appendChild(board);
   await loadBoard();
   renderBoard();
+}
+
+// Export / Import links for the board header, styled like the session
+// header's. Export downloads the whole board as JSON; Import offers a
+// file and asks whether to replace the board with it or merge it in.
+function buildBoardActions() {
+  const wrap = el("div", "header-actions");
+  const exp = el("a", "header-link", "Export");
+  exp.href = "#";
+  exp.title = "Download the whole board as a JSON file";
+  exp.onclick = (e) => { e.preventDefault(); exportBoard(); };
+  wrap.appendChild(exp);
+  const imp = el("a", "header-link", "Import");
+  imp.href = "#";
+  imp.title = "Import a board JSON file — replace the board or merge into it";
+  imp.onclick = (e) => { e.preventDefault(); importBoardFile(); };
+  wrap.appendChild(imp);
+  return wrap;
+}
+
+// Download the whole board (every card, all columns) as a JSON file — the
+// board counterpart of the session header's Export link.
+async function exportBoard() {
+  try {
+    const data = await get("/board/export");
+    const base = DIR.split("/").filter(Boolean).pop() || "";
+    const name = `intellexor-board${base ? "-" + base : ""}.json`;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Board exported");
+  } catch (e) {
+    toast("Export failed: " + (e && e.message ? e.message : e), true);
+  }
+}
+
+// Browse for an exported board JSON, then ask how it should land: replace
+// the current board with it, or merge its cards into the board (fresh ids,
+// done-links remapped). The choice is a modal because replace discards the
+// current cards — a decision the file picker alone cannot make.
+function importBoardFile() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch (e) {
+      toast("Import failed: " + (e && e.message ? e.message : e), true);
+      return;
+    }
+    if (!data || typeof data !== "object" || (data.format && data.format !== "intellexor.board")) {
+      toast("Import failed: not an intellexor board export", true);
+      return;
+    }
+    const n = Array.isArray(data.cards) ? data.cards.length : 0;
+    openModal("Import board", (modal, ov) => {
+      modal.appendChild(el("p", "m-sub",
+        `“${esc(file.name)}” holds ${n} card${n === 1 ? "" : "s"}; the current board has ${boardCards.length}. How should it be imported?`));
+      const actions = el("div", "m-actions");
+      const cancel = el("button", "btn ghost", "Cancel");
+      cancel.onclick = () => ov.remove();
+      const merge = el("button", "btn secondary", "Merge into board");
+      merge.title = "Keep the current board and append the imported cards";
+      merge.onclick = () => { ov.remove(); importBoardData(data, "merge"); };
+      const replace = el("button", "btn danger", "Replace board");
+      replace.title = "Discard the current board and install the imported one";
+      replace.onclick = () => { ov.remove(); importBoardData(data, "replace"); };
+      actions.append(cancel, merge, replace);
+      modal.appendChild(actions);
+    });
+  };
+  input.click();
+}
+
+// Send the parsed board file to the server with the chosen mode, then
+// refresh (the board.updated broadcast refreshes every other client too).
+async function importBoardData(data, mode) {
+  try {
+    const res = await post(`/board/import?mode=${mode}`, data);
+    await loadBoard();
+    renderBoard();
+    const n = res && res.imported ? res.imported : 0;
+    toast(`Board imported — ${n} card${n === 1 ? "" : "s"} ${mode === "merge" ? "merged" : "installed"}`);
+  } catch (e) {
+    toast("Import failed: " + (e && e.message ? e.message : e), true);
+  }
 }
 
 /* ---------- add-card modal ---------- */
@@ -3937,18 +4145,65 @@ function openRenamePopover(x, y, sess) {
   input.select();
 }
 
-/* ---------- settings modal ---------- */
+/* ---------- settings dialog ---------- */
 
-function openSettings() {
+// Two-pane dialog: a side nav (General / Providers / Agents) plus a page
+// area. The Models page is reached from a provider row, not from the nav.
+// Provider/agent data comes from the config-file API (GET /config/files,
+// GET /config/entries) and is written back into a user-chosen config file.
+const SETTINGS_PAGES = [
+  { id: "general", label: "General" },
+  { id: "providers", label: "Providers" },
+  { id: "agents", label: "Agents" },
+];
+
+// Tool groups offered in the new-agent form; the keys map to opencode's
+// agent.tools config map (true = the agent has access to the tool).
+const SETTINGS_TOOL_GROUPS = [
+  { label: "Build tools", tools: ["bash", "read", "edit", "write", "glob", "grep"] },
+  { label: "Kanban tools", tools: ["board"] },
+  { label: "Web fetch", tools: ["webfetch"] },
+  { label: "Subagents", tools: ["task"] },
+  { label: "Todo", tools: ["todowrite"] },
+];
+
+function openSettings(page) {
   const ov = el("div", "overlay");
-  const modal = el("div", "modal");
+  const modal = el("div", "modal settings-modal");
   ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
 
-  modal.appendChild(el("h2", "", "Settings" + (S.version ? ` <span class="m-sub">v${esc(S.version)}</span>` : "")));
+  const side = el("div", "set-side");
+  side.appendChild(el("div", "set-title", "Settings"));
+  const content = el("div", "set-content");
+  modal.append(side, content);
 
-  // color scheme
-  const row1 = el("div", "m-row");
-  row1.appendChild(el("div", "", '<div class="m-label">Color scheme</div><div class="m-sub">System · Light · Dark</div>'));
+  const show = (id, arg) => {
+    for (const b of side.querySelectorAll(".set-nav-item")) {
+      b.classList.toggle("on", b.dataset.page === id);
+    }
+    content.innerHTML = "";
+    if (id === "providers") renderSettingsProviders(content, show);
+    else if (id === "agents") renderSettingsAgents(content, show);
+    else if (id === "models") renderSettingsModels(content, show, arg);
+    else renderSettingsGeneral(content);
+  };
+
+  for (const p of SETTINGS_PAGES) {
+    const b = el("button", "set-nav-item", p.label);
+    b.dataset.page = p.id;
+    b.onclick = () => show(p.id);
+    side.appendChild(b);
+  }
+
+  ov.appendChild(modal);
+  $("#modal-root").appendChild(ov);
+  show(typeof page === "string" ? page : "general");
+}
+
+function renderSettingsGeneral(content) {
+  content.appendChild(el("h3", "set-h", "Appearance"));
+  const row = el("div", "m-row");
+  row.appendChild(el("div", "", '<div class="m-label">Color scheme</div><div class="m-sub">System · Light · Dark</div>'));
   const seg = el("div", "seg");
   for (const opt of ["system", "light", "dark"]) {
     const b = el("button", S.scheme === opt ? "on" : "", cap(opt));
@@ -3956,61 +4211,351 @@ function openSettings() {
       S.scheme = opt;
       localStorage.setItem("intellexor.scheme", opt);
       applyScheme();
-      openSettings();
-      ov.remove();
+      for (const x of seg.querySelectorAll("button")) x.classList.toggle("on", x === b);
     };
     seg.appendChild(b);
   }
-  row1.appendChild(seg);
-  modal.appendChild(row1);
+  row.appendChild(seg);
+  content.appendChild(row);
 
-  modal.appendChild(el("h2", "", "Providers"));
-  const provBox = el("div");
-  const ids = [...new Set(["anthropic", "openai", "google", "openrouter", "deepseek", "xai", "groq", "mistral", "ollama"])];
-  for (const id of ids) {
-    const row = el("div", "m-row");
-    row.appendChild(el("div", "", `<div class="m-label">${esc(cap(id))}</div>`));
-    const inp = el("input");
-    inp.type = "text";
-    inp.placeholder = "API key";
-    const conn = S.providers.connected.includes(id);
-    const btn = el("button", "btn secondary", "Save");
-    btn.style.marginLeft = "8px";
-    btn.onclick = async () => {
-      const v = inp.value.trim();
-      if (!v) {
-        await del("/auth/" + id).catch(() => {});
-        toast("Removed key for " + id);
-      } else {
-        await api("PUT", "/auth/" + id, { type: "api", key: v });
-        toast("Saved key for " + id);
-      }
-      inp.value = "";
-      await refreshProviders();
-      ov.remove();
-    };
-    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
-    const wrap = el("div", "", "");
-    wrap.style.display = "flex";
-    wrap.append(inp, btn);
-    if (conn) {
-      const ok = el("span", "", "✓ ");
-      ok.style.color = "var(--ok-fg)";
-      row.appendChild(ok);
+  content.appendChild(el("h3", "set-h", "About"));
+  const about = el("div", "m-row");
+  about.appendChild(el("div", "m-label", "Version"));
+  about.appendChild(el("div", "m-sub", esc(S.version || "dev")));
+  content.appendChild(about);
+}
+
+async function fetchConfigFiles() {
+  const res = await get("/config/files");
+  return res.files || [];
+}
+
+async function fetchConfigEntries() {
+  return await get("/config/entries");
+}
+
+// Populates a <select> with the config files the server accepts writes to,
+// defaulting to the closest existing project file (else the global one).
+function fillConfigFileSelect(sel) {
+  return fetchConfigFiles().then((files) => {
+    sel.innerHTML = "";
+    for (const f of files) {
+      const o = el("option");
+      o.value = f.path;
+      o.textContent = (f.scope === "global" ? "Global — " : "Project — ") + f.path + (f.exists ? "" : "  (new file)");
+      sel.appendChild(o);
     }
-    row.appendChild(wrap);
-    provBox.appendChild(row);
-  }
-  modal.appendChild(provBox);
+    const def = files.find((f) => f.scope === "project" && f.exists) || files[0];
+    if (def) sel.value = def.path;
+  });
+}
 
-  const close = el("div", "m-row");
-  const cb = el("button", "btn primary", "Done");
-  cb.onclick = () => ov.remove();
-  close.appendChild(cb);
-  modal.appendChild(close);
+function setField(label, input, sub) {
+  const f = el("div", "m-field");
+  if (label) f.appendChild(el("label", "m-label", label));
+  f.appendChild(input);
+  if (sub) f.appendChild(el("div", "m-sub", sub));
+  return f;
+}
 
-  ov.appendChild(modal);
-  $("#modal-root").appendChild(ov);
+function renderSettingsProviders(content, show) {
+  const head = el("div", "set-page-head");
+  head.appendChild(el("h3", "set-h", "Providers"));
+  const addBtn = el("button", "btn primary", "Add provider");
+  head.appendChild(addBtn);
+  content.appendChild(head);
+
+  const list = el("div", "set-list", '<div class="set-empty">Loading…</div>');
+  content.appendChild(list);
+
+  const load = async () => {
+    let entries;
+    try {
+      entries = (await fetchConfigEntries()).providers || {};
+    } catch (e) {
+      list.innerHTML = "";
+      list.appendChild(el("div", "set-empty", "Failed to load config: " + esc(e.message || String(e))));
+      return;
+    }
+    list.innerHTML = "";
+    const ids = Object.keys(entries).sort();
+    if (!ids.length) {
+      list.appendChild(el("div", "set-empty", "No providers configured in config files yet."));
+      return;
+    }
+    for (const id of ids) {
+      const e = entries[id];
+      const cfg = e.config || {};
+      const item = el("div", "set-item");
+      const top = el("div", "si-head");
+      top.appendChild(el("div", "si-name", esc(cfg.name || id)));
+      const nModels = Object.keys(cfg.models || {}).length;
+      if (nModels) top.appendChild(el("span", "si-badge", nModels + " model" + (nModels === 1 ? "" : "s")));
+      if (cfg.api) top.appendChild(el("span", "si-badge", esc(cfg.api)));
+      top.appendChild(el("span", "si-spacer"));
+      const cfgBtn = el("button", "btn secondary si-btn", "Configure models");
+      cfgBtn.onclick = () => show("models", id);
+      const rm = el("button", "icon-btn", ICONS.trash);
+      rm.title = "Remove provider";
+      rm.onclick = async () => {
+        if (!(await confirmModal("Remove provider", `Remove "${id}" from ${e.file}?`, "Remove"))) return;
+        try {
+          await del(`/config/provider/${encodeURIComponent(id)}?file=${encodeURIComponent(e.file)}`);
+          toast("Provider removed");
+          refreshProviders();
+          load();
+        } catch (err) {
+          toast(err.message || String(err), true);
+        }
+      };
+      top.append(cfgBtn, rm);
+      item.appendChild(top);
+      const file = el("div", "si-file", esc(e.file));
+      file.title = e.file;
+      item.appendChild(file);
+      list.appendChild(item);
+    }
+  };
+  load();
+  addBtn.onclick = () => openProviderForm(load);
+}
+
+function openProviderForm(onSaved) {
+  openModal("Add provider", (modal, ov) => {
+    const idIn = el("input");
+    idIn.type = "text";
+    idIn.placeholder = "Provider ID, e.g. vllm or anthropic";
+    const nameIn = el("input");
+    nameIn.type = "text";
+    nameIn.placeholder = "Display name (optional)";
+    const keyIn = el("input");
+    keyIn.type = "text";
+    keyIn.placeholder = "API key (optional)";
+    const urlIn = el("input");
+    urlIn.type = "text";
+    urlIn.placeholder = "Base URL, e.g. http://localhost:8080/v1 (optional)";
+    const protoSel = el("select", "m-select");
+    for (const [v, label] of [["", "Auto (OpenAI-compatible)"], ["openai", "OpenAI-compatible"], ["anthropic", "Anthropic"], ["gemini", "Gemini"]]) {
+      const o = el("option");
+      o.value = v;
+      o.textContent = label;
+      protoSel.appendChild(o);
+    }
+    const fileSel = el("select", "m-select");
+    fillConfigFileSelect(fileSel).catch(() => {});
+
+    const err = el("div", "set-form-err");
+    const save = el("button", "btn primary", "Save provider");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const commit = async () => {
+      const id = idIn.value.trim();
+      if (!id) { err.textContent = "Provider ID is required."; idIn.focus(); return; }
+      if (!fileSel.value) { err.textContent = "No config file available."; return; }
+      const entry = {};
+      const name = nameIn.value.trim();
+      if (name) entry.name = name;
+      if (protoSel.value) entry.api = protoSel.value;
+      const options = {};
+      const key = keyIn.value.trim();
+      if (key) options.apiKey = key;
+      const url = urlIn.value.trim();
+      if (url) options.baseURL = url;
+      if (Object.keys(options).length) entry.options = options;
+      save.disabled = true;
+      try {
+        await api("PUT", "/config/provider/" + encodeURIComponent(id), { file: fileSel.value, entry });
+        ov.remove();
+        toast("Provider " + id + " saved");
+        refreshProviders();
+        if (onSaved) onSaved();
+      } catch (e) {
+        save.disabled = false;
+        err.textContent = e.message || String(e);
+      }
+    };
+    save.onclick = commit;
+    for (const inp of [idIn, nameIn, keyIn, urlIn]) {
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
+    }
+    modal.append(
+      setField("ID", idIn, 'The key under "provider" in the config file.'),
+      setField("Name", nameIn),
+      setField("API key", keyIn, "Stored in the config file (options.apiKey)."),
+      setField("Base URL", urlIn),
+      setField("Protocol", protoSel),
+      setField("Config file", fileSel, "Which config file to save this provider into."),
+      err
+    );
+    const actions = el("div", "m-actions");
+    actions.append(cancel, save);
+    modal.appendChild(actions);
+    setTimeout(() => idIn.focus(), 0);
+  });
+}
+
+// Models page: reached per provider via "Configure models"; intentionally
+// empty for now.
+function renderSettingsModels(content, show, providerID) {
+  const back = el("button", "btn ghost si-back", "← Providers");
+  back.onclick = () => show("providers");
+  content.appendChild(back);
+  content.appendChild(el("h3", "set-h", "Models" + (providerID ? " — " + esc(cap(providerID)) : "")));
+  content.appendChild(el("div", "set-empty", "Model configuration is not available yet."));
+}
+
+function renderSettingsAgents(content, show) {
+  const head = el("div", "set-page-head");
+  head.appendChild(el("h3", "set-h", "Agents"));
+  const addBtn = el("button", "btn primary", "Add agent");
+  head.appendChild(addBtn);
+  content.appendChild(head);
+
+  const list = el("div", "set-list", '<div class="set-empty">Loading…</div>');
+  content.appendChild(list);
+
+  const load = async () => {
+    let data;
+    try {
+      data = await fetchConfigEntries();
+    } catch (e) {
+      list.innerHTML = "";
+      list.appendChild(el("div", "set-empty", "Failed to load config: " + esc(e.message || String(e))));
+      return;
+    }
+    list.innerHTML = "";
+    const defModel = data.default_model || "";
+    for (const b of data.builtin || []) {
+      const item = el("div", "set-item");
+      const top = el("div", "si-head");
+      const dot = el("span", "agent-dot");
+      dot.style.background = b.color || "#999";
+      top.append(dot, el("div", "si-name", esc(b.name)), el("span", "si-badge", esc(b.mode || "agent")));
+      top.appendChild(el("span", "si-spacer"));
+      top.appendChild(el("span", "si-model", "model: " + esc(defModel || "auto")));
+      item.appendChild(top);
+      if (b.description) item.appendChild(el("div", "si-desc", esc(b.description)));
+      item.appendChild(el("div", "si-file", "built-in"));
+      list.appendChild(item);
+    }
+    const agents = data.agents || {};
+    for (const id of Object.keys(agents).sort()) {
+      const e = agents[id];
+      const cfg = e.config || {};
+      const item = el("div", "set-item");
+      const top = el("div", "si-head");
+      top.appendChild(el("div", "si-name", esc(id)));
+      if (cfg.mode) top.appendChild(el("span", "si-badge", esc(cfg.mode)));
+      top.appendChild(el("span", "si-spacer"));
+      top.appendChild(el("span", "si-model", "model: " + esc(cfg.model || defModel || "auto")));
+      const rm = el("button", "icon-btn", ICONS.trash);
+      rm.title = "Remove agent";
+      rm.onclick = async () => {
+        if (!(await confirmModal("Remove agent", `Remove "${id}" from ${e.file}?`, "Remove"))) return;
+        try {
+          await del(`/config/agent/${encodeURIComponent(id)}?file=${encodeURIComponent(e.file)}`);
+          toast("Agent removed");
+          load();
+        } catch (err) {
+          toast(err.message || String(err), true);
+        }
+      };
+      top.appendChild(rm);
+      item.appendChild(top);
+      if (cfg.description) item.appendChild(el("div", "si-desc", esc(cfg.description)));
+      const tools = cfg.tools && typeof cfg.tools === "object" ? Object.keys(cfg.tools).filter((t) => cfg.tools[t]) : null;
+      item.appendChild(el("div", "si-sub", "tools: " + (tools && tools.length ? esc(tools.join(", ")) : "all")));
+      const file = el("div", "si-file", esc(e.file));
+      file.title = e.file;
+      item.appendChild(file);
+      list.appendChild(item);
+    }
+  };
+  load();
+  addBtn.onclick = () => openAgentForm(load);
+}
+
+function openAgentForm(onSaved) {
+  openModal("Add agent", (modal, ov) => {
+    const nameIn = el("input");
+    nameIn.type = "text";
+    nameIn.placeholder = "Agent name, e.g. reviewer";
+    const descIn = el("input");
+    descIn.type = "text";
+    descIn.placeholder = "What the agent is for (optional)";
+    const modelIn = el("input");
+    modelIn.type = "text";
+    modelIn.placeholder = "provider/model (optional — uses the default model)";
+    const promptTa = el("textarea", "m-textarea");
+    promptTa.rows = 4;
+    promptTa.placeholder = "System prompt for the agent…";
+    const modeSel = el("select", "m-select");
+    for (const [v, label] of [["subagent", "Subagent (spawned via task)"], ["primary", "Primary (selectable in the composer)"], ["all", "All"]]) {
+      const o = el("option");
+      o.value = v;
+      o.textContent = label;
+      modeSel.appendChild(o);
+    }
+    const checks = [];
+    const toolsBox = el("div", "set-checks");
+    for (const g of SETTINGS_TOOL_GROUPS) {
+      const lab = el("label", "set-check");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = true;
+      lab.append(cb, el("span", "", g.label));
+      toolsBox.appendChild(lab);
+      checks.push({ group: g, cb });
+    }
+    const fileSel = el("select", "m-select");
+    fillConfigFileSelect(fileSel).catch(() => {});
+
+    const err = el("div", "set-form-err");
+    const save = el("button", "btn primary", "Save agent");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const commit = async () => {
+      const name = nameIn.value.trim();
+      if (!name) { err.textContent = "Agent name is required."; nameIn.focus(); return; }
+      if (!fileSel.value) { err.textContent = "No config file available."; return; }
+      const entry = { mode: modeSel.value, tools: {} };
+      const desc = descIn.value.trim();
+      if (desc) entry.description = desc;
+      const model = modelIn.value.trim();
+      if (model) entry.model = model;
+      const prompt = promptTa.value.trim();
+      if (prompt) entry.prompt = prompt;
+      for (const { group, cb } of checks) {
+        for (const t of group.tools) entry.tools[t] = cb.checked;
+      }
+      save.disabled = true;
+      try {
+        await api("PUT", "/config/agent/" + encodeURIComponent(name), { file: fileSel.value, entry });
+        ov.remove();
+        toast("Agent " + name + " saved");
+        if (onSaved) onSaved();
+      } catch (e) {
+        save.disabled = false;
+        err.textContent = e.message || String(e);
+      }
+    };
+    save.onclick = commit;
+    nameIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
+    modal.append(
+      setField("Name", nameIn),
+      setField("Description", descIn),
+      setField("Model", modelIn),
+      setField("Mode", modeSel),
+      setField("System prompt", promptTa),
+      setField("Tools", toolsBox),
+      setField("Config file", fileSel, "Which config file to save this agent into."),
+      err
+    );
+    const actions = el("div", "m-actions");
+    actions.append(cancel, save);
+    modal.appendChild(actions);
+    setTimeout(() => nameIn.focus(), 0);
+  });
 }
 
 async function refreshProviders() {
@@ -4142,7 +4687,7 @@ async function boot() {
 
   $("#btn-new-session").onclick = () => newSessionTab();
   $("#rail-new").onclick = () => newSessionTab();
-  $("#rail-settings").onclick = openSettings;
+  $("#rail-settings").onclick = () => openSettings();
   $("#rail-sidebar").onclick = () => setSidebar(!S.sidebarOpen);
   $("#rail-board-panel").onclick = () => setBoardPanel(!S.boardPanelOpen);
   $("#board-panel-expand").onclick = () => navigate("/board");

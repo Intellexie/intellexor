@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
+	"path/filepath"
 
 	"github.com/Intellexie/intellexor/internal/board"
 	"github.com/Intellexie/intellexor/internal/store"
@@ -120,5 +122,38 @@ func (s *Server) deleteBoardCard(w http.ResponseWriter, r *http.Request) *apiErr
 	}
 	s.publishBoardUpdate(r)
 	writeTrue(w)
+	return nil
+}
+
+// exportBoard streams the whole board (every card with its column, order,
+// done-links, schedule and attachments) as a downloadable JSON document.
+func (s *Server) exportBoard(w http.ResponseWriter, r *http.Request) *apiError {
+	payload, err := board.Export(s.boardProjectID(r))
+	if err != nil {
+		return badRequest(err.Error())
+	}
+	name := filepath.Base(s.Instance(directoryOf(r)).Directory)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "board"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="intellexor-board-%s.json"`, name))
+	writeJSON(w, 200, payload)
+	return nil
+}
+
+// importBoard installs an exported board document into the request's
+// project: ?mode=replace (the default) makes the board exactly the
+// imported one, ?mode=merge appends its cards to the current board.
+func (s *Server) importBoard(w http.ResponseWriter, r *http.Request) *apiError {
+	var payload board.ExportPayload
+	if e := decodeBody(r, &payload); e != nil {
+		return e
+	}
+	n, err := board.Import(s.boardProjectID(r), &payload, r.URL.Query().Get("mode"))
+	if err != nil {
+		return badRequest(err.Error())
+	}
+	s.publishBoardUpdate(r)
+	writeJSON(w, 200, map[string]any{"imported": n})
 	return nil
 }

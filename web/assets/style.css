@@ -143,7 +143,8 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 /* ---------- board side panel (rail toggle) ---------- */
 /* Left-hand companion to the sidebar: the Open + In Progress cards, one line
    each, full text in a hover tooltip. Sits between the rail and the sidebar —
-   opening it collapses the sidebar (see setBoardPanel in app.js). Collapses
+   opening it collapses the sidebar, and opening the sidebar collapses it (the
+   two swap slots; see setBoardPanel/setSidebar in app.js). Collapses
    inline on desktop like the sidebar; on small screens it slides in as an
    overlay drawer from the left. */
 .board-panel { width:300px; flex:0 0 300px; min-width:0; background:var(--glass); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); border-radius:var(--radius-lg); margin:8px 0 8px 8px; display:flex; flex-direction:column; overflow:hidden; transition:flex-basis .18s ease, margin .18s ease; }
@@ -210,6 +211,9 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .chat-header .title { font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:70%; }
 .chat-header .title[contenteditable="true"] { outline:1px solid var(--accent); border-radius:4px; padding:0 4px; }
 .chat-header .spacer { flex:1; }
+.chat-header .header-actions { display:flex; align-items:center; gap:2px; flex:0 0 auto; }
+.chat-header .header-link { font-size:12px; color:var(--text-muted); text-decoration:none; cursor:pointer; padding:3px 8px; border-radius:var(--radius-md); white-space:nowrap; }
+.chat-header .header-link:hover { color:var(--text-base); background:var(--surface-hover); }
 .ctx-circle { cursor:pointer; }
 
 /* timeline */
@@ -417,13 +421,53 @@ pre:hover .copy-code { opacity:1; }
 .seg button.on { background:var(--layer-2); color:var(--text-base); }
 .m-close { position:absolute; }
 .modal .m-field { display:flex; flex-direction:column; gap:6px; padding:8px 0; }
-.modal .m-select { border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; transition:border-color .15s ease, box-shadow .15s ease; }
+/* Explicit colors on selects (and their options): a transparent background makes
+   the native dropdown popup fall back to the browser's light default while the
+   text stays the inherited light dark-mode color — unreadable. */
+.modal .m-select { border:1px solid var(--border-base); background:var(--bg-base); color:var(--text-base); border-radius:var(--radius-md); padding:6px 10px; outline:none; transition:border-color .15s ease, box-shadow .15s ease; }
 .modal .m-select:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+.modal .m-select option { background:var(--bg-base); color:var(--text-base); }
 .modal .m-actions { display:flex; justify-content:flex-end; gap:8px; padding-top:14px; }
 /* schedule dialog: quick offset pills under the datetime picker, plus a live
    "the agent starts this card in …" preview line */
 .schedule-presets { display:flex; flex-wrap:wrap; gap:8px; padding:10px 0 2px; }
 .schedule-preview { font-size:12px; color:var(--text-muted); padding-top:10px; }
+
+/* settings dialog: side nav + page area */
+.modal.settings-modal { width:min(780px, 94vw); padding:0; display:flex; overflow:hidden; }
+.set-side { flex:0 0 168px; border-right:1px solid var(--border-weak); background:var(--layer-1); border-radius:var(--radius-xl2) 0 0 var(--radius-xl2); padding:14px 10px; display:flex; flex-direction:column; gap:2px; }
+.set-side .set-title { font-size:13px; font-weight:600; color:var(--text-base); padding:2px 10px 10px; }
+.set-nav-item { text-align:left; padding:7px 10px; border-radius:var(--radius-md); font-size:13px; color:var(--text-muted); }
+.set-nav-item:hover { background:var(--surface-hover); color:var(--text-base); }
+.set-nav-item.on { background:var(--surface-active); color:var(--text-base); }
+.set-content { flex:1; min-width:0; padding:16px 20px 20px; overflow-y:auto; }
+.set-h { font-size:14px; margin:0 0 10px; }
+.set-page-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.set-page-head .set-h { margin:0; }
+.set-list { display:flex; flex-direction:column; gap:8px; }
+.set-item { border:1px solid var(--border-weak); border-radius:var(--radius-lg); padding:10px 12px; display:flex; flex-direction:column; gap:4px; }
+.set-item .si-head { display:flex; align-items:center; gap:8px; }
+.set-item .si-name { font-size:13px; font-weight:500; color:var(--text-base); }
+.set-item .si-desc { font-size:12px; color:var(--text-muted); }
+.set-item .si-sub { font-size:11.5px; color:var(--text-muted); }
+.set-item .si-file { font-size:11px; color:var(--text-faint); font-family:var(--font-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.si-model { font-size:11.5px; color:var(--text-muted); font-family:var(--font-mono); white-space:nowrap; }
+.si-badge { font-size:10.5px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); border:1px solid var(--border-base); border-radius:999px; padding:1px 7px; white-space:nowrap; }
+.si-spacer { flex:1; }
+.si-btn { font-size:12px; padding:4px 10px; }
+.si-back { font-size:12px; padding:2px 6px; margin-left:-6px; margin-bottom:6px; align-self:flex-start; }
+.icon-btn { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; flex:0 0 26px; border-radius:var(--radius-md); color:var(--text-faint); }
+.icon-btn:hover { color:var(--err-fg); background:var(--surface-hover); }
+.set-empty { font-size:12.5px; color:var(--text-faint); padding:14px 0; }
+.set-form-err { font-size:12px; color:var(--err-fg); min-height:16px; padding-top:6px; }
+.set-checks { display:flex; flex-wrap:wrap; gap:6px 16px; padding:4px 0; }
+.set-check { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text-base); cursor:pointer; }
+.set-check input { accent-color:var(--accent); }
+@media (max-width: 640px) {
+  .modal.settings-modal { flex-direction:column; width:min(520px, 94vw); }
+  .set-side { flex:0 0 auto; flex-direction:row; align-items:center; border-right:none; border-bottom:1px solid var(--border-weak); border-radius:var(--radius-xl2) var(--radius-xl2) 0 0; padding:10px 12px; overflow-x:auto; }
+  .set-side .set-title { padding:0 10px 0 0; }
+}
 
 /* popover (model/agent pickers) */
 .popover { position:fixed; z-index:60; min-width:260px; max-height:400px; overflow-y:auto; background:var(--bg-base); border:1px solid var(--border-weak); border-radius:var(--radius-lg); box-shadow:var(--shadow); padding:6px; }
