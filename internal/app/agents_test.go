@@ -24,7 +24,7 @@ func TestOrchestratorToolRestriction(t *testing.T) {
 	}
 
 	got := activeToolNames(i.Directory, orch)
-	want := []string{"invalid", "board", "webfetch", "todowrite", "task", "cron", "alarm"}
+	want := []string{"invalid", "board", "webfetch", "todowrite", "task", "cron", "schedule_wakeup"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("orchestrator tools = %v, want %v", got, want)
 	}

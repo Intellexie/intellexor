@@ -96,6 +96,96 @@ downloaded once with a visible progress bar and cached in the browser
 (Cache Storage `intellexor-stt-v1`). Requires a secure context (`https://` or
 `localhost`) for microphone access.
 
+## Kanban board
+
+The board is the first tab in the web UI: three columns (`open`,
+`inprogress`, `done`) of cards stored per project in a single JSON file —
+it survives restarts and is shared by every client connected to the same
+project. Card IDs are plain numbers (`1`, `2`, …) so they are easy to
+reference; cards can carry attachments (usually images) that are passed to
+the session prompt when the card is started.
+
+**Starting a card** (the Start button, or the agent's `board` tool with
+action `start`) links the card to a fresh agent session, moves it to
+`inprogress` and prompts the session with the card's title as its task.
+
+**Agents update the cards they work on.** A session started from a card is
+linked to it, so the agent can move *its own* card without passing an ID:
+when the task is finished it calls the `board` tool with action `move`,
+column `done` — the card is resolved automatically. Agents can also `add`
+follow-up cards, `list` the board, and `watch` cards: a watcher session is
+messaged on behalf of the user as soon as a watched card is marked done
+(watching the card linked to your own session is rejected — you are
+already working on it).
+
+**Auto-triggering cards** — two ways a card starts without anyone clicking:
+
+- **Links (chains):** `link` points a card at a *target* card; when the
+  source card is moved to done, the target starts automatically in a fresh
+  session (only cards still waiting in `open` can be targeted). This lets
+  agents chain work: finish card 1 → card 2 starts by itself.
+- **Schedules:** `schedule` sets a timed start on a card — pass `in`
+  (`"30m"`, `"2h"`, `"1d"`) or `startAt` (unix milliseconds) and a
+  background scheduler starts the card then, exactly like the Start
+  button. Only open cards can be scheduled; `startAt 0` clears the
+  schedule.
+
+The whole board can be exported/imported as JSON (`GET /board/export`,
+`POST /board/import?mode=replace|merge`).
+
+## Cron jobs
+
+A cron job pairs a prompt with a schedule; every run starts a **fresh
+agent session** prompted with the job's prompt (each run has no memory of
+previous runs, so prompts should be self-contained). Jobs live in a
+dedicated tab and are managed by the backend — they survive browser
+refreshes and server restarts.
+
+Schedules are standard 5-field cron expressions (server timezone; `*`,
+lists, ranges, steps and 3-letter month/day names are supported), the
+macros `@hourly`/`@daily`/`@midnight`/`@weekly`/`@monthly`/`@yearly`, or
+`@every <duration>` (e.g. `@every 30m`) firing relative to now.
+
+Jobs can be titled/edited, paused (holding only the next run — a session
+already started keeps going), resumed (re-armed without firing, even if
+the schedule came due while paused), deleted, and viewed (jumps to the
+latest run's session; running jobs show an hourglass). A background sweep
+starts a session per due job and broadcasts `cron.updated`. The agent can
+manage jobs itself via the `cron` tool (including `preview`, which
+validates a spec and returns its next fire time).
+
+## Alarms
+
+The `schedule_wakeup` tool schedules a **one-shot wake-up for the agent's
+own session**: at the given timestamp (unix milliseconds) the system
+injects a user message (`alarm-triggered`, plus an optional note as
+context) into the session, so the agent can continue itself. The typical
+pattern for long-running background work: launch the job, schedule a
+wake-up for when it should be done, end the turn — the wake-up brings the
+agent back to check the result (instead of blocking on `sleep` or
+polling). Wake-ups are persisted per project and survive restarts (a
+wake-up that came due while the server was down fires right after
+startup); `action: "list"` shows the session's scheduled wake-ups and
+`action: "cancel"` disarms one. A background sweep checks for due
+wake-ups every 5 seconds.
+
+## Orchestrator agent
+
+The `orchestrator` agent coordinates work instead of doing it: it manages
+the kanban board, starts cards in fresh sessions, schedules cron jobs and
+schedules wake-ups — its toolset is `board`, `webfetch`, `todowrite`,
+`task`, `cron` and `schedule_wakeup` only (it cannot read or edit files).
+It is the agent
+behind the chat beside the board tab (horizontally resizable — drag its
+right edge; double-click resets).
+
+The orchestrator **automatically watches every card it starts**: when
+that card's session marks it done, the orchestrator is pinged with a
+short "Ticket X is done." message so it can coordinate follow-ups (start
+the next linked card, report status, …) without being asked. When it
+finishes a coordination task it reports the state of the board: what is
+running, what is waiting, what is scheduled.
+
 ## Configuration
 
 Config is JSON(C), read from (in order, merged):

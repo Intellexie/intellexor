@@ -102,7 +102,7 @@ func activeToolNames(dir string, agent AgentDef) []string {
 		}
 		return names
 	}
-	for _, n := range []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board", "alarm"} {
+	for _, n := range []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board", "schedule_wakeup"} {
 		if n == "apply_patch" {
 			continue // only for gpt models
 		}

@@ -21,24 +21,26 @@ type AlarmTool struct {
 	OnUpdate func()
 }
 
-func (AlarmTool) Name() string { return "alarm" }
+func (AlarmTool) Name() string { return "schedule_wakeup" }
 
 func (AlarmTool) Description() string {
-	return `Set a one-shot alarm that wakes this session up at a given time. When the timestamp is reached, the system sends a user message ("alarm-triggered") into this session, letting you continue your work — ideal after starting a long-running background job: launch the job, set an alarm for when it should be done, end your turn, and the alarm brings you back to check the result.
+	return `Schedule a one-shot wake-up for this session instead of waiting. Use this INSTEAD of running "sleep" in bash, polling in a loop, or blocking on a long command: start the work in the background, schedule the wake-up, end your turn — when the timestamp is reached the system sends a user message ("alarm-triggered") into this session and you continue right where you left off. Never busy-wait; the wake-up is free and does not hold the session busy.
 
 - "timestamp" is a unix epoch in MILLISECONDS and must be in the future
 - "note" is optional context delivered with the wake-up message (what to check, what was started, ...)
-- "action" defaults to "set"; use "list" to see this session's alarms or "cancel" (with "alarm_id") to disarm one`
+- "action" defaults to "set"; use "list" to see this session's scheduled wake-ups or "cancel" (with "alarm_id") to disarm one
+
+Example: start a build in the background, schedule a wake-up 10 minutes out with a note like "check build output", then end your turn.`
 }
 
 func (AlarmTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"timestamp": map[string]any{"type": "number", "description": "Unix epoch timestamp in milliseconds when the alarm should fire (must be in the future)"},
+			"timestamp": map[string]any{"type": "number", "description": "Unix epoch timestamp in milliseconds when the wake-up should fire (must be in the future)"},
 			"note":      map[string]any{"type": "string", "description": "Optional context delivered with the wake-up message, e.g. what background job to check"},
 			"action":    map[string]any{"type": "string", "enum": []any{"set", "list", "cancel"}, "description": "Operation: set (default), list, or cancel"},
-			"alarm_id":  map[string]any{"type": "string", "description": "Alarm ID to cancel (required for action=cancel)"},
+			"alarm_id":  map[string]any{"type": "string", "description": "Wake-up ID to cancel (required for action=cancel)"},
 		},
 	}
 }
@@ -102,7 +104,7 @@ func (t AlarmTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 				"alarmID":   a.ID,
 				"triggerAt": a.TriggerAt,
 			},
-			Output: fmt.Sprintf("Alarm %s set for %s (fires in %s). You will receive a user message \"alarm-triggered\" when it goes off; end your turn now and continue then.", a.ID, time.UnixMilli(a.TriggerAt).Format(time.RFC3339), fireIn.Round(time.Second)),
+			Output: fmt.Sprintf("Wake-up %s scheduled for %s (fires in %s). You will receive a user message \"alarm-triggered\" when it goes off; end your turn now and continue then. Do NOT run \"sleep\" or poll while waiting.", a.ID, time.UnixMilli(a.TriggerAt).Format(time.RFC3339), fireIn.Round(time.Second)),
 		}, nil
 
 	default:

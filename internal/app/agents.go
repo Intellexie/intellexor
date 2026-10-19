@@ -70,7 +70,7 @@ func (i *Instance) Agents() []AgentDef {
 			Description: "Orchestrator agent. Manages the kanban board, starts cards in fresh sessions and schedules cron jobs. Cannot read or edit files.",
 			Mode:        "primary",
 			Color:       "#0d9f6f",
-			Tools:       []string{"board", "webfetch", "todowrite", "task", "cron", "alarm"},
+			Tools:       []string{"board", "webfetch", "todowrite", "task", "cron", "schedule_wakeup"},
 			Prompt:      orchestratorPrompt,
 		},
 		{

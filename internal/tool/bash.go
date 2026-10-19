@@ -27,6 +27,7 @@ Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
   - If the output exceeds 2000 lines or 50KB, it will be truncated and the full output will be written to a file.
+  - Do NOT run "sleep" or poll in a loop to wait for a long-running job. Start the job in the background and use the schedule_wakeup tool to schedule a wake-up, then end your turn — you will be brought back when it is time to check the result.
 
 Avoid using this tool with find, grep, cat, head, or tail commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands.`
 }
