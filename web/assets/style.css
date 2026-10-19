@@ -231,6 +231,10 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .assistant-meta button { display:inline-flex; align-items:center; color:var(--text-faint); padding:2px; border-radius:4px; opacity:0; transition:opacity .15s; }
 .assistant-block:hover .assistant-meta button, .assistant-meta button:focus-visible { opacity:1; }
 .assistant-meta button:hover { color:var(--text-base); background:var(--layer-2); }
+/* the completed message's meta embedded at the end of the last tool row
+   (right-aligned via the row's spacer) instead of under it */
+.tool-row .assistant-meta.inline { margin-top:0; flex:none; }
+.tool-row .assistant-meta.inline span:first-child { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .msg-user .meta button { display:inline-flex; align-items:center; color:var(--text-faint); padding:2px; border-radius:4px; }
 .msg-user .meta button:hover { color:var(--text-base); background:var(--layer-2); }
 
@@ -716,6 +720,25 @@ body.board-chat-resizing { cursor:col-resize; user-select:none; }
 .board-chat .tool pre { max-height:260px; font-size:11.5px; }
 .board-chat .diff { max-height:260px; font-size:11.5px; }
 .board-chat .assistant-block, .board-chat .msg-user { margin:10px 0; }
+/* collapsed: a slim vertical strip — the title reads bottom-to-top, the
+   timeline/composer/grip are hidden; click the title or chevron to expand */
+.board-chat.collapsed { flex:0 0 46px; min-width:46px; max-width:46px; }
+.board-chat.collapsed .board-chat-timeline,
+.board-chat.collapsed .board-chat-composer,
+.board-chat.collapsed .board-chat-resize,
+.board-chat.collapsed .board-chat-spacer,
+.board-chat.collapsed #board-chat-new { display:none; }
+.board-chat.collapsed .board-chat-head { flex-direction:column; align-items:center; gap:10px; padding:12px 0; border-bottom:none; height:100%; }
+.board-chat.collapsed .board-chat-title { writing-mode:vertical-rl; transform:rotate(180deg); cursor:pointer; }
+.board-chat.collapsed .board-chat-collapse svg { transform:rotate(180deg); } /* chevron points left = expand */
+
+/* previous-chats picker (the "+" button): a scrollable list of old
+   orchestrator sessions plus a New chat action */
+.board-chat-history { display:flex; flex-direction:column; gap:6px; max-height:320px; overflow-y:auto; }
+.board-chat-history-item { display:flex; align-items:baseline; justify-content:space-between; gap:12px; text-align:left; padding:8px 10px; border:1px solid var(--border-weak); border-radius:var(--radius-md); background:var(--layer-1); transition:border-color .15s ease, background .15s ease; }
+.board-chat-history-item:hover { border-color:var(--border-base); background:var(--surface-hover); }
+.bch-title { font-size:13px; font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bch-meta { flex:none; font-size:11px; color:var(--text-faint); }
 
 @media (max-width: 767px) {
   /* narrow screens: the chat stays a column, just a narrower one that the

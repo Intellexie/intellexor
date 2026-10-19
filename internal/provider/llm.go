@@ -131,37 +131,110 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// Stream with retries, invoking onRetry(attempt, err, next time)
-func (c *Client) Stream(ctx context.Context, req Request, onRetry func(attempt int, err *StreamError, next time.Time)) (<-chan StreamEvent, error) {
-	var last *StreamError
-	for attempt := 1; attempt <= 4; attempt++ {
-		ch, err := c.streamOnce(ctx, req)
-		if err == nil {
-			return ch, nil
-		}
-		last = toStreamError(err)
-		if !last.IsRetryable || ctx.Err() != nil {
-			break
-		}
-		if attempt == 4 {
-			break
-		}
-		delay := time.Duration(1<<uint(attempt-1)) * time.Second
-		next := time.Now().Add(delay)
-		if onRetry != nil {
-			onRetry(attempt, last, next)
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, &StreamError{Message: "Aborted", IsRetryable: false}
-		case <-timer.C:
-		}
+// Retry backoff for retryable stream failures: doubling from retryBaseDelay,
+// capped at retryMaxDelay (5s, 10s, 20s, 40s, 80s, ..., 10m, 10m, ...). The
+// retries are patient — a flaky provider is waited out instead of failing
+// the turn — but not unbounded: once retryBudget has been spent since the
+// first attempt, the last error is surfaced so the turn ends (a permanently
+// hung endpoint must not keep the session busy forever). Aborting the
+// session (ctx.Done) always wins over the backoff sleep.
+var (
+	retryBaseDelay = 5 * time.Second
+	retryMaxDelay  = 10 * time.Minute
+	retryBudget    = 5 * time.Minute
+)
+
+// SetRetryBackoffForTest overrides the backoff bounds (tests only; the app
+// test suites are not parallel, so a plain var write is fine).
+func SetRetryBackoffForTest(base, max time.Duration) {
+	retryBaseDelay, retryMaxDelay = base, max
+}
+
+// SetRetryBudgetForTest overrides the total retry budget (tests only).
+func SetRetryBudgetForTest(d time.Duration) { retryBudget = d }
+
+// backoff returns the wait before retry after the given 1-based attempt.
+// Doubled multiplicatively but clamped, so it is overflow-safe for any
+// attempt count.
+func backoff(attempt int) time.Duration {
+	delay := retryBaseDelay
+	for i := 1; i < attempt && delay < retryMaxDelay; i++ {
+		delay *= 2
 	}
-	out := make(chan StreamEvent, 1)
-	out <- StreamEvent{Type: "error", Err: last}
-	close(out)
+	if delay > retryMaxDelay {
+		delay = retryMaxDelay
+	}
+	return delay
+}
+
+// Stream runs the request with retries, invoking onRetry(attempt, err, next
+// time) before each backoff sleep.
+//
+// The protocol handlers do their HTTP work in a background goroutine and
+// report failures as "error" events, so the retry loop pumps each attempt's
+// channel: a retryable error is retried with exponential backoff (5s
+// doubling, capped at 10m) as long as nothing has been forwarded to the
+// consumer yet. Once partial output was streamed, a retry would replay and
+// duplicate it, so the error is passed through instead. The retries are
+// bounded by retryBudget, spent from the first attempt: once it is used up
+// the last error is surfaced, so a permanently hung endpoint ends the turn
+// (with an error) instead of keeping the session busy forever. The loop
+// also exits on success, a non-retryable error, an error after partial
+// output, or an aborted request (abort always wins over the backoff sleep).
+func (c *Client) Stream(ctx context.Context, req Request, onRetry func(attempt int, err *StreamError, next time.Time)) (<-chan StreamEvent, error) {
+	out := make(chan StreamEvent, 256)
+	go func() {
+		defer close(out)
+		start := time.Now()
+		for attempt := 1; ; attempt++ {
+			var last *StreamError
+			ch, err := c.streamOnce(ctx, req)
+			if err != nil {
+				// synchronous failure (request build): nothing was streamed
+				last = toStreamError(err)
+				if !last.IsRetryable || ctx.Err() != nil {
+					out <- StreamEvent{Type: "error", Err: last}
+					return
+				}
+			} else {
+				forwarded := false
+				for ev := range ch {
+					if ev.Type == "error" {
+						if ev.Err != nil && ev.Err.IsRetryable && ctx.Err() == nil && !forwarded {
+							last = ev.Err
+							break
+						}
+						out <- ev
+						return
+					}
+					forwarded = true
+					out <- ev
+				}
+				if last == nil {
+					return // clean finish: every event forwarded
+				}
+			}
+			// retryable failure with nothing on the wire yet: give up when
+			// the budget is spent (the error must reach the consumer so the
+			// turn ends), otherwise back off and retry
+			if time.Since(start) >= retryBudget {
+				out <- StreamEvent{Type: "error", Err: last}
+				return
+			}
+			delay := backoff(attempt)
+			if onRetry != nil {
+				onRetry(attempt, last, time.Now().Add(delay))
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				out <- StreamEvent{Type: "error", Err: &StreamError{Message: "Aborted", IsRetryable: false}}
+				return
+			case <-timer.C:
+			}
+		}
+	}()
 	return out, nil
 }
 

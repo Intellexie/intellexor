@@ -10,6 +10,7 @@ import (
 
 	"github.com/Intellexie/intellexor/internal/auth"
 	"github.com/Intellexie/intellexor/internal/config"
+	"github.com/Intellexie/intellexor/internal/provider"
 	"github.com/Intellexie/intellexor/internal/question"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
@@ -194,8 +195,40 @@ func (s *Server) patchConfig(w http.ResponseWriter, r *http.Request) *apiError {
 	return nil
 }
 
+// getConfigProviders replicates opencode v1's GET /config/providers response
+// shape exactly: { "providers": [...], "default": {providerID: modelID} }.
+// Clients (opencode mobile apps etc.) read the "providers" array — returning
+// /provider's {all, connected, default} shape here makes them see no models.
 func (s *Server) getConfigProviders(w http.ResponseWriter, r *http.Request) *apiError {
-	providersHandler(s)(w, r)
+	in := s.Instance(directoryOf(r))
+	connected, _ := provider.List(in.Directory)
+	type configProvider struct {
+		ID     string                    `json:"id"`
+		Name   string                    `json:"name"`
+		Env    []string                  `json:"env"`
+		Npm    string                    `json:"npm,omitempty"`
+		API    string                    `json:"api,omitempty"`
+		Models map[string]provider.Model `json:"models"`
+	}
+	providers := []configProvider{}
+	defaults := map[string]string{}
+	for _, id := range provider.SortedKeys(connected) {
+		res := connected[id]
+		if len(res.Models) == 0 {
+			continue // opencode drops providers with no models
+		}
+		env := res.Env
+		if env == nil {
+			env = []string{}
+		}
+		providers = append(providers, configProvider{
+			ID: res.ID, Name: res.Name, Env: env, Npm: res.Npm, Models: res.Models,
+		})
+		if pref := provider.PreferredModel(res); pref != "" {
+			defaults[id] = pref
+		}
+	}
+	writeJSON(w, 200, map[string]any{"providers": providers, "default": defaults})
 	return nil
 }
 

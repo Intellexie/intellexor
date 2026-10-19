@@ -1789,7 +1789,8 @@ function renderAssistantMessage(info, parts, sid) {
   meta.appendChild(el("span", "", [info.agent, info.modelID, dur].filter(Boolean).join(" · ")));
   const fork = el("button", "msg-fork", ICONS.fork);
   fork.title = "Fork from here — clones the session up to this message into a new session";
-  fork.onclick = async () => {
+  fork.onclick = async (e) => {
+    e.stopPropagation(); // embedded in the tool row: don't toggle it
     if (!target) return;
     try {
       const dup = await post(`/session/${target}/fork`, { messageID: info.id });
@@ -1802,9 +1803,21 @@ function renderAssistantMessage(info, parts, sid) {
   };
   meta.appendChild(fork);
   // while the message is still streaming, the agent · model label is embedded
-  // in the thinking bar instead; the meta line (with duration) appears once
-  // the message completes
-  if (hasVisible && info.time && info.time.completed) block.appendChild(meta);
+  // in the thinking bar instead; once completed, the label (with duration)
+  // moves to the meta line — or, when the message ends with a tool call,
+  // inside that tool row (right-aligned, like the live thinking bar) instead
+  // of on its own line under it
+  if (hasVisible && info.time && info.time.completed) {
+    const lastNode = block.lastElementChild;
+    const row = lastNode && lastNode.classList.contains("tool")
+      ? lastNode.querySelector(".tool-row") : null;
+    if (row) {
+      meta.classList.add("inline");
+      row.appendChild(meta);
+    } else {
+      block.appendChild(meta);
+    }
+  }
   return block;
 }
 
@@ -2220,6 +2233,48 @@ function boardChatBusy() {
   return !!(st && st.type !== "idle");
 }
 
+/* ---------- board chat collapse ---------- */
+
+// The chat can be collapsed to a slim vertical strip (title reads
+// bottom-to-top) to give the kanban columns room; the state is persisted in
+// localStorage and re-applied on every board render.
+const BOARD_CHAT_COLLAPSED_KEY = "intellexor.boardChatCollapsed";
+
+function boardChatCollapsed() {
+  try { return localStorage.getItem(BOARD_CHAT_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+
+function setBoardChatCollapsed(v) {
+  try { localStorage.setItem(BOARD_CHAT_COLLAPSED_KEY, v ? "1" : "0"); } catch {}
+  applyBoardChatCollapsed();
+}
+
+function toggleBoardChatCollapsed() {
+  setBoardChatCollapsed(!boardChatCollapsed());
+}
+
+// Apply the collapsed class and the matching width. Expanding restores the
+// pinned resize width (or the default flex sizing when never resized) and
+// re-renders, since streaming updates were skipped while hidden.
+function applyBoardChatCollapsed() {
+  const panel = $("#board-chat");
+  if (!panel) return;
+  const collapsed = boardChatCollapsed();
+  panel.classList.toggle("collapsed", collapsed);
+  const btn = $("#board-chat-collapse");
+  if (btn) btn.title = collapsed ? "Expand" : "Collapse";
+  if (collapsed) {
+    panel.style.flex = "0 0 46px";
+    panel.style.maxWidth = "46px";
+  } else {
+    let saved = 0;
+    try { saved = Number(localStorage.getItem(BOARD_CHAT_WIDTH_KEY)) || 0; } catch {}
+    if (saved > 0) applyBoardChatWidth(panel, saved);
+    else { panel.style.flex = ""; panel.style.maxWidth = ""; }
+    renderBoardChat();
+  }
+}
+
 /* ---------- board chat resize ---------- */
 
 // The orchestrator chat column is horizontally resizable: dragging its right
@@ -2270,6 +2325,7 @@ function initBoardChatResize(panel) {
     window.addEventListener("pointercancel", up);
   };
   panel.appendChild(grip);
+  if (boardChatCollapsed()) return; // the strip width wins over the saved one
   let saved = 0;
   try { saved = Number(localStorage.getItem(BOARD_CHAT_WIDTH_KEY)) || 0; } catch {}
   if (saved > 0) applyBoardChatWidth(panel, saved);
@@ -2291,10 +2347,19 @@ function buildBoardChat() {
   head.appendChild(spacer);
   const fresh = el("button", "board-chat-btn", ICONS.plus);
   fresh.id = "board-chat-new";
-  fresh.title = "Start a fresh orchestrator conversation (the current one stays in the workspace)";
+  fresh.title = "Previous chats · start a new conversation";
   fresh.onclick = boardChatReset;
   head.appendChild(fresh);
+  const collapse = el("button", "board-chat-btn board-chat-collapse", ICONS.chev);
+  collapse.id = "board-chat-collapse";
+  collapse.title = "Collapse";
+  collapse.onclick = toggleBoardChatCollapsed;
+  head.appendChild(collapse);
   panel.appendChild(head);
+  // clicking the vertical title of a collapsed chat expands it again
+  const titleEl = head.querySelector(".board-chat-title");
+  titleEl.onclick = () => { if (boardChatCollapsed()) setBoardChatCollapsed(false); };
+  panel.classList.toggle("collapsed", boardChatCollapsed());
 
   const tl = el("div", "board-chat-timeline");
   tl.id = "board-chat-timeline";
@@ -2402,19 +2467,51 @@ async function boardChatAbort() {
   await post(`/session/${sid}/abort`).catch(() => {});
 }
 
-// Fresh conversation: the old session is kept (it remains in the workspace
-// list), only the panel's pointer moves to a yet-to-be-created session.
+// The "+" button opens the chat picker: every previous orchestrator
+// conversation (sessions with the orchestrator agent, newest first) can be
+// reopened in the panel, or a fresh one started. Old sessions stay in the
+// workspace list either way — this only moves the panel's pointer.
 async function boardChatReset() {
-  const ok = await confirmModal(
-    "New orchestrator chat",
-    "Start a fresh orchestrator conversation? The current one stays in the workspace session list.",
-    "New chat"
-  );
-  if (!ok) return;
-  setBoardChatSessionId("");
-  renderBoardChat();
-  const ta = $("#board-chat-input");
-  if (ta) ta.focus();
+  let sessions = [];
+  try { sessions = (await get("/session")) || []; } catch {}
+  const cur = boardChatSessionId();
+  const prev = sessions
+    .filter((s) => !s.parentID && s.agent === ORCHESTRATOR_AGENT && s.id !== cur)
+    .sort((a, b) => ((b.time && b.time.updated) || 0) - ((a.time && a.time.updated) || 0));
+  openModal("Orchestrator chats", (modal, ov) => {
+    const list = el("div", "board-chat-history");
+    if (!prev.length) {
+      list.appendChild(el("div", "board-chat-empty", "No previous orchestrator chats yet."));
+    }
+    for (const s of prev) {
+      const ts = (s.time && (s.time.updated || s.time.created)) || 0;
+      const row = el("button", "board-chat-history-item");
+      row.appendChild(el("span", "bch-title", s.title || "Orchestrator"));
+      row.appendChild(el("span", "bch-meta", ts ? relTime(ts) : ""));
+      row.onclick = async () => {
+        ov.remove();
+        trackSession(s);
+        setBoardChatSessionId(s.id);
+        await loadMessages(s.id).catch(() => {});
+        renderBoardChat();
+      };
+      list.appendChild(row);
+    }
+    modal.appendChild(list);
+    const actions = el("div", "m-actions");
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const fresh = el("button", "btn primary", "New chat");
+    fresh.onclick = () => {
+      ov.remove();
+      setBoardChatSessionId("");
+      renderBoardChat();
+      const ta = $("#board-chat-input");
+      if (ta) ta.focus();
+    };
+    actions.append(cancel, fresh);
+    modal.appendChild(actions);
+  });
 }
 
 // Put text into the board chat composer (the revert flow uses it).
@@ -2436,6 +2533,7 @@ function boardChatNearBottom(tl) {
 // Render the orchestrator conversation into the panel. A full rebuild, like
 // renderTimeline — cheap at chat scale and immune to partial-update bugs.
 function renderBoardChat() {
+  if (boardChatCollapsed()) return; // hidden strip — nothing to paint
   const inner = $("#board-chat-timeline-inner");
   if (!inner) return;
   const tl = $("#board-chat-timeline");

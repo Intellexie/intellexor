@@ -125,6 +125,13 @@ func TestVLLMStyleBoardMoveThenFinish(t *testing.T) {
 func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 	provider.SetStreamIdleTimeoutForTest(500 * time.Millisecond)
 	defer provider.SetStreamIdleTimeoutForTest(3 * time.Minute)
+	// the retry backoff and budget must be shortened too: the production
+	// schedule (5s doubling to 10m, 5m budget) would blow the test's 15s
+	// budget on the stalls
+	provider.SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
+	defer provider.SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
+	provider.SetRetryBudgetForTest(2 * time.Second)
+	defer provider.SetRetryBudgetForTest(5 * time.Minute)
 
 	var calls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
