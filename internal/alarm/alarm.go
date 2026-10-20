@@ -141,6 +141,29 @@ func List(projectID, sessionID string, pendingOnly bool) ([]Alarm, error) {
 	return out, nil
 }
 
+// Pending returns every unfired alarm of the project across all sessions,
+// newest first. The web UI uses it to show which sessions have a wake-up
+// scheduled (the ⏰ indicator in the header, tab and sidebar).
+func Pending(projectID string) ([]Alarm, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	alarms, err := load(projectID)
+	if err != nil {
+		return nil, err
+	}
+	var out []Alarm
+	for _, a := range alarms {
+		if !a.Fired {
+			out = append(out, a)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Created > out[j].Created })
+	if out == nil {
+		out = []Alarm{}
+	}
+	return out, nil
+}
+
 // Cancel disarms one of the session's alarms. Only unfired alarms of the
 // given session can be cancelled — a session cannot touch another
 // session's alarms, and fired ones are history.

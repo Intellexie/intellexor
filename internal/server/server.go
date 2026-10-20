@@ -175,10 +175,28 @@ func (s *Server) resolveSession(r *http.Request, id string) (*app.Instance, *ses
 	all := in.Mgr.ListAll()
 	for _, sess := range all {
 		if sess.ID == id {
-			return s.Instance(sess.Directory), sess, nil
+			in := s.Instance(sess.Directory)
+			return in, s.recordTimezone(in, sess, r), nil
 		}
 	}
 	return nil, nil, sessionNotFound(id)
+}
+
+// recordTimezone persists the web UI's device timezone (sent as the
+// X-Timezone header on every API request) on the session, so tools can
+// report times in the user's local time instead of the server's. It only
+// writes when the reported zone differs from the stored one; ACP clients
+// send no header and keep whatever was stored (or none).
+func (s *Server) recordTimezone(in *app.Instance, sess *session.Session, r *http.Request) *session.Session {
+	tz := r.Header.Get("X-Timezone")
+	if tz == "" || tz == sess.Timezone {
+		return sess
+	}
+	updated, err := in.Mgr.Update(sess.ID, func(u *session.Session) { u.Timezone = tz })
+	if err != nil {
+		return sess
+	}
+	return updated
 }
 
 func directoryOf(r *http.Request) string {

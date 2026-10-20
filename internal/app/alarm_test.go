@@ -70,6 +70,54 @@ func TestAlarmToolRejectsPastTimestamp(t *testing.T) {
 	}
 }
 
+// The tool reports the trigger time in the session's device timezone (from
+// the X-Timezone header) so the agent quotes the user's local time instead
+// of falling back to UTC.
+func TestAlarmToolReportsDeviceTime(t *testing.T) {
+	i, s := setupAbortTest(t, respondEmptyStopHandler)
+
+	// a fixed instant, far enough in the future to pass the tool's check;
+	// the expected device-local rendering is computed with the same zone
+	// rules the tool uses, so the test is DST-proof
+	at := util.Now() + 365*24*60*60*1000
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.UnixMilli(at).In(loc).Format("Monday, 02 Jan 2006 15:04:05 MST")
+	res, err := tool.AlarmTool{}.Run(&tool.Ctx{
+		Ctx:       t.Context(),
+		SessionID: s.ID,
+		Directory: i.Directory,
+		Timezone:  "America/New_York",
+	}, mustJSON(map[string]any{"timestamp": float64(at)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output, want) {
+		t.Fatalf("output should show the device-local time %q, got %q", want, res.Output)
+	}
+	if !strings.Contains(res.Output, "device time, America/New_York") {
+		t.Fatalf("output should label the device timezone, got %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "never convert it to UTC") {
+		t.Fatalf("output should tell the agent not to convert to UTC, got %q", res.Output)
+	}
+
+	// without a device timezone the server's local zone is used, labelled as such
+	res, err = tool.AlarmTool{}.Run(&tool.Ctx{
+		Ctx:       t.Context(),
+		SessionID: s.ID,
+		Directory: i.Directory,
+	}, mustJSON(map[string]any{"timestamp": float64(at + 60_000)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output, "server time (device timezone unknown)") {
+		t.Fatalf("fallback should be labelled as server time, got %q", res.Output)
+	}
+}
+
 // End-to-end: a due alarm is claimed by the sweep and its session receives
 // the "alarm-triggered" user message (plus the note), so the agent's next
 // turn can continue the work.
@@ -138,5 +186,79 @@ func TestAlarmClaimDueIsAtomic(t *testing.T) {
 	}
 	if len(first) != 1 || len(second) != 0 {
 		t.Fatalf("expected exactly one claim, got %d then %d", len(first), len(second))
+	}
+}
+
+// The sweep broadcasts alarm.updated when it claims due alarms, so connected
+// clients drop the session's ⏰ indicator as soon as no alarms are left.
+func TestAlarmSweepBroadcastsUpdate(t *testing.T) {
+	i, s := setupAbortTest(t, respondEmptyStopHandler)
+	pid := store.ProjectID(i.Directory)
+
+	ch := i.Hub.Subscribe()
+	defer i.Hub.Unsubscribe(ch)
+
+	if _, err := alarm.Add(pid, s.ID, util.Now()-1000, ""); err != nil {
+		t.Fatal(err)
+	}
+	sweepAlarms(i, pid, util.Now())
+
+	waitUntil(t, 5*time.Second, func() bool {
+		for {
+			select {
+			case ev := <-ch:
+				if ev.Type == "alarm.updated" {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	})
+}
+
+// Pending lists every unfired alarm of the project across sessions — the
+// web UI's GET /alarm backing — and drops entries as alarms fire.
+func TestAlarmPendingAcrossSessions(t *testing.T) {
+	i, s := setupAbortTest(t, respondEmptyStopHandler)
+	pid := store.ProjectID(i.Directory)
+
+	if _, err := alarm.Add(pid, s.ID, util.Now()+60_000, "first"); err != nil {
+		t.Fatal(err)
+	}
+	other := &session.Session{ProjectID: pid, Directory: i.Directory, Title: "other"}
+	if err := i.Mgr.Create(other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alarm.Add(pid, other.ID, util.Now()+120_000, "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := alarm.Pending(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending alarms, got %d", len(pending))
+	}
+
+	// firing one removes it from the pending set
+	if _, err := alarm.Add(pid, s.ID, util.Now()-1000, "due"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alarm.ClaimDue(pid, util.Now()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = alarm.Pending(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("expected the 2 future alarms to remain pending, got %d", len(pending))
+	}
+	for _, a := range pending {
+		if a.Fired {
+			t.Fatalf("fired alarm in pending set: %+v", a)
+		}
 	}
 }

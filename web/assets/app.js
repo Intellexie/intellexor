@@ -8,6 +8,9 @@ async function api(method, path, body) {
   const url = new URL(path, location.origin);
   if (DIR) url.searchParams.set("directory", DIR);
   const opts = { method, headers: {} };
+  // the server records this on the session so tools can report times in the
+  // user's device timezone instead of the server's
+  try { opts.headers["X-Timezone"] = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch {}
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
@@ -60,6 +63,7 @@ const S = {
   toolOpen: new Map(), // tool partID -> user's explicit open/closed choice (survives timeline re-renders)
   reasoningOpen: new Map(), // reasoning partID -> user's explicit open/closed choice (survives timeline re-renders)
   tabs: [], // open session tabs, in order (persisted)
+  alarms: {}, // sessionID -> earliest pending wake-up triggerAt (ms) — drives the ⏰ indicator and its hover title
   sidebarOpen: true, // resolved from localStorage/viewport by initSidebar()
   boardPanelOpen: false, // cards side panel (rail toggle), resolved by initBoardPanel()
   commands: null, // cached GET /command result (slash-command menu)
@@ -570,6 +574,11 @@ function handleEvent(ev) {
       // sweep started a run) — reload and re-render when the tab is visible
       loadCron().then(() => { if (S.view === "cron") renderCronList(); });
       break;
+    case "alarm.updated":
+      // a wake-up was set, cancelled or fired — refresh the ⏰ indicators
+      // in the header, tabs and sidebar
+      loadAlarms().catch(() => {});
+      break;
     case "session.diff":
       break;
     default:
@@ -873,6 +882,11 @@ function renderTabs() {
         tab.appendChild(el("span", "dot dot-unseen"));
       }
     }
+    if (!pending && S.alarms[sid]) {
+      const clock = el("span", "alarm-indicator", "⏰");
+      clock.title = alarmTitle(sid);
+      tab.appendChild(clock);
+    }
     tab.appendChild(el("span", "tab-title", esc(title)));
     const close = el("button", "tab-close", ICONS.close);
     close.title = "Close tab";
@@ -1114,6 +1128,31 @@ function renderBoardPanel() {
   $("#board-panel-count").textContent = total;
 }
 
+// Sessions with a pending wake-up (the schedule_wakeup tool): the ⏰
+// indicator in the session header, tab and sidebar follows this map. It
+// disappears as soon as the last alarm is gone — cancelled by the agent or
+// claimed by the backend sweep, both of which broadcast alarm.updated.
+async function loadAlarms() {
+  const list = await get("/alarm") || [];
+  S.alarms = {};
+  for (const a of list) {
+    if (!S.alarms[a.sessionID] || a.triggerAt < S.alarms[a.sessionID]) {
+      S.alarms[a.sessionID] = a.triggerAt;
+    }
+  }
+  renderSidebar(); // re-renders the tabs too
+  renderHeader();
+}
+
+// Hover title for a session's ⏰ indicator: when the wake-up fires, in the
+// device's own timezone (Date renders local time by default).
+function alarmTitle(sid) {
+  const ts = S.alarms[sid];
+  if (!ts) return "Wake-up scheduled";
+  const d = new Date(ts);
+  return "Wake-up scheduled for " + d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
 function renderSidebar() {
   const list = $("#session-list");
   list.innerHTML = "";
@@ -1170,6 +1209,11 @@ function renderSidebar() {
       row.appendChild(el("span", "dot", "&nbsp;"));
     }
     row.appendChild(el("span", "title", esc(s.title || "New session")));
+    if (S.alarms[s.id]) {
+      const clock = el("span", "alarm-indicator", "⏰");
+      clock.title = alarmTitle(s.id);
+      row.appendChild(clock);
+    }
     const arch = el("button", "archive", ICONS.archive);
     arch.title = "Archive";
     arch.onclick = (e) => {
@@ -1378,6 +1422,11 @@ function buildHeader(sess) {
       }
     };
     header.appendChild(t);
+    if (S.alarms[sess.id]) {
+      const clock = el("span", "alarm-indicator", "⏰");
+      clock.title = alarmTitle(sess.id);
+      header.appendChild(clock);
+    }
   }
   header.appendChild(el("div", "spacer"));
   // Export/Import sit after the spacer so they hug the right edge, exactly
@@ -5389,6 +5438,10 @@ async function boot() {
     toast(e.message, true);
   }
   loadTabs();
+
+  try {
+    await loadAlarms();
+  } catch {}
 
   try {
     S.statuses = await get("/session/status") || {};

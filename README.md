@@ -89,12 +89,17 @@ The image is ubuntu-based and gives the agent a full toolchain: `bash`,
 
 The composer has a microphone button: click, talk, click again — the whole
 recording is transcribed once and appended to the input box (no real-time
-partials). It runs **fully client-side**
-(sherpa-onnx WASM in a Web Worker + NVIDIA Parakeet TDT 0.6B v3 int8,
-multilingual); audio never leaves the browser. The ~640 MB model is
-downloaded once with a visible progress bar and cached in the browser
-(Cache Storage `intellexor-stt-v1`). Requires a secure context (`https://` or
-`localhost`) for microphone access.
+partials). It runs **fully client-side** (transformers.js / onnxruntime-web
+in a module Worker + NVIDIA **Parakeet** `parakeet-ctc-0.6b`, a CTC model —
+fp16 on GPU, q8 on CPU; the model choice is a hard requirement, do not swap
+it for Whisper); audio never leaves the browser. Inference runs on
+**WebGPU** when the browser exposes it, with an automatic fallback to CPU
+wasm. The engine (~42 MB) ships embedded with the binary and is served from
+`/stt/`; the ~1.2 GB model is downloaded once from the Hugging Face hub
+with a visible progress bar and cached in the browser (Cache Storage
+`transformers-cache`). Parakeet is English-only and needs no language
+config. Requires a secure context (`https://` or `localhost`) for
+microphone access.
 
 ## Kanban board
 

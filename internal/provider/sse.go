@@ -21,7 +21,7 @@ var httpClient = &http.Client{}
 // needs to cover dead silence — any byte resets it — so slow generations and
 // long queues are unaffected. Local runtimes (ollama/lmstudio) opt out
 // because a cold model load looks exactly like silence.
-var streamIdleTimeout = 3 * time.Minute
+var streamIdleTimeout = 6 * time.Minute
 
 // stalledError builds the retryable error returned when the idle watchdog
 // fires. A constructor (not a shared value) so tests can shorten the window

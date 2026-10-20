@@ -175,6 +175,7 @@ func (i *Instance) runSubagent(parentCtx context.Context, parent *session.Sessio
 		ParentID:   parent.ID,
 		Title:      fmt.Sprintf("%s (@%s subagent)", in.Description, agent.Name),
 		Agent:      agent.Name,
+		Timezone:   parent.Timezone,
 		Permission: append(parent.Permission, denyRules("todowrite"), denyRules("task")),
 	}
 	if in.Model != nil {

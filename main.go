@@ -8,6 +8,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	// Embed the IANA tz database so time.LoadLocation resolves device
+	// timezones (X-Timezone) even in scratch/distroless containers that
+	// ship no /usr/share/zoneinfo.
+	_ "time/tzdata"
 
 	"github.com/Intellexie/intellexor/internal/acp"
 	"github.com/Intellexie/intellexor/internal/config"

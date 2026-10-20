@@ -260,6 +260,7 @@ func (p *processor) runTool(ctx context.Context, ev provider.StreamEvent, agentN
 		Directory: i.Directory,
 		Worktree:  i.Worktree,
 		Agent:     agentName,
+		Timezone:  p.s.Timezone,
 		Meta: func(title string, metadata map[string]any) {
 			st := part.State
 			if st != nil && st.Status == "running" {

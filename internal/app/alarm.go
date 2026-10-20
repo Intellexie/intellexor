@@ -66,6 +66,18 @@ func sweepAlarms(i *Instance, projectID string, now int64) {
 	if err != nil || len(due) == 0 {
 		return
 	}
+	// the claimed alarms are gone from the pending set — tell connected
+	// clients so the ⏰ indicator on the session disappears right away
+	// (fireAlarm's Prompt broadcast alone would only refresh the timeline).
+	// Publish on every instance of the project: the alarm's session may
+	// belong to a different directory than the sweep's instance.
+	instMu.Lock()
+	for _, w := range instReg {
+		if store.ProjectID(w.Directory) == projectID {
+			w.Hub.Publish("alarm.updated", map[string]any{"directory": w.Directory})
+		}
+	}
+	instMu.Unlock()
 	for _, a := range due {
 		go fireAlarm(i, a)
 	}

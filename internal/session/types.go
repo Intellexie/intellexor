@@ -64,15 +64,19 @@ type SessionSummary struct {
 }
 
 type Session struct {
-	ID         string           `json:"id"`
-	Slug       string           `json:"slug"`
-	ProjectID  string           `json:"projectID"`
-	Directory  string           `json:"directory"`
-	Path       string           `json:"path,omitempty"`
-	ParentID   string           `json:"parentID,omitempty"`
-	Title      string           `json:"title"`
-	Version    string           `json:"version"`
-	Agent      string           `json:"agent,omitempty"`
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	ProjectID string `json:"projectID"`
+	Directory string `json:"directory"`
+	Path      string `json:"path,omitempty"`
+	ParentID  string `json:"parentID,omitempty"`
+	Title     string `json:"title"`
+	Version   string `json:"version"`
+	Agent     string `json:"agent,omitempty"`
+	// Timezone is the device timezone of the web UI client that last talked
+	// to this session (IANA name, sent as the X-Timezone header). Tools use
+	// it to report times in the user's local time instead of the server's.
+	Timezone   string           `json:"timezone,omitempty"`
 	Model      *ModelRef        `json:"model,omitempty"`
 	Cost       float64          `json:"cost"`
 	Tokens     Tokens           `json:"tokens"`

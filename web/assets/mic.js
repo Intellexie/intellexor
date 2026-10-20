@@ -1,46 +1,38 @@
 "use strict";
 
 /*
- * Browser speech-to-text for Intellexor: sherpa-onnx (WASM, in a dedicated
- * Worker) + NVIDIA Parakeet TDT 0.6B v3 (int8, multilingual).
- * Everything runs client-side — audio never leaves the browser.
+ * Browser speech-to-text for Intellexor: transformers.js (onnxruntime-web)
+ * in a dedicated module Worker + NVIDIA Parakeet (parakeet-ctc-0.6b, CTC —
+ * fp16 on GPU, q8 on CPU). The model is a hard requirement: Parakeet, not
+ * Whisper. Everything runs client-side — audio never leaves the browser.
  *
  * Pure record → transcribe: click the mic to record, click again to stop;
  * the whole recording is decoded once and appended to the composer. No
  * real-time / partial transcription.
  *
- * The engine (wasm + glue, ~15 MB) ships embedded with the app: the worker
- * (sherpa-worker.js) imports sherpa-engine.js + sherpa-asr.js and receives
- * sherpa.wasm via postMessage. The model (~640 MB) is downloaded once on
- * first use — with a live progress bar — and cached in Cache Storage
- * ("intellexor-stt-v1"); later sessions load instantly from cache.
+ * The engine (transformers.min.js + onnxruntime wasm, ~42 MB) ships embedded
+ * with the app and is served from /stt/. Inference runs on WebGPU when the
+ * browser exposes it, with an automatic fallback to CPU wasm. The model
+ * (~1.2 GB) is downloaded once from the Hugging Face hub on first use —
+ * with a live progress bar — and cached by transformers.js in Cache Storage
+ * ("transformers-cache"); later sessions load instantly from cache.
  */
 
 (function () {
-  const CACHE_NAME = "intellexor-stt-v1";
-  const HF =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main";
-  const MODEL_FILES = [
-    { key: "encoder", url: HF + "/encoder.int8.onnx", label: "parakeet encoder (int8)", bytes: 652184281 },
-    { key: "decoder", url: HF + "/decoder.int8.onnx", label: "parakeet decoder (int8)", bytes: 11845275 },
-    { key: "joiner", url: HF + "/joiner.int8.onnx", label: "parakeet joiner (int8)", bytes: 6355277 },
-    { key: "tokens", url: HF + "/tokens.txt", label: "tokens", bytes: 93939 },
-  ];
-  const TOTAL_BYTES = MODEL_FILES.reduce((a, f) => a + f.bytes, 0);
+  const CACHE_NAME = "transformers-cache"; // transformers.js browser cache
   const TARGET_RATE = 16000;
 
   const S = {
     state: "idle", // idle | loading | ready | recording | decoding
-    progress: { loaded: 0, total: TOTAL_BYTES },
+    progress: { loaded: 0, total: 0 },
+    device: "", // "webgpu" | "wasm" — reported by the worker after load
     recordingSince: 0,
     error: "",
   };
 
-  let worker = null, client = null, recognizerId = null;
+  let worker = null, client = null, loaded = false;
   let mediaStream = null, audioCtx = null, sourceNode = null, procNode = null;
   let chunks = [], totalSamples = 0, tickTimer = null;
-  let abortCtl = null;
-  let progress = {}; // file.key -> {loaded, total}
   const hooks = { onUpdate: () => {}, onText: () => {}, toast: () => {} };
 
   const el = (tag, cls, html) => {
@@ -49,8 +41,6 @@
     if (html !== undefined) e.innerHTML = html;
     return e;
   };
-  const esc = (s) =>
-    String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/&lt;/g, "&lt;").replace(/>/g, "&gt;");
   const fmtMB = (n) => (n / 1048576).toFixed(1) + " MB";
   const upd = () => hooks.onUpdate();
 
@@ -61,69 +51,24 @@
     if (now - lastUpd > 200) { lastUpd = now; upd(); }
   };
 
-  function sumProgress() {
-    let loaded = 0, total = 0;
-    for (const f of MODEL_FILES) {
-      const p = progress[f.key];
-      if (p) { loaded += p.loaded; total += Math.max(p.total, p.loaded); }
-      else total += f.bytes;
-    }
-    return { loaded, total: Math.max(total, 1) };
-  }
-
-  async function openCache() { return caches.open(CACHE_NAME); }
-  async function cachedResponse(url) { return (await openCache()).match(url); }
-
-  // Stream the response into the cache while counting bytes: flat memory
-  // usage (a 650 MB buffer here crashed tabs), live progress, and entries
-  // only appear once the file is complete. A watchdog aborts stalled
-  // downloads so the button can never get stuck silently.
-  async function fetchWithProgress(file, ctl) {
-    const res = await fetch(file.url, { signal: ctl.signal });
-    if (!res.ok) throw new Error(file.label + ": HTTP " + res.status);
-    const total = +(res.headers.get("content-length") || file.bytes || 0);
-    let loaded = 0;
-    let lastByteAt = Date.now();
-    const watchdog = setInterval(() => {
-      if (Date.now() - lastByteAt > 30000) {
-        try { ctl.abort(new Error("download stalled (no data for 30s)")); } catch {}
-      }
-    }, 5000);
-    const counter = new TransformStream({
-      transform(chunk, ctrl) {
-        loaded += chunk.byteLength;
-        lastByteAt = Date.now();
-        progress[file.key] = { loaded, total };
-        S.progress = sumProgress();
-        updThrottled();
-        ctrl.enqueue(chunk);
-      },
-    });
-    try {
-      const counted = res.body.pipeThrough(counter, { signal: ctl.signal });
-      await (await openCache()).put(
-        file.url,
-        new Response(counted, { headers: { "x-intellexor-size": String(total || loaded) } })
-      );
-    } catch (e) {
-      await (await openCache()).delete(file.url).catch(() => {});
-      throw e;
-    } finally {
-      clearInterval(watchdog);
-    }
-    progress[file.key] = { loaded, total: Math.max(total, loaded) };
-    S.progress = sumProgress();
-    upd();
-  }
-
-  // ---- worker plumbing (mirrors the worker's TaskScheduler protocol) ----
+  // ---- worker plumbing (mirrors the worker's task protocol) ----
 
   class TaskClient {
     constructor(w) {
       this.tasks = new Map();
       this.counter = 0;
       w.addEventListener("message", (e) => {
-        const { id, dir, data, error } = e.data || {};
+        const msg = e.data || {};
+        if (msg.type === "progress") {
+          S.progress = { loaded: msg.loaded || 0, total: msg.total || 0 };
+          updThrottled();
+          return;
+        }
+        if (msg.type === "fallback") {
+          hooks.toast("WebGPU unavailable — speech-to-text falling back to CPU", true);
+          return;
+        }
+        const { id, dir, data, error } = msg;
         if (id === undefined || dir !== "sender") return;
         const t = this.tasks.get(id);
         if (!t) return;
@@ -142,14 +87,9 @@
 
   async function ensureWorker() {
     if (worker) return;
-    const [wRes, wasmRes] = await Promise.all([
-      fetch("/sherpa-worker.js"),
-      fetch("/sherpa.wasm"),
-    ]);
-    if (!wRes.ok) throw new Error("sherpa-worker.js: HTTP " + wRes.status);
-    if (!wasmRes.ok) throw new Error("sherpa.wasm: HTTP " + wasmRes.status);
-    const url = URL.createObjectURL(new Blob([await wRes.text()], { type: "text/javascript" }));
-    worker = new Worker(url);
+    // A module worker (needed for the ESM imports) — served straight from
+    // the app so relative imports resolve against the origin.
+    worker = new Worker("/stt-worker.js", { type: "module" });
     client = new TaskClient(worker);
     await new Promise((resolve, reject) => {
       const to = setTimeout(() => {
@@ -165,76 +105,27 @@
       };
       worker.addEventListener("message", onMsg);
     });
-    const wasm = await wasmRes.arrayBuffer();
-    await client.post("init", { wasm }, [wasm]);
   }
 
   async function ensureModel() {
-    if (recognizerId) return true;
-    S.state = "loading"; S.error = ""; S.progress = sumProgress(); upd();
-    abortCtl = new AbortController();
+    if (loaded) return true;
+    S.state = "loading"; S.error = ""; S.progress = { loaded: 0, total: 0 }; upd();
     try {
-      // pre-download the model with visible progress (the worker's own
-      // fetch would be silent); the worker then hits the same cache
-      for (const f of MODEL_FILES) {
-        const hit = await cachedResponse(f.url);
-        if (hit) {
-          // validate: an interrupted session can leave incomplete entries
-          const blob = await hit.blob();
-          const expected = +(hit.headers.get("x-intellexor-size") || f.bytes);
-          if (blob.size > 0 && blob.size === expected) {
-            progress[f.key] = { loaded: blob.size, total: Math.max(blob.size, f.bytes) };
-            S.progress = sumProgress(); upd();
-            continue;
-          }
-          await (await openCache()).delete(f.url).catch(() => {});
-        }
-        await fetchWithProgress(f, abortCtl);
-      }
       await ensureWorker();
-      upd();
-      // hand the model bytes to the worker (MEMFS paths) and build the recognizer
-      const names = { encoder: "/enc.onnx", decoder: "/dec.onnx", joiner: "/join.onnx", tokens: "/tokens.txt" };
-      const files = {}, transfers = [];
-      for (const f of MODEL_FILES) {
-        const hit = await cachedResponse(f.url);
-        if (!hit) throw new Error(f.label + ": not in cache");
-        const buf = await hit.arrayBuffer();
-        files[names[f.key]] = buf;
-        transfers.push(buf);
-      }
-      recognizerId = await client.post("offline.create", {
-        files,
-        config: {
-          modelConfig: {
-            modelType: "nemo-transducer",
-            transducer: {
-              encoder: names.encoder,
-              decoder: names.decoder,
-              joiner: names.joiner,
-            },
-            tokens: names.tokens,
-            numThreads: 1,
-            debug: 0,
-          },
-        },
-      }, transfers);
+      const res = await client.post("load", {
+        device: navigator.gpu ? "webgpu" : "wasm",
+      });
+      S.device = (res && res.device) || "";
+      loaded = true;
       S.state = "ready";
       upd();
       return true;
     } catch (e) {
-      if (e && (e.name === "AbortError" || /abort/i.test(String(e && e.message)))) {
-        S.state = "idle";
-        upd();
-        return false;
-      }
       S.error = (e && e.message) || String(e);
       S.state = "idle";
       upd();
       hooks.toast("Speech model init failed: " + S.error, true);
       return false;
-    } finally {
-      abortCtl = null;
     }
   }
 
@@ -262,16 +153,8 @@
   }
 
   async function decodeSamples(samples) {
-    const streamId = await client.post("offline.createStream", { recognizerId });
-    try {
-      await client.post("stream.acceptWaveform",
-        { streamId, sampleRate: TARGET_RATE, samples }, [samples.buffer]);
-      await client.post("offline.decode", { recognizerId, streamId });
-      const result = await client.post("offline.getResult", { recognizerId, streamId });
-      return (result && result.text ? result.text : "").trim();
-    } finally {
-      client.post("offline.streamFree", { streamId }).catch(() => {});
-    }
+    const res = await client.post("transcribe", { samples }, [samples.buffer]);
+    return (res && res.text ? res.text : "").trim();
   }
 
   async function startRecording() {
@@ -340,7 +223,7 @@
       hooks.toast("Microphone unavailable — requires a secure context (https:// or localhost)", true);
       return;
     }
-    if (!recognizerId) {
+    if (!loaded) {
       const ok = await ensureModel();
       if (!ok) return;
     }
@@ -356,7 +239,7 @@
   async function clearCache() {
     try {
       await caches.delete(CACHE_NAME);
-      progress = {};
+      S.progress = { loaded: 0, total: 0 };
       hooks.toast("Cached speech model deleted (reload to re-download)");
     } catch (e) {
       hooks.toast("Cache clear failed: " + (e.message || e), true);
@@ -367,11 +250,11 @@
     if (S.state === "idle" || S.state === "ready") return null;
     const d = el("div", "dock mic-dock");
     if (S.state === "loading") {
-      const { loaded, total } = S.progress;
-      const pct = Math.min(100, (loaded / total) * 100);
+      const { loaded: done, total } = S.progress;
+      const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
       const head = el("div", "d-head");
       head.innerHTML =
-        `<span class="d-title">Downloading speech model <span class="mic-model">parakeet-v3 · int8 · 640 MB</span></span>` +
+        `<span class="d-title">Downloading speech model <span class="mic-model">parakeet-ctc-0.6b · ${S.device || "webgpu"} · ~1.2 GB</span></span>` +
         `<span class="mic-dock-pct">${pct.toFixed(0)}%</span>`;
       d.appendChild(head);
       const bar = el("div", "mic-progress");
@@ -379,7 +262,9 @@
       d.appendChild(bar);
       d.appendChild(
         el("div", "mic-dock-sub",
-          `${fmtMB(loaded)} of ${fmtMB(total)} — downloaded once, cached in your browser`)
+          total > 0
+            ? `${fmtMB(done)} of ${fmtMB(total)} — downloaded once, cached in your browser`
+            : "preparing download — cached in your browser after the first run")
       );
       const actions = el("div", "d-actions");
       const cancel = el("button", "btn ghost", "Cancel");
@@ -394,14 +279,21 @@
       d.appendChild(head);
     } else if (S.state === "decoding") {
       const head = el("div", "d-head");
-      head.innerHTML = `<span class="d-title">Transcribing…</span>`;
+      const dev = S.device === "webgpu" ? "On GPU" : "On CPU";
+      head.innerHTML = `<span class="d-title">Transcribing…</span>` +
+        (S.device ? `<span class="mic-device">${dev}</span>` : "");
       d.appendChild(head);
     }
     return d;
   }
 
   function cancelDownload() {
-    if (abortCtl) abortCtl.abort();
+    // transformers.js downloads can't be aborted cleanly — kill the worker
+    // and start over on the next toggle.
+    if (worker) { try { worker.terminate(); } catch {} }
+    worker = null; client = null; loaded = false;
+    S.state = "idle";
+    upd();
   }
 
   window.IntellexorMic = {

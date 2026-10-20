@@ -129,6 +129,7 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .dot-permission { background:#fcd53a; }
 .dot-error { background:var(--diff-del); }
 .dot-unseen { background:var(--accent); }
+.alarm-indicator { flex:0 0 auto; font-size:12px; line-height:1; }
 .empty-sessions { padding:16px 8px; color:var(--text-faint); font-size:13px; }
 
 /* collapsed sidebar (desktop) — the rail toggle restores it */
@@ -801,3 +802,4 @@ body.board-chat-resizing { cursor:col-resize; user-select:none; }
 .mic-dock-sub { font-size:11px; color:var(--text-muted); }
 .mic-partial { font-family:var(--font-mono, ui-monospace, monospace); font-size:12px; color:var(--text-muted); max-height:120px; overflow:auto; white-space:pre-wrap; margin-top:6px; }
 .rec-dot { width:10px; height:10px; border-radius:50%; background:#e5484d; display:inline-block; margin-right:8px; animation:mic-pulse 1.4s infinite; }
+.mic-device { display:inline-block; margin-left:8px; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:600; line-height:1.5; color:#2ea043; background:color-mix(in srgb, #2ea043 15%, transparent); border:1px solid color-mix(in srgb, #2ea043 35%, transparent); }

@@ -64,7 +64,17 @@ func (t AlarmTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		out, _ := json.MarshalIndent(alarms, "", "  ")
+		// augment each alarm with the trigger time in the device timezone
+		// so the agent can report it without converting from unix ms
+		augmented := make([]map[string]any, 0, len(alarms))
+		for _, a := range alarms {
+			b, _ := json.Marshal(a)
+			m := map[string]any{}
+			_ = json.Unmarshal(b, &m)
+			m["triggerAtLocal"] = formatDevice(a.TriggerAt, c.Timezone)
+			augmented = append(augmented, m)
+		}
+		out, _ := json.MarshalIndent(augmented, "", "  ")
 		return Result{
 			Title:    "List alarms",
 			Metadata: map[string]any{"count": len(alarms)},
@@ -98,13 +108,15 @@ func (t AlarmTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		}
 		t.notify()
 		fireIn := time.Duration(a.TriggerAt-util.Now()) * time.Millisecond
+		local := formatDevice(a.TriggerAt, c.Timezone)
 		return Result{
-			Title: "Alarm at " + time.UnixMilli(a.TriggerAt).Format(time.RFC3339),
+			Title: "Alarm at " + local,
 			Metadata: map[string]any{
 				"alarmID":   a.ID,
 				"triggerAt": a.TriggerAt,
+				"timezone":  c.Timezone,
 			},
-			Output: fmt.Sprintf("Wake-up %s scheduled for %s (fires in %s). You will receive a user message \"alarm-triggered\" when it goes off; end your turn now and continue then. Do NOT run \"sleep\" or poll while waiting.", a.ID, time.UnixMilli(a.TriggerAt).Format(time.RFC3339), fireIn.Round(time.Second)),
+			Output: fmt.Sprintf("Wake-up %s scheduled for %s — unix ms %d, fires in %s. When it goes off you will receive a user message \"alarm-triggered\"; end your turn now and continue then. Do NOT run \"sleep\" or poll while waiting. When telling the user about this schedule, quote the time exactly as given above (their device timezone) — never convert it to UTC.", a.ID, local, a.TriggerAt, fireIn.Round(time.Second)),
 		}, nil
 
 	default:
@@ -116,4 +128,31 @@ func (t AlarmTool) notify() {
 	if t.OnUpdate != nil {
 		t.OnUpdate()
 	}
+}
+
+// deviceLoc resolves the session's device timezone (recorded from the web
+// UI's X-Timezone header). Unknown or empty names fall back to the server's
+// local zone — the best approximation when the device zone is not known.
+func deviceLoc(tz string) *time.Location {
+	if tz == "" {
+		return time.Local
+	}
+	if loc, err := time.LoadLocation(tz); err == nil {
+		return loc
+	}
+	return time.Local
+}
+
+// formatDevice renders a timestamp in the device timezone, labelling the
+// zone so the agent can pass it on to the user without falling back to UTC.
+func formatDevice(ms int64, tz string) string {
+	loc := deviceLoc(tz)
+	t := time.UnixMilli(ms).In(loc)
+	label := "device time"
+	if tz != "" && loc != time.Local {
+		label = "device time, " + tz
+	} else if tz == "" {
+		label = "server time (device timezone unknown)"
+	}
+	return t.Format("Monday, 02 Jan 2006 15:04:05 MST") + " (" + label + ")"
 }

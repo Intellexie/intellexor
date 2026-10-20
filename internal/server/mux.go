@@ -111,6 +111,9 @@ func (s *Server) Handler() http.Handler {
 	handle("PATCH /cron/{cronID}", s.patchCron)
 	handle("DELETE /cron/{cronID}", s.deleteCron)
 
+	// alarms (one-shot session wake-ups set via the schedule_wakeup tool)
+	handle("GET /alarm", s.listAlarms)
+
 	// provider / auth / config
 	handle("GET /provider", func(w http.ResponseWriter, r *http.Request) *apiError { providersHandler(s)(w, r); return nil })
 	handle("GET /provider/auth", func(w http.ResponseWriter, r *http.Request) *apiError { providerAuthHandler(s)(w, r); return nil })
@@ -221,7 +224,7 @@ func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
 	switch filepath.Ext(p) {
 	case ".html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	case ".js":
+	case ".js", ".mjs":
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	case ".css":
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -246,16 +249,24 @@ var (
 
 func wasmETag() string {
 	wasmTagOnce.Do(func() {
-		f, err := web.FS().Open("sherpa.wasm")
-		if err != nil {
-			wasmTag = "none"
-			return
-		}
-		defer f.Close()
 		h := sha256.New()
-		if _, err := io.Copy(h, f); err != nil {
-			wasmTag = "none"
-			return
+		// Hash every vendored wasm (the onnxruntime binaries under stt/);
+		// large but done once per process.
+		for _, name := range []string{
+			"stt/ort-wasm-simd-threaded.asyncify.wasm",
+			"stt/ort-wasm-simd-threaded.wasm",
+		} {
+			f, err := web.FS().Open(name)
+			if err != nil {
+				wasmTag = "none"
+				return
+			}
+			if _, err := io.Copy(h, f); err != nil {
+				f.Close()
+				wasmTag = "none"
+				return
+			}
+			f.Close()
 		}
 		wasmTag = hex.EncodeToString(h.Sum(nil))
 	})

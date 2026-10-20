@@ -54,8 +54,14 @@ type Ctx struct {
 	Directory string
 	Worktree  string
 	Agent     string
-	Config    any
-	Depth     int
+	// Timezone is the device timezone of the user's web UI client (IANA
+	// name, recorded on the session from the X-Timezone header). Tools that
+	// report times should format them in this zone; empty means unknown
+	// (e.g. ACP clients), in which case the server's local zone is the
+	// best available approximation.
+	Timezone string
+	Config   any
+	Depth    int
 
 	Ask      func(AskInput) error
 	Meta     func(title string, metadata map[string]any)
