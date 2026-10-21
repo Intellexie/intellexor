@@ -143,7 +143,14 @@ func Serve(srv *server.Server, cwd string, host string, port int) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Intellexor acp listening on %s (cwd %s) — web UI + ACP on the same port\n", ln.Addr(), cwd)
+	return Multiplex(srv, cwd, ln)
+}
 
+// Multiplex serves web UI/API and ACP on the same already-bound listener,
+// like opencode: HTTP requests (browsers) are handled by the web UI / API
+// server, anything else (ACP clients) is treated as an ndjson JSON-RPC
+// stream. It blocks until the listener is closed.
+func Multiplex(srv *server.Server, cwd string, ln net.Listener) error {
 	httpSrv := &http.Server{Handler: srv.Handler()}
 	q := &connQueue{ch: make(chan net.Conn), addr: ln.Addr()}
 	go httpSrv.Serve(q)

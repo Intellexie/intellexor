@@ -113,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 
 	// alarms (one-shot session wake-ups set via the schedule_wakeup tool)
 	handle("GET /alarm", s.listAlarms)
+	handle("POST /alarm", s.createAlarm)
 	handle("GET /alarm/session/{sessionID}", s.sessionAlarms)
 	handle("POST /alarm/{alarmID}/trigger", s.triggerAlarm)
 	handle("DELETE /alarm/{alarmID}", s.deleteAlarm)
@@ -138,6 +139,11 @@ func (s *Server) Handler() http.Handler {
 		return nil
 	})
 	handle("POST /provider/{providerID}/oauth/callback", s.okTrue)
+
+	// workspaces (additional working directories with their own sessions/config)
+	handle("GET /workspace", s.listWorkspaces)
+	handle("POST /workspace", s.createWorkspace)
+	handle("POST /workspace/rename", s.renameWorkspace)
 
 	// misc
 	handle("GET /path", func(w http.ResponseWriter, r *http.Request) *apiError { pathHandler(s)(w, r); return nil })

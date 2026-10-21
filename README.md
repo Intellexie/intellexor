@@ -48,25 +48,34 @@ go build -o bin/intellexor .
 
 Flags: `--host` (default `127.0.0.1`), `--port` (default `4096`, falls back to
 a random free port if busy), `--dir` (working directory, defaults to cwd),
-`--quiet`.
+`--quiet`, and `--headless` / `-h`.
 
-## ACP mode
-
-`Intellexor acp` exposes the agent over ACP — newline-delimited JSON-RPC 2.0.
-With a port, **both protocols share the same socket**: browsers opening the
-port get the web UI (HTTP), ACP clients get an ndjson JSON-RPC stream
-(connections are classified by the first byte).
-
-Methods: `initialize`, `session/new|load|list|prompt|cancel`,
+**One port serves everything**: the web UI, the HTTP API and ACP
+(newline-delimited JSON-RPC 2.0) are multiplexed on the same socket —
+connections are classified by their first byte, so browsers get the UI and
+ACP clients get a JSON-RPC stream. ACP is always on; there is no separate
+mode. Methods: `initialize`, `session/new|load|list|prompt|cancel`,
 `session/update` notifications, and `session/request_permission` callbacks.
 
+## Desktop app
+
+By default Intellexor opens the web UI in a native desktop window (via
+[Wails](https://wails.io)) while the server keeps running as usual — the
+window talks to the same in-process handler, so nothing else changes. Pass
+`--headless` (or `-h`) to skip the window and run as a plain server (the
+behavior of binaries built without desktop support).
+
+Desktop builds need the platform's GUI headers and the `desktop,production`
+build tags (on Ubuntu ≥ 24.04 use WebKit 4.1 via the `webkit2_41` tag):
+
 ```sh
-./bin/intellexor acp                      # stdio (for ACP desktop clients)
-./bin/intellexor acp --port 8080 --cwd /path/to/project   # web UI + ACP on :8080
+# Linux: sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+go build -tags "desktop,production,webkit2_41" -o bin/intellexor .
+./bin/intellexor --dir /path/to/project
 ```
 
-Environment: `ACP_PORT` or `PORT` selects TCP mode, `ACP_HOST` overrides the
-bind address (default `127.0.0.1`).
+Closing the window shuts the server down; if no display is available the
+process logs the GUI error and keeps serving headless.
 
 ## Docker
 
@@ -75,8 +84,9 @@ docker build -t intellexor .
 docker run -p 8080:8080 -v my-project:/workspace -v intellexor-data:/data intellexor
 ```
 
-The container starts `Intellexor acp` on `0.0.0.0:$PORT` (default 8080) — the
-browser UI and ACP clients share that one port. Data lives in `/data`, the
+The container starts the server (headless) on `0.0.0.0:4096` — the browser
+UI, HTTP API and ACP clients share that one port (override with
+`docker run ... intellexor --port 8080`). Data lives in `/data`, the
 working project in `/workspace`. Provider config can be mounted at
 `/data/.config/intellexor/intellexor.json` (or set `XDG_CONFIG_HOME`); `/app/intellexor.json`
 is also read, so `-v "$PWD/intellexor.json:/app/intellexor.json"` just works.
@@ -314,7 +324,7 @@ Five agents ship compiled in:
 ## Layout
 
 ```
-main.go                 entry point (serve + acp)
+main.go                 entry point (server + desktop window)
 internal/acp/        ACP JSON-RPC transport, methods, event mapping
 internal/app/        instance, agents, prompt loop, processor, history
 internal/config/     global/project config loading and merging

@@ -62,6 +62,31 @@ func (s *Server) unsubscribeGlobal(ch chan globalEvent) {
 	close(ch)
 }
 
+// OnEvent subscribes fn to events from every instance (all directories).
+// The desktop bridge uses it to push the event stream into the webview via
+// Wails events — SSE through the webview's scheme handler is not viable.
+// Returns a cancel function; the HTTP/SSE paths are unaffected.
+func (s *Server) OnEvent(fn func(directory string, ev any)) func() {
+	ch := s.subscribeGlobal()
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer s.unsubscribeGlobal(ch)
+		for {
+			select {
+			case ge, ok := <-ch:
+				if !ok {
+					return
+				}
+				fn(ge.Directory, ge.Payload)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
+}
+
 func New(defaultDir string, version string) *Server {
 	abs, _ := filepath.Abs(defaultDir)
 	return &Server{DefaultDir: abs, Version: version, instances: map[string]*app.Instance{}}

@@ -421,6 +421,7 @@ func (s *Server) fileHandler(w http.ResponseWriter, r *http.Request) *apiError {
 	if p == "" {
 		p = in.Directory
 	}
+	dirsOnly := r.URL.Query().Get("dirs") == "1"
 	ents, err := os.ReadDir(p)
 	if err != nil {
 		return notFound("Directory not found: " + p)
@@ -430,6 +431,9 @@ func (s *Server) fileHandler(w http.ResponseWriter, r *http.Request) *apiError {
 		typ := "file"
 		if e.IsDir() {
 			typ = "directory"
+		}
+		if dirsOnly && typ != "directory" {
+			continue
 		}
 		ignored := e.Name() == ".git" || e.Name() == "node_modules"
 		out = append(out, map[string]any{

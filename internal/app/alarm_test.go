@@ -215,6 +215,23 @@ func TestAlarmSweepBroadcastsUpdate(t *testing.T) {
 			}
 		}
 	})
+
+	// fireAlarm prompts in a background goroutine that keeps writing session
+	// files; wait for the wake-up message to land so t.TempDir's cleanup
+	// doesn't race the writer (flaky "directory not empty" otherwise).
+	waitUntil(t, 5*time.Second, func() bool {
+		msgs, err := i.Mgr.LoadMessages(s)
+		if err != nil {
+			return false
+		}
+		for _, m := range msgs {
+			b, _ := json.Marshal(m)
+			if strings.Contains(string(b), "alarm-triggered") {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // Pending lists every unfired alarm of the project across sessions — the

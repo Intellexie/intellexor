@@ -2,9 +2,60 @@
 
 /* ============================== api ============================== */
 
-const DIR = localStorage.getItem("intellexor.dir") || "";
+// The current workspace (working directory). Mutable: switching workspaces
+// re-points it in-place (see switchWorkspace) — no page reload. Everything
+// DIR-scoped (api()'s directory param, wsGet/wsSet keys, SSE URL) reads it
+// at call time, so it follows automatically.
+let DIR = localStorage.getItem("intellexor.dir") || "";
+
+// Per-workspace localStorage: tabs, model/agent picks etc. are scoped to the
+// current workspace so switching workspaces swaps the whole UI state with it.
+// The first read of a key migrates the legacy (global) value, so existing
+// users keep their tabs and preferences.
+function wsKey(key) { return "intellexor." + key + "." + (DIR || "default"); }
+function wsGet(key) {
+  const k = wsKey(key);
+  let v = localStorage.getItem(k);
+  if (v === null) {
+    v = localStorage.getItem("intellexor." + key);
+    if (v !== null) { try { localStorage.setItem(k, v); } catch {} }
+  }
+  return v;
+}
+function wsSet(key, val) { try { localStorage.setItem(wsKey(key), val); } catch {} }
+
+// Desktop mode (Wails webview): HTTP through the webview scheme handler is
+// not viable, so API calls go through the bound Go bridge
+// (window.go.main.Api — the same http.Handler the HTTP server uses,
+// in-process) and events arrive over the Wails events runtime (see
+// initDesktopEvents). Web mode keeps fetch + EventSource; the HTTP server
+// itself is unchanged and still serves external clients.
+const DESKTOP = !!(window.go && window.go.main && window.go.main.Api);
 
 async function api(method, path, body) {
+  if (DESKTOP) {
+    let tz = "";
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch {}
+    let p = path;
+    if (DIR && !/[?&]directory=/.test(path)) {
+      p += (path.includes("?") ? "&" : "?") + "directory=" + encodeURIComponent(DIR);
+    }
+    const r = await window.go.main.Api.Call(method, p, body === undefined ? "" : JSON.stringify(body), tz);
+    if (r.status === 204) return null;
+    const text = r.body || "";
+    if (!text) {
+      if (r.status >= 400) throw new Error("HTTP " + r.status);
+      return null;
+    }
+    let v;
+    try { v = JSON.parse(text); } catch { v = text; }
+    if (r.status >= 400) {
+      const e = new Error((v && v.data && v.data.message) || "error");
+      e.payload = v;
+      throw e;
+    }
+    return v;
+  }
   const url = new URL(path, location.origin);
   if (DIR) url.searchParams.set("directory", DIR);
   const opts = { method, headers: {} };
@@ -53,9 +104,10 @@ const S = {
   todos: {},
   children: {},
   busy: new Set(),
-  model: JSON.parse(localStorage.getItem("intellexor.model") || "null"), // {providerID, modelID}
-  agent: localStorage.getItem("intellexor.agent") || "build",
+  model: JSON.parse(wsGet("model") || "null"), // {providerID, modelID}
+  agent: wsGet("agent") || "build",
   scheme: localStorage.getItem("intellexor.scheme") || "system",
+  bg: localStorage.getItem("intellexor.bg") !== "0", // animated background on/off (global pref)
   unseen: new Set(),
   errored: new Set(),
   scrollStick: true,
@@ -75,6 +127,15 @@ function applyScheme() {
   let s = S.scheme;
   if (s === "system") s = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   document.documentElement.dataset.colorScheme = s;
+}
+
+// Applies the animated-background preference: hides the whole #bg layer
+// (canvas, grid, vignette) via body.bg-off and stops/starts the canvas
+// painter. bg.js also reads the same localStorage key on load so the
+// background never flashes on before app.js boots.
+function applyBackground() {
+  document.body.classList.toggle("bg-off", !S.bg);
+  if (window.IntellexorBG) IntellexorBG.setActive(S.bg);
 }
 
 /* ============================== utils ============================== */
@@ -164,6 +225,7 @@ const ICONS = {
   warn: svg('<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4M12 17h.01"/>'),
   spinner: '<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>',
   file: svg('<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v5h5"/>', 12),
+  folder: svg('<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>', 14),
   console: svg('<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>', 12),
   branch: svg('<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>', 12),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 12),
@@ -297,10 +359,26 @@ const md = new marked.Marked({
   },
 });
 
+// Rendered markdown is memoized by source: full timeline rebuilds re-render
+// every part, but during a run only one or two parts actually change — the
+// rest become cache hits instead of marked.parse + DOMPurify round-trips.
+const mdCache = new Map();
+const MD_CACHE_MAX = 400;
+
 function renderMarkdown(src) {
   if (!src) return "";
   if (!window.marked || !window.DOMPurify) return esc(src); // assets missing — plain text
-  return DOMPurify.sanitize(md.parse(src), { ADD_ATTR: ["target"] });
+  let html = mdCache.get(src);
+  if (html !== undefined) {
+    // refresh recency so the LRU keeps the parts actually on screen
+    mdCache.delete(src);
+    mdCache.set(src, html);
+    return html;
+  }
+  html = DOMPurify.sanitize(md.parse(src), { ADD_ATTR: ["target"] });
+  if (mdCache.size >= MD_CACHE_MAX) mdCache.delete(mdCache.keys().next().value);
+  mdCache.set(src, html);
+  return html;
 }
 
 // Copy buttons are injected by the code renderer; DOMPurify strips inline
@@ -329,6 +407,12 @@ function renderDiff(patch) {
 /* ============================== event source ============================== */
 
 function connectSSE() {
+  if (DESKTOP) {
+    // events come over the Wails bridge (initDesktopEvents); fire the same
+    // initial event the SSE endpoint sends so statuses refresh on boot
+    handleEvent({ type: "server.connected", properties: {} });
+    return;
+  }
   if (S.es) S.es.close();
   const q = DIR ? "?directory=" + encodeURIComponent(DIR) : "";
   const es = new EventSource("/event" + q);
@@ -499,8 +583,22 @@ function handleEvent(ev) {
         S.streaming.delete(part.id);
       }
       trimWindow(store); // a new part can push the window over the cap
-      if (p.sessionID === S.current) renderTimeline();
-      if (p.sessionID === boardChatSessionId()) renderBoardChat();
+      if (p.sessionID === S.current) {
+        if (!patchPartIn($("#timeline-inner"), part, store.info[part.messageID])) {
+          renderTimeline();
+        } else {
+          const tl = $("#timeline");
+          if (tl && S.scrollStick) tl.scrollTop = tl.scrollHeight;
+        }
+      }
+      if (p.sessionID === boardChatSessionId()) {
+        if (!patchPartIn($("#board-chat-timeline-inner"), part, store.info[part.messageID])) {
+          renderBoardChat();
+        } else {
+          const tl = $("#board-chat-timeline");
+          if (tl && boardChatNearBottom(tl)) tl.scrollTop = tl.scrollHeight;
+        }
+      }
       break;
     }
     case "message.part.delta": {
@@ -631,14 +729,50 @@ function msgStore(sid) {
   return S.msgs.get(sid);
 }
 
-let deltaRender = 0;
+// Deltas arrive faster than anyone can read; re-parsing the full part text
+// per frame is wasted work (and for long messages, megabytes of markdown per
+// second). Throttle to a fixed cadence instead of every animation frame.
+const DELTA_RENDER_MS = 120;
+let deltaTimer = 0;
+let deltaLast = 0;
 function scheduleDeltaRender() {
-  if (deltaRender) return;
-  deltaRender = requestAnimationFrame(() => {
-    deltaRender = 0;
+  if (deltaTimer) return;
+  deltaTimer = setTimeout(() => {
+    deltaTimer = 0;
+    deltaLast = Date.now();
     renderStreamingText();
     renderBoardChatStreaming();
-  });
+  }, Math.max(0, deltaLast + DELTA_RENDER_MS - Date.now()));
+}
+
+// Re-render a single part's node in place instead of rebuilding the whole
+// timeline (message.part.updated fires for every tool state change during a
+// run). Returns false when the node is missing or the part type has no
+// patchable node — callers then fall back to a full render (cheap now that
+// renderMarkdown is memoized). Only text and reasoning nodes carry
+// data-part; tool rows always take the fallback.
+function patchPartIn(container, part, info) {
+  if (!container || !info) return false;
+  const node = container.querySelector(`[data-part="${cssId(part.id)}"]`);
+  if (!node) return false;
+  if (part.type === "text") {
+    if (part.synthetic || part.ignored || !(part.text || "").trim()) return false;
+    const fresh = renderPart(part, info);
+    if (!fresh) return false;
+    node.replaceWith(fresh);
+    return true;
+  }
+  if (part.type === "reasoning") {
+    // data-part lives on the inner .assistant-text; swap the whole .reasoning
+    // wrapper so the header count, dots and collapse state stay consistent
+    const outer = node.closest(".reasoning");
+    if (!outer) return false;
+    const fresh = renderPart(part, info);
+    if (!fresh || !fresh.classList.contains("reasoning")) return false;
+    outer.replaceWith(fresh);
+    return true;
+  }
+  return false;
 }
 
 // Update only the parts with live deltas; falls back to a full timeline
@@ -686,7 +820,8 @@ function sortSessions() {
 
 /* ---------- session tabs ---------- */
 
-const TABS_KEY = "intellexor.tabs";
+// Tabs are stored per workspace (see wsGet/wsSet) so each workspace restores
+// its own open sessions.
 
 // A pending tab is a client-side placeholder for a session that does not
 // exist on the server yet: "+" (and the new-session buttons) open one titled
@@ -709,7 +844,7 @@ function nextPendingId() {
 }
 
 function loadTabs() {
-  try { S.tabs = JSON.parse(localStorage.getItem(TABS_KEY) || "[]"); } catch { S.tabs = []; }
+  try { S.tabs = JSON.parse(wsGet("tabs") || "[]"); } catch { S.tabs = []; }
   if (!Array.isArray(S.tabs)) S.tabs = [];
   // drop tabs whose sessions no longer exist (deleted/archived) or are
   // subagents; pending (not-yet-created) tabs always survive
@@ -717,7 +852,7 @@ function loadTabs() {
 }
 
 function saveTabs() {
-  try { localStorage.setItem(TABS_KEY, JSON.stringify(S.tabs)); } catch {}
+  wsSet("tabs", JSON.stringify(S.tabs));
 }
 
 function openTab(sid) {
@@ -851,6 +986,130 @@ function buildTabBar() {
   return bar;
 }
 
+/* ---------- workspace tabs (the layer above the session tabs) ---------- */
+
+// Which workspace tabs are open, in order. Persisted per browser; the
+// current workspace is always in the list (closing the last tab is a no-op,
+// like a browser never closing its final tab). Switching workspaces reloads
+// the page (see switchWorkspace), so the list is the only state to carry.
+function wsOpenList() {
+  try {
+    const v = JSON.parse(localStorage.getItem("intellexor.wsTabs") || "null");
+    if (Array.isArray(v)) {
+      const open = v.filter((d) => d && typeof d === "string");
+      if (!open.includes(currentDir())) open.unshift(currentDir());
+      return open;
+    }
+  } catch {}
+  return [currentDir()];
+}
+
+function wsSaveOpen(open) {
+  try { localStorage.setItem("intellexor.wsTabs", JSON.stringify(open)); } catch {}
+}
+
+// Display name for a workspace: the user-assigned name (server-persisted)
+// when set, else the directory base name.
+function workspaceDisplay(dir) {
+  const ws = S.workspaces.find((w) => w.directory === dir);
+  if (ws && ws.name) return ws.name;
+  return dir.split("/").filter(Boolean).pop() || dir || "Workspace";
+}
+
+function buildWorkspaceBar() {
+  const bar = el("div", "ws-tab-bar");
+  bar.id = "ws-tab-bar";
+  return bar;
+}
+
+function renderWorkspaceTabs() {
+  const bar = $("#ws-tab-bar");
+  if (!bar) return;
+  bar.innerHTML = "";
+  const open = wsOpenList();
+  for (const dir of open) {
+    const tab = el("div", "tab ws-tab" + (dir === currentDir() ? " active" : ""));
+    tab.appendChild(el("span", "tab-icon", ICONS.folder));
+    tab.appendChild(el("span", "tab-title", esc(workspaceDisplay(dir))));
+    const ws = S.workspaces.find((w) => w.directory === dir);
+    if (ws && workspaceUnseen(ws)) {
+      const dot = el("span", "dot dot-unseen");
+      dot.title = "Finished session since you were last here";
+      tab.appendChild(dot);
+    }
+    const close = el("button", "tab-close", ICONS.close);
+    close.title = "Close workspace tab";
+    close.onclick = (e) => { e.stopPropagation(); closeWorkspaceTab(dir); };
+    tab.appendChild(close);
+    tab.title = workspaceDisplay(dir) + " (" + dir + ") — click to switch, right-click to rename or close";
+    tab.onclick = () => switchWorkspace(dir);
+    tab.oncontextmenu = (e) => {
+      e.preventDefault();
+      openContextMenu(e.clientX, e.clientY, [
+        { label: "Rename", icon: ICONS.edit, action: () => openWorkspaceRenamePopover(e.clientX, e.clientY, dir) },
+        { label: "Close", icon: ICONS.close, action: () => closeWorkspaceTab(dir) },
+      ]);
+    };
+    bar.appendChild(tab);
+  }
+  const plus = el("button", "tab-new", ICONS.plus);
+  plus.title = "Open workspace";
+  plus.onclick = () => openWorkspacePicker();
+  bar.appendChild(plus);
+}
+
+function closeWorkspaceTab(dir) {
+  const open = wsOpenList();
+  if (open.length <= 1) return; // never close the last tab
+  const idx = open.indexOf(dir);
+  if (idx >= 0) open.splice(idx, 1);
+  wsSaveOpen(open);
+  if (dir === currentDir()) {
+    const next = open[Math.min(idx, open.length - 1)];
+    if (next) switchWorkspace(next);
+    return; // switchWorkspace reloads the page
+  }
+  renderWorkspaceTabs();
+}
+
+// Rename a workspace (same interaction as renaming a session tab: a small
+// input popover at the cursor). The name is persisted server-side and shown
+// everywhere the workspace appears.
+function openWorkspaceRenamePopover(x, y, dir) {
+  closePopovers();
+  const pop = el("div", "popover rename-pop");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = workspaceDisplay(dir);
+  input.placeholder = "Workspace name";
+  input.maxLength = 200;
+  pop.appendChild(input);
+  document.body.appendChild(pop);
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - pw - 8, x)) + "px";
+  pop.style.top = Math.max(8, Math.min(window.innerHeight - ph - 8, y)) + "px";
+  popoverEl = pop;
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    closePopovers();
+    if (!save) return;
+    const v = input.value.trim();
+    if (!v || v === workspaceDisplay(dir)) return;
+    post("/workspace/rename", { directory: dir, name: v })
+      .then(() => loadWorkspaces())
+      .catch((err) => toast("Rename failed: " + (err && err.message ? err.message : err), true));
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") finish(true);
+    else if (e.key === "Escape") finish(false);
+  };
+  input.onblur = () => finish(true);
+  input.focus();
+  input.select();
+}
+
 function renderTabs() {
   const bar = $("#tab-bar");
   if (!bar) return;
@@ -862,13 +1121,6 @@ function renderTabs() {
   boardTab.appendChild(el("span", "tab-title", "Board"));
   boardTab.onclick = () => navigate("/board");
   bar.appendChild(boardTab);
-  // cron jobs: fixed second tab — scheduled prompts that start fresh sessions
-  const cronTab = el("div", "tab" + (S.view === "cron" ? " active" : ""));
-  cronTab.title = "Cron jobs";
-  cronTab.appendChild(el("span", "tab-icon", ICONS.clock));
-  cronTab.appendChild(el("span", "tab-title", "Cron jobs"));
-  cronTab.onclick = () => navigate("/cron");
-  bar.appendChild(cronTab);
   for (const sid of S.tabs) {
     const s = S.sessions.find((x) => x.id === sid);
     if (!s && !isPendingTab(sid)) continue;
@@ -919,6 +1171,281 @@ function renderTabs() {
   plus.title = "New session";
   plus.onclick = () => newSessionTab();
   bar.appendChild(plus);
+  // cron jobs: fixed tab, pushed to the right edge of the bar (scheduled
+  // prompts that start fresh sessions)
+  const cronTab = el("div", "tab tab-right" + (S.view === "cron" ? " active" : ""));
+  cronTab.title = "Cron jobs";
+  cronTab.appendChild(el("span", "tab-icon", ICONS.clock));
+  cronTab.appendChild(el("span", "tab-title", "Cron jobs"));
+  cronTab.onclick = () => navigate("/cron");
+  bar.appendChild(cronTab);
+  renderWorkspaceTabs();
+}
+
+/* ---------- workspaces ---------- */
+
+// A workspace is a working directory with its own sessions, config and UI
+// state. The server keeps one app.Instance per directory; the current one is
+// DIR, fixed for the page's lifetime — switching workspaces reloads the app
+// (see switchWorkspace) so every DIR-scoped piece of state follows along.
+S.workspaces = [];
+
+// Last time (unix ms) each workspace was open in this browser. Drives the
+// finished-session dot: a workspace gets the dot when something happened in
+// it since the user last had it open and nothing is running there anymore.
+const wsVisited = (() => {
+  try { return JSON.parse(localStorage.getItem("intellexor.wsVisited") || "{}"); }
+  catch { return {}; }
+})();
+
+function markWorkspaceVisited(dir) {
+  if (!dir) return;
+  wsVisited[dir] = Date.now();
+  try { localStorage.setItem("intellexor.wsVisited", JSON.stringify(wsVisited)); } catch {}
+}
+
+function currentDir() { return S.dir || DIR; }
+
+function workspaceUnseen(ws) {
+  return ws.directory !== currentDir() && !ws.busy && ws.lastActivity > (wsVisited[ws.directory] || 0);
+}
+
+// Extra workspace icons under the current-workspace badge in the rail. The
+// current workspace is #rail-project itself, so it is skipped here.
+function renderRailWorkspaces() {
+  const box = $("#rail-workspaces");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const ws of S.workspaces) {
+    if (ws.directory === currentDir()) continue;
+    const b = el("button", "rail-project ws-btn");
+    const name = (ws.name || ws.directory).split("/").filter(Boolean).pop() || "?";
+    b.title = ws.directory + (workspaceUnseen(ws) ? " — finished session" : "");
+    b.appendChild(el("span", "rail-avatar", name[0].toUpperCase()));
+    if (workspaceUnseen(ws)) b.appendChild(el("span", "ws-dot"));
+    b.onclick = () => switchWorkspace(ws.directory);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      openContextMenu(e.clientX, e.clientY, [
+        { label: "Rename", icon: ICONS.edit, action: () => openWorkspaceRenamePopover(e.clientX, e.clientY, ws.directory) },
+      ]);
+    };
+    box.appendChild(b);
+  }
+}
+
+async function loadWorkspaces() {
+  try { S.workspaces = await get("/workspace") || []; } catch { return; }
+  renderRailWorkspaces();
+  renderWorkspaceTabs();
+  refreshWorkspaceChrome();
+}
+
+// Keep the workspace chrome (sidebar title, rail badge, tab progress) in
+// sync with a user-assigned workspace name — it loads async after boot.
+function refreshWorkspaceChrome() {
+  const name = workspaceDisplay(currentDir());
+  const st = $("#sidebar-title");
+  if (st) st.textContent = name;
+  const rp = $("#rail-project");
+  if (rp) rp.title = name;
+  const av = $("#rail-avatar");
+  if (av) av.textContent = name[0].toUpperCase();
+  TabProgress.setTitle("Intellexor — " + name);
+}
+
+let wsRefreshTimer = null;
+function scheduleWorkspaceRefresh() {
+  if (wsRefreshTimer) return;
+  wsRefreshTimer = setTimeout(() => { wsRefreshTimer = null; loadWorkspaces(); }, 500);
+}
+
+// Desktop only: one Wails events channel ("server-event", emitted by the
+// Go bridge for every instance event) feeds both the session event handler
+// and the cross-workspace refresh — the web mode uses the /event and
+// /global/event SSE endpoints for the same.
+function initDesktopEvents() {
+  if (!DESKTOP || !window.runtime || !window.runtime.EventsOn) return;
+  window.runtime.EventsOn("server-event", (m) => {
+    if (!m || typeof m !== "object") return;
+    const t = m.payload && m.payload.type;
+    if (m.directory && m.directory !== currentDir() &&
+        (t === "session.status" || t === "session.idle" || t === "session.created" || t === "session.deleted")) {
+      scheduleWorkspaceRefresh();
+    }
+    // currentDir() is empty until /global/path loads — accept everything
+    // during boot, then filter exactly (matches the /event SSE scope)
+    if (!m.directory || !currentDir() || m.directory === currentDir()) handleEvent(m.payload);
+  });
+}
+
+// Switch workspaces in place — no page reload, so it feels like a tab
+// switch: re-point DIR, wipe every DIR-scoped piece of state, re-fetch the
+// workspace's data (the boot sequence subset) and re-route. The open-tabs
+// list and localStorage carry across; the hash is dropped since session ids
+// don't transfer between workspaces.
+async function switchWorkspace(dir) {
+  if (!dir || dir === currentDir()) return;
+  markWorkspaceVisited(currentDir());
+  rememberLastSession(S.current); // record under the OLD workspace's scope
+  try { localStorage.setItem("intellexor.dir", dir); } catch {}
+  const open = wsOpenList();
+  if (!open.includes(dir)) { open.push(dir); wsSaveOpen(open); }
+  DIR = dir;
+
+  // wipe state that belongs to the old workspace
+  S.dir = "";
+  S.sessions = [];
+  S.msgs = new Map();
+  S.statuses = {};
+  S.alarms = {};
+  S.errored = new Set();
+  S.unseen = new Set();
+  S.permissions = [];
+  S.questions = [];
+  S.subagents = new Map();
+  S.streaming.clear();
+  S.current = null;
+  S.view = "sessions";
+  // model/agent picks are persisted per workspace — re-read from the new
+  // scope (refreshProviders fills the model if this workspace has none)
+  S.model = JSON.parse(wsGet("model") || "null");
+  S.agent = wsGet("agent") || "build";
+  boardCards = [];
+  cronJobs = [];
+  if (S.es) { S.es.close(); S.es = null; } // web-mode SSE is per-directory
+  loadTabs(); // the new workspace's own tab list
+
+  // drop the old workspace's hash (session ids don't transfer) without
+  // triggering a route; the search part is untouched
+  history.replaceState(null, "", location.pathname + location.search);
+
+  // re-fetch the new workspace's data (boot-sequence subset)
+  const pathInfo = await get("/path").catch(() => ({}));
+  S.dir = pathInfo.directory || "";
+  try { S.vcs = await get("/vcs"); } catch {}
+  try {
+    S.sessions = (await get("/session") || []).filter((s) => !s.parentID);
+    sortSessions();
+  } catch (e) {
+    toast(e.message, true);
+  }
+  loadTabs(); // filter again now that sessions exist
+  loadAlarms().catch(() => {});
+  try { S.statuses = await get("/session/status") || {}; } catch {}
+  try { S.permissions = await get("/permission") || []; } catch {}
+  try { S.questions = await get("/question") || []; } catch {}
+  await refreshProviders();
+  loadCommands();
+  loadCron().catch(() => {});
+  if (S.boardPanelOpen) loadBoard().catch(() => {});
+
+  // restore this workspace's last open chat (no hashchange event — route()
+  // below picks it up; openTab inside route re-opens its tab)
+  const restore = restorableSession();
+  if (restore) {
+    history.replaceState(null, "", location.pathname + location.search + "#/" + restore.id);
+  }
+
+  // chrome + indicators follow the new workspace
+  refreshWorkspaceChrome();
+  markWorkspaceVisited(S.dir || DIR);
+  loadWorkspaces(); // refresh unseen dots (the old ws was just visited)
+  renderWorkspaceTabs();
+  connectSSE(); // reconnect the per-directory stream (web mode)
+
+  await route(); // renders sidebar + main from the fresh state
+}
+
+// Aggregated event stream across all workspaces: keeps the finished-session
+// dots on the workspace icons live while the user is in another workspace.
+function connectGlobalSSE() {
+  if (DESKTOP) return; // the bridge's single "server-event" channel covers it
+  const es = new EventSource("/global/event");
+  es.onmessage = (e) => {
+    let m;
+    try { m = JSON.parse(e.data); } catch { return; }
+    const t = m.payload && m.payload.type;
+    if (m.directory && m.directory !== currentDir() &&
+        (t === "session.status" || t === "session.idle" || t === "session.created" || t === "session.deleted")) {
+      scheduleWorkspaceRefresh();
+    }
+  };
+}
+
+/* ---------- workspace picker ---------- */
+
+// The rail "+" opens a directory browser (directories only); picking one
+// registers it as a new workspace — own sessions, own config file with the
+// usual global/parent fallbacks — and switches to it.
+function openWorkspacePicker() {
+  openModal("New workspace", (modal, ov) => {
+    const bar = el("div", "dir-bar");
+    const pathInput = el("input");
+    pathInput.type = "text";
+    pathInput.spellcheck = false;
+    pathInput.placeholder = "/absolute/path/to/workspace";
+    bar.appendChild(pathInput);
+    const goBtn = el("button", "c-btn", "Go");
+    goBtn.onclick = () => load(pathInput.value.trim());
+    bar.appendChild(goBtn);
+    modal.appendChild(bar);
+
+    const list = el("div", "dir-list");
+    modal.appendChild(list);
+    const status = el("div", "dir-status");
+    modal.appendChild(status);
+
+    const actions = el("div", "m-actions");
+    const cancel = el("button", "c-btn", "Cancel");
+    cancel.onclick = () => ov.remove();
+    const create = el("button", "btn primary", "Create workspace");
+    create.onclick = async () => {
+      create.disabled = true;
+      try {
+        const ws = await post("/workspace", { path: pathInput.value.trim() });
+        ov.remove();
+        switchWorkspace(ws.directory);
+      } catch (e) {
+        toast(e.message || String(e), true);
+        create.disabled = false;
+      }
+    };
+    actions.appendChild(cancel);
+    actions.appendChild(create);
+    modal.appendChild(actions);
+
+    async function load(path) {
+      if (!path) return;
+      list.innerHTML = "";
+      status.textContent = "Loading…";
+      try {
+        const ents = await api("GET", "/file?dirs=1&path=" + encodeURIComponent(path));
+        pathInput.value = path;
+        status.textContent = "";
+        const parent = path.replace(/\/+$/, "").replace(/\/[^/]*$/, "") || "/";
+        const up = el("div", "dir-row dir-up", "…");
+        up.title = "Parent directory";
+        up.onclick = () => load(parent);
+        list.appendChild(up);
+        const dirs = (ents || [])
+          .filter((d) => d.type === "directory")
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (!dirs.length) list.appendChild(el("div", "dir-empty", "No subdirectories"));
+        for (const d of dirs) {
+          const row = el("div", "dir-row");
+          row.appendChild(el("span", "dir-icon", ICONS.folder));
+          row.appendChild(el("span", "dir-name", esc(d.name)));
+          row.onclick = () => load(d.absolute || d.path);
+          list.appendChild(row);
+        }
+      } catch (e) {
+        status.textContent = e.message || String(e);
+      }
+    }
+    pathInput.onkeydown = (e) => { if (e.key === "Enter") load(pathInput.value.trim()); };
+    get("/path").then((p) => load(p.home || "/")).catch(() => load("/"));
+  });
 }
 
 /* ---------- sidebar collapse ---------- */
@@ -1257,6 +1784,98 @@ async function openAlarmsModal(sid) {
   await reload();
 }
 
+// The "Add scheduled message" dialog (session header): arms a wake-up for
+// the session — the same kind the agent sets itself via schedule_wakeup.
+// At the chosen time the session receives a user message ("alarm-triggered"
+// plus the note), so the agent continues on its own. Mirrors the kanban
+// schedule dialog: presets fill the picker, the picker stays the source of
+// truth, and a live preview shows the exact firing time.
+function openScheduleMessageModal(sid) {
+  openModal("Add scheduled message", (modal, ov) => {
+    modal.appendChild(el("p", "m-sub", "The session receives this message at the chosen time and the agent continues by itself — same as a wake-up the agent schedules with its schedule_wakeup tool."));
+
+    const msgField = el("div", "m-field");
+    msgField.appendChild(el("label", "m-label", "Message (optional context)"));
+    const note = el("textarea", "m-textarea");
+    note.rows = 3;
+    note.placeholder = "e.g. Check the build output and fix any errors";
+    msgField.appendChild(note);
+    modal.appendChild(msgField);
+
+    const whenField = el("div", "m-field");
+    whenField.appendChild(el("label", "m-label", "When"));
+    const input = el("input");
+    input.type = "datetime-local";
+    input.step = 60;
+    input.min = toLocalInputValue(new Date());
+    input.value = toLocalInputValue(new Date(Date.now() + 15 * 60000)); // sensible default: ~15 min out
+    whenField.appendChild(input);
+    modal.appendChild(whenField);
+
+    // quick offsets set the picker; the picker stays the source of truth so
+    // a preset can still be fine-tuned by hand before saving
+    const presets = el("div", "schedule-presets");
+    for (const [label, ms] of [["In 5 min", 5 * 60000], ["In 15 min", 15 * 60000], ["In 30 min", 30 * 60000], ["In 1 hour", 36e5], ["Tomorrow 9:00", "tomorrow9"]]) {
+      const b = el("button", "kanban-card-btn", "<span>" + label + "</span>");
+      b.type = "button";
+      b.onclick = () => {
+        if (ms === "tomorrow9") {
+          const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
+          input.value = toLocalInputValue(d);
+        } else {
+          input.value = toLocalInputValue(new Date(Date.now() + ms));
+        }
+        updatePreview();
+      };
+      presets.appendChild(b);
+    }
+    modal.appendChild(presets);
+
+    const preview = el("div", "schedule-preview");
+    const updatePreview = () => {
+      const ts = input.value ? new Date(input.value).getTime() : 0;
+      preview.textContent = ts
+        ? `The session receives this message ${relTime(ts)} — ${new Date(ts).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+        : "Pick a date and time";
+    };
+    input.oninput = updatePreview;
+    updatePreview();
+
+    const actions = el("div", "m-actions");
+    const spacer = el("span");
+    spacer.style.flex = "1";
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    actions.append(spacer, cancel);
+
+    const save = el("button", "btn primary", "Schedule");
+    save.onclick = async () => {
+      const ts = input.value ? Math.floor(new Date(input.value).getTime() / 1000) : 0;
+      if (!ts) { input.focus(); return; }
+      if (ts <= Math.floor(Date.now() / 1000)) {
+        toast("Pick a time in the future", true);
+        input.focus();
+        return;
+      }
+      save.disabled = true;
+      try {
+        await post("/alarm", { sessionID: sid, triggerAt: ts, note: note.value.trim() });
+        ov.remove();
+        loadAlarms().catch(() => {}); // refresh the ⏰ indicators
+        const when = new Date(ts * 1000).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+        toast("Scheduled — the session receives the message " + relTime(ts * 1000) + " (" + when + ")");
+      } catch (err) {
+        save.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    note.onkeydown = input.onkeydown = (e) => { if (e.key === "Enter" && e.target === input) { e.preventDefault(); save.click(); } };
+    actions.appendChild(save);
+    modal.appendChild(actions);
+    note.focus();
+  });
+}
+
 function renderSidebar() {
   const list = $("#session-list");
   list.innerHTML = "";
@@ -1265,8 +1884,10 @@ function renderSidebar() {
   // create failed) are rendered alongside them so both views always show
   // the same set of sessions.
   const items = [];
+  const archivedItems = [];
   for (const s of S.sessions) {
     if (s.parentID) continue;
+    if (s.time && s.time.archived) { archivedItems.push({ id: s.id, title: s.title, updated: s.time.updated, sess: s }); continue; }
     items.push({ id: s.id, title: s.title, updated: s.time.updated, sess: s });
   }
   for (const id of S.tabs) {
@@ -1274,9 +1895,13 @@ function renderSidebar() {
     items.push({ id, title: "New session", updated: Date.now(), pending: true });
   }
   items.sort((a, b) => b.updated - a.updated);
-  if (!items.length) {
+  archivedItems.sort((a, b) => b.updated - a.updated);
+  if (!items.length && !archivedItems.length) {
     list.appendChild(el("div", "empty-sessions", "Nothing here yet<br>Create a session to get started"));
     return;
+  }
+  if (!items.length) {
+    list.appendChild(el("div", "session-group", "No active chats"));
   }
   let lastGroup = "";
   for (const it of items) {
@@ -1299,6 +1924,8 @@ function renderSidebar() {
       e.preventDefault();
       openContextMenu(e.clientX, e.clientY, [
         { label: "Rename", icon: ICONS.edit, action: () => openRenamePopover(e.clientX, e.clientY, s) },
+        { label: "Archive", icon: ICONS.archive, action: () => archiveSession(s) },
+        { label: "Delete…", icon: ICONS.trash, action: () => deleteSessionConfirm(s) },
       ]);
     };
     if (S.statuses[s.id] && S.statuses[s.id].type !== "idle") {
@@ -1321,19 +1948,102 @@ function renderSidebar() {
     }
     const arch = el("button", "archive", ICONS.archive);
     arch.title = "Archive";
-    arch.onclick = (e) => {
-      e.stopPropagation();
-      del("/session/" + s.id).then(() => toast("Session archived"));
-    };
+    arch.onclick = (e) => { e.stopPropagation(); archiveSession(s); };
     row.appendChild(arch);
     list.appendChild(row);
   }
+  if (archivedItems.length) renderArchivedSection(list, archivedItems);
   renderTabs();
 }
 
+// Archive is reversible: the session is flagged (time.archived) and hidden
+// from the list, but nothing is removed — restore it from the Archived
+// section. The session.updated broadcast re-renders the sidebar.
+async function archiveSession(s) {
+  try {
+    await patch("/session/" + s.id, { time: { archived: Date.now() } });
+    toast("Chat archived — find it under Archived");
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
+}
+
+// Delete is permanent: the session directory is removed server-side. Asks
+// for confirmation, since unlike archive there is no way back.
+async function deleteSessionConfirm(s) {
+  const ok = await confirmModal(
+    "Delete chat",
+    `Delete "${esc(s.title || "New session")}" permanently? The conversation and its messages are removed for good. This cannot be undone.`,
+    "Delete"
+  );
+  if (!ok) return;
+  try {
+    await del("/session/" + s.id);
+    toast("Chat deleted");
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
+}
+
+// Collapsed "Archived" section at the bottom of the sidebar: every archived
+// chat with Restore (unarchive) and Delete (permanent) actions.
+let archivedOpen = false;
+
+function renderArchivedSection(list, archivedItems) {
+  const head = el("button", "archived-head");
+  head.innerHTML = `${ICONS.chev}<span>Archived (${archivedItems.length})</span>`;
+  head.classList.toggle("open", archivedOpen);
+  head.onclick = () => { archivedOpen = !archivedOpen; renderSidebar(); };
+  list.appendChild(head);
+
+  const wrap = el("div", "archived-list");
+  if (!archivedOpen) wrap.style.display = "none";
+  for (const it of archivedItems) {
+    const row = el("div", "session-row archived-row" + (it.id === S.current ? " active" : ""));
+    row.title = "Archived " + new Date(it.sess.time.archived).toLocaleString();
+    row.onclick = () => navigate("/" + it.id);
+    row.appendChild(el("span", "title", esc(it.title || "New session")));
+    const restore = el("button", "archive", ICONS.archive);
+    restore.title = "Restore";
+    restore.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await patch("/session/" + it.id, { time: { archived: 0 } });
+        toast("Chat restored");
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    };
+    const rm = el("button", "archive", ICONS.trash);
+    rm.title = "Delete permanently";
+    rm.onclick = (e) => { e.stopPropagation(); deleteSessionConfirm(it.sess); };
+    row.append(restore, rm);
+    wrap.appendChild(row);
+  }
+  list.appendChild(wrap);
+}
+
 function navigate(path) {
-  if (isNarrow() && S.sidebarOpen) setSidebar(false); // dismiss the drawer after picking a session
+  if (isNarrow() && S.sidebarOpen) setSidebar(false);
+  rememberLastSession(path.replace(/^\//, ""));
   location.hash = path === "" ? "" : "#" + path;
+}
+
+// Remember the last open chat per workspace (wsGet/wsSet are DIR-scoped) so
+// switching back to a workspace — or reloading the page — restores it. Only
+// real sessions count: the landing, board and cron views never overwrite it.
+function rememberLastSession(id) {
+  if (id && !isPendingTab(id) && id !== "board" && id !== "cron") {
+    wsSet("lastSession", id);
+  }
+}
+
+// The workspace's last open chat, if it still exists (deleted, archived and
+// subagent sessions are not restored).
+function restorableSession() {
+  const last = wsGet("lastSession");
+  if (!last || isPendingTab(last)) return null;
+  return S.sessions.find((s) => s.id === last && !s.parentID && !(s.time && s.time.archived)) || null;
 }
 
 // Only the last MESSAGE_WINDOW display units are fetched and rendered. The
@@ -1421,6 +2131,7 @@ function renderMain() {
   let selS = 0, selE = 0;
   if (oldTa) { try { selS = oldTa.selectionStart; selE = oldTa.selectionEnd; } catch {} }
   main.innerHTML = "";
+  main.appendChild(buildWorkspaceBar());
   main.appendChild(buildTabBar());
   renderTabs();
   // the animated background is global: bg.js applies it at the root level and
@@ -1431,7 +2142,7 @@ function renderMain() {
   const landing = S.view === "sessions" && (!S.current || isPendingTab(S.current));
   document.body.classList.toggle("bg-live", landing);
   document.body.classList.toggle("bg-dim", !landing);
-  if (window.IntellexorBG) IntellexorBG.setActive(true);
+  if (window.IntellexorBG) IntellexorBG.setActive(S.bg);
   if (S.view === "board") {
     renderBoardView(main);
     return;
@@ -1559,6 +2270,11 @@ function buildHeaderActions(sess) {
     imp.onclick = (e) => { e.preventDefault(); importSessionFile(); };
     wrap.appendChild(imp);
   }
+  const sched = el("a", "header-link", "Add scheduled message");
+  sched.href = "#";
+  sched.title = "Schedule a message the session receives at a chosen time (like an alarm the agent sets itself)";
+  sched.onclick = (e) => { e.preventDefault(); openScheduleMessageModal(sess.id); };
+  wrap.appendChild(sched);
   return wrap;
 }
 
@@ -4368,7 +5084,7 @@ function buildAgentSelect() {
       item.innerHTML = `<span class="agent-dot" style="background:${colors[a]}"></span><span>${cap(a)}</span>`;
       item.onclick = () => {
         S.agent = a;
-        localStorage.setItem("intellexor.agent", a);
+        wsSet("agent", a);
         closePopovers();
         renderComposerRegion();
       };
@@ -4421,7 +5137,7 @@ function openModelPicker(anchor) {
           item.innerHTML = `<span>${esc(m.name || m.id)}</span><span class="pm">${esc(p.id)}</span>`;
           item.onclick = () => {
             S.model = { providerID: p.id, modelID: m.id };
-            localStorage.setItem("intellexor.model", JSON.stringify(S.model));
+            wsSet("model", JSON.stringify(S.model));
             closePopovers();
             renderComposerRegion();
           };
@@ -4916,6 +5632,23 @@ function renderSettingsGeneral(content) {
   }
   row.appendChild(seg);
   content.appendChild(row);
+
+  const bgRow = el("div", "m-row");
+  bgRow.appendChild(el("div", "", '<div class="m-label">Animated background</div><div class="m-sub">Aurora canvas behind the app</div>'));
+  const bgSeg = el("div", "seg");
+  for (const opt of [true, false]) {
+    const label = opt ? "On" : "Off";
+    const b = el("button", S.bg === opt ? "on" : "", label);
+    b.onclick = () => {
+      S.bg = opt;
+      localStorage.setItem("intellexor.bg", opt ? "1" : "0");
+      applyBackground();
+      for (const x of bgSeg.querySelectorAll("button")) x.classList.toggle("on", x === b);
+    };
+    bgSeg.appendChild(b);
+  }
+  bgRow.appendChild(bgSeg);
+  content.appendChild(bgRow);
 
   content.appendChild(el("h3", "set-h", "About"));
   const about = el("div", "m-row");
@@ -5539,6 +6272,7 @@ async function loadSession(sid) {
 
 async function boot() {
   applyScheme();
+  applyBackground();
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyScheme);
 
   try {
@@ -5565,6 +6299,13 @@ async function boot() {
     toast(e.message, true);
   }
   loadTabs();
+
+  // no deep link: restore this workspace's last open chat (same rule as
+  // switching workspaces — a reload lands where you were)
+  const restore = restorableSession();
+  if (!location.hash && restore) {
+    history.replaceState(null, "", location.pathname + location.search + "#/" + restore.id);
+  }
 
   try {
     await loadAlarms();
@@ -5603,7 +6344,7 @@ async function boot() {
   }
 
   $("#btn-new-session").onclick = () => newSessionTab();
-  $("#rail-new").onclick = () => newSessionTab();
+  $("#rail-new").onclick = () => openWorkspacePicker();
   $("#rail-settings").onclick = () => openSettings();
   $("#rail-sidebar").onclick = () => setSidebar(!S.sidebarOpen);
   $("#rail-board-panel").onclick = () => setBoardPanel(!S.boardPanelOpen);
@@ -5616,7 +6357,15 @@ async function boot() {
   const name = (S.dir || "Project").split("/").filter(Boolean).pop() || "P";
   $("#rail-avatar").textContent = name[0].toUpperCase();
   $("#sidebar-title").textContent = name;
+  $("#rail-project").title = S.dir || "Project";
   TabProgress.setTitle("Intellexor — " + name);
+
+  // the current workspace has been open since load — anything that finished
+  // in it from here on is visible in the UI, so clear its dot state
+  markWorkspaceVisited(S.dir || DIR);
+  loadWorkspaces();
+  initDesktopEvents();
+  connectGlobalSSE();
 
   window.addEventListener("hashchange", route);
   connectSSE();

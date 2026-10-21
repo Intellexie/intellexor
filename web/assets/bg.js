@@ -188,8 +188,10 @@ window.IntellexorBG = (() => {
   // Root-level activation: the background belongs to the document, not to
   // any single view — start it here so it is visible everywhere, even before
   // app.js boots (and if app.js never gets that far, the loop still stops
-  // cleanly on its own once the canvas is gone from the DOM).
-  setActive(true);
+  // cleanly on its own once the canvas is gone from the DOM). Honors the
+  // user's "Animated background" setting (Settings → General); app.js's
+  // applyBackground() flips it live via setActive().
+  if (localStorage.getItem("intellexor.bg") !== "0") setActive(true);
 
   return { setActive };
 })();

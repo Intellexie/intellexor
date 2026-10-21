@@ -16,7 +16,7 @@ Tests are fully local (httptest fake providers streaming SSE) — no network or 
 ## Gotchas
 
 - **The web UI is compiled into the binary.** `web/assets/*` is loaded via `go:embed` (web/embed.go); editing assets requires a rebuild. There is no dev server or hot reload.
-- **Zero external Go dependencies** — `go.mod` has no requires, by design ("one binary, no external dependencies"). Use the stdlib; don't add third-party packages without strong justification.
+- **Desktop mode is behind build tags.** The default `go build` produces a headless server (desktop code compiled out; running it without `--headless` just prints a note and serves). The desktop app (Wails webview + HTTP + ACP listeners) needs `go build -tags "desktop,production,webkit2_41"` plus the platform GUI headers (Linux: libgtk-3-dev, libwebkit2gtk-4.1-dev — noble ships no 4.0) — see `desktop.go` / `desktop_disabled.go`. `--headless`/`-h` forces plain-server behavior in any build. Wails (github.com/wailsapp/wails/v2) is the only external dependency; don't add more without strong justification.
 - **Tests must isolate the data dir.** It is cached at package level, so new tests need `os.Setenv("INTELLEXOR_DATA", t.TempDir())` plus `store.ResetDataDirForTest()` — see the setup helpers in internal/app/abort_test.go.
 - **Permissions are inert.** Everything is allowed by default; `permission.*` config and the `/permission` endpoints exist for opencode compatibility but have no effect. Don't write tests expecting them to block.
 - **Port fallback:** when the default port 4096 is busy, the server silently binds a random free port (main.go:100) — the printed URL is the source of truth.
@@ -25,7 +25,7 @@ Tests are fully local (httptest fake providers streaming SSE) — no network or 
 
 ## Architecture
 
-- Entry: `main.go` (module root — installable via `go install github.com/Intellexie/intellexor@...`). Default mode serves HTTP; `intellexor acp` runs ACP over stdio, or TCP when `--port`/`ACP_PORT`/`PORT` is set — then **HTTP and ACP share one socket**, with connections classified by the first byte (internal/acp).
+- Entry: `main.go` (module root — installable via `go install github.com/Intellexie/intellexor@...`). There is no `acp` subcommand: **ACP is always on**, multiplexed with HTTP on the same socket (connections classified by the first byte) via `acp.Multiplex` (internal/acp). `--headless`/`-h` skips only the desktop window.
 - `internal/server` creates an `app.Instance` per working directory and handles routing/SSE; `internal/acp` maps the same instance to JSON-RPC methods. Changes to agent behavior usually land in `internal/app` (prompt loop, processor) and surface through both.
 - Config is JSONC, merged from global (`~/.config/intellexor/`) plus project files (`intellexor.json`/`opencode.json`) walked upward to the filesystem root (internal/config).
 - Providers speak OpenAI-compatible SSE (`/chat/completions`); client, catalog, and fallbacks live in `internal/provider`.

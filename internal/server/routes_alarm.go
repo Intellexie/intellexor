@@ -6,6 +6,7 @@ import (
 
 	"github.com/Intellexie/intellexor/internal/alarm"
 	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 // Alarms: one-shot wake-ups an agent schedules for its own session via the
@@ -37,6 +38,43 @@ func (s *Server) sessionAlarms(w http.ResponseWriter, r *http.Request) *apiError
 		return badRequest(lerr.Error())
 	}
 	writeJSON(w, 200, alarms)
+	return nil
+}
+
+// createAlarm arms a wake-up from the web UI's "Add scheduled message"
+// dialog — the same kind of one-shot alarm the schedule_wakeup tool sets,
+// but targeted at an explicit session. triggerAt is a unix timestamp in
+// SECONDS and must be in the future; note is the message the session
+// receives when it fires. (POST /alarm rather than a /alarm/session/...
+// path: it would overlap POST /alarm/{alarmID}/trigger in the ServeMux.)
+func (s *Server) createAlarm(w http.ResponseWriter, r *http.Request) *apiError {
+	var p struct {
+		SessionID string `json:"sessionID"`
+		TriggerAt int64  `json:"triggerAt"`
+		Note      string `json:"note"`
+	}
+	if err := decodeBody(r, &p); err != nil {
+		return err
+	}
+	if p.SessionID == "" {
+		return badRequest("sessionID is required")
+	}
+	in, sess, err := s.resolveSession(r, p.SessionID)
+	if err != nil {
+		return err
+	}
+	if p.TriggerAt <= 0 {
+		return badRequest("triggerAt (unix timestamp in seconds) is required")
+	}
+	if p.TriggerAt <= util.Now()/1000 {
+		return badRequest("triggerAt must be in the future")
+	}
+	a, aerr := alarm.Add(store.ProjectID(in.Directory), sess.ID, p.TriggerAt, p.Note)
+	if aerr != nil {
+		return badRequest(aerr.Error())
+	}
+	in.PublishAlarmUpdate()
+	writeJSON(w, 200, a)
 	return nil
 }
 

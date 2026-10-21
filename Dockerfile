@@ -4,18 +4,22 @@
 # Run:    docker run -p 8080:8080 -v workspace:/workspace -v intellexor-data:/data intellexor
 #         (mount your project at /workspace; override with -e PORT=...)
 #
-# The container starts Intellexor in ACP mode (Agent Client Protocol): the web UI
-# and ACP clients share the same port (0.0.0.0:$PORT).
+# The container starts the Intellexor server: the web UI, HTTP API and ACP
+# clients all share the same port (0.0.0.0:4096, connections are classified
+# by the first byte). Override the port by appending args, e.g.
+#   docker run ... intellexor --port 8080
 #
 # Runtime toolchain available to the agent: bash, curl, git, node, npm, go,
-# playwright (chromium).
+# playwright (chromium), plus a C toolchain and GTK/WebKit dev headers so the
+# desktop build works in-container:
+#   go build -tags "desktop,production,webkit2_41" -o bin/intellexor .
 
 # ---- build stage ----
 FROM golang:1.26-alpine AS build
 ARG GO_VERSION=1.26.2
 WORKDIR /src
-COPY go.mod ./
-COPY main.go ./
+COPY go.mod go.sum ./
+COPY *.go ./
 COPY internal ./internal
 COPY web ./web
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/intellexor .
@@ -28,6 +32,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash ca-certificates curl git \
         golang-go \
+        build-essential pkg-config \
+        libgtk-3-dev libwebkit2gtk-4.1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 LTS from NodeSource (apt's nodejs is v18 on noble; current
@@ -60,8 +66,6 @@ RUN npm install -g playwright && \
 ENV PATH=/usr/local/go/bin:/usr/local/bin:$PATH \
     NODE_PATH=/usr/local/lib/node_modules \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
-    PORT=8080 \
-    ACP_HOST=0.0.0.0 \
     INTELLEXOR_DATA=/data \
     HOME=/data
 
@@ -77,5 +81,5 @@ WORKDIR /workspace
 VOLUME ["/data", "/workspace"]
 EXPOSE 4096 8080
 
-ENTRYPOINT ["/usr/local/bin/intellexor", "acp", "--cwd", "/workspace", "--port", "4096"]
+ENTRYPOINT ["/usr/local/bin/intellexor", "--headless", "--host", "0.0.0.0", "--dir", "/workspace", "--port", "4096"]
 CMD []
