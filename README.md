@@ -162,7 +162,8 @@ validates a spec and returns its next fire time).
 ## Alarms
 
 The `schedule_wakeup` tool schedules a **one-shot wake-up for the agent's
-own session**: at the given timestamp (unix milliseconds) the system
+own session**: at the given timestamp (unix seconds, or a relative `in`
+duration like `"5m"`) the system
 injects a user message (`alarm-triggered`, plus an optional note as
 context) into the session, so the agent can continue itself. The typical
 pattern for long-running background work: launch the job, schedule a
@@ -173,6 +174,16 @@ wake-up that came due while the server was down fires right after
 startup); `action: "list"` shows the session's scheduled wake-ups and
 `action: "cancel"` disarms one. A background sweep checks for due
 wake-ups every 5 seconds.
+
+In the web UI the ⏰ indicator on a session (header, tab, sidebar) is
+clickable and opens a modal listing the session's wake-ups — pending
+ones with a live "will trigger in dd hh:mm:ss" countdown, fired ones
+with "triggered ... ago" — each with **Trigger now** and **Delete**
+buttons (`GET /alarm/session/{sessionID}`,
+`POST /alarm/{alarmID}/trigger`, `DELETE /alarm/{alarmID}`). Wake-ups
+are also part of the session export: importing re-arms future ones
+under the new session, while past-due untriggered ones are marked fired
+so an import never replays stale wake-ups.
 
 ## Orchestrator agent
 

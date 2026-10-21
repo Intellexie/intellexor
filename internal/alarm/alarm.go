@@ -23,7 +23,7 @@ import (
 var ErrNotFound = errors.New("alarm not found")
 
 // Alarm is a single one-shot wake-up for a session. TriggerAt is a unix
-// millisecond timestamp; when it is reached, the session receives a user
+// timestamp in SECONDS; when it is reached, the session receives a user
 // message ("alarm-triggered", plus Note as context when set) so the agent
 // can continue itself after a long background job. Fired alarms are kept
 // (marked) so a sweep racing a restart can never double-fire; they are
@@ -47,6 +47,25 @@ func file(projectID string) string {
 	return filepath.Join(store.DataDir(), "storage", "alarm", projectID+".json")
 }
 
+// msThreshold separates legacy millisecond timestamps from seconds: any
+// value above it is ~year 5138+ in seconds, but a plausible ms epoch.
+// Alarms written before the seconds refactor stored TriggerAt (and
+// Created) in milliseconds; without migration they would look infinitely
+// far in the future and silently never fire.
+const msThreshold = 1e11
+
+// migrateLegacy converts pre-refactor millisecond timestamps to seconds.
+func migrateLegacy(alarms []Alarm) {
+	for i := range alarms {
+		if alarms[i].TriggerAt > msThreshold {
+			alarms[i].TriggerAt /= 1000
+		}
+		if alarms[i].Created > msThreshold {
+			alarms[i].Created /= 1000
+		}
+	}
+}
+
 func load(projectID string) ([]Alarm, error) {
 	var alarms []Alarm
 	b, err := os.ReadFile(file(projectID))
@@ -59,6 +78,7 @@ func load(projectID string) ([]Alarm, error) {
 	if err := json.Unmarshal(b, &alarms); err != nil {
 		return nil, err
 	}
+	migrateLegacy(alarms)
 	return alarms, nil
 }
 
@@ -78,10 +98,10 @@ func save(projectID string, alarms []Alarm) error {
 	return os.Rename(tmp, path)
 }
 
-// Add arms a new alarm for sessionID. The timestamp is not validated
-// here: the tool rejects future-less timestamps, while tests and recovery
-// paths may legitimately add already-due alarms (they fire on the next
-// sweep).
+// Add arms a new alarm for sessionID. triggerAt is a unix timestamp in
+// SECONDS. The timestamp is not validated here: the tool rejects
+// future-less timestamps, while tests and recovery paths may legitimately
+// add already-due alarms (they fire on the next sweep).
 func Add(projectID, sessionID string, triggerAt int64, note string) (Alarm, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -94,7 +114,7 @@ func Add(projectID, sessionID string, triggerAt int64, note string) (Alarm, erro
 		SessionID: sessionID,
 		TriggerAt: triggerAt,
 		Note:      note,
-		Created:   util.Now(),
+		Created:   util.Now() / 1000,
 	}
 	alarms = append(alarms, a)
 	// prune: drop old fired alarms so the file cannot grow unbounded
@@ -221,4 +241,81 @@ func ClaimDue(projectID string, now int64) ([]Alarm, error) {
 		}
 	}
 	return due, nil
+}
+
+// Claim atomically marks the named unfired alarm as fired and returns it —
+// the "trigger now" primitive behind the web UI's button. Unlike ClaimDue
+// it ignores TriggerAt: the user explicitly asked for an immediate wake-up.
+// A second claim (or a racing sweep) finds the alarm already fired and
+// returns ErrNotFound, so an alarm can never double-fire.
+func Claim(projectID, alarmID string) (Alarm, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	alarms, err := load(projectID)
+	if err != nil {
+		return Alarm{}, err
+	}
+	for i := range alarms {
+		if alarms[i].ID != alarmID {
+			continue
+		}
+		if alarms[i].Fired {
+			return Alarm{}, ErrNotFound
+		}
+		alarms[i].Fired = true
+		if err := save(projectID, alarms); err != nil {
+			return Alarm{}, err
+		}
+		return alarms[i], nil
+	}
+	return Alarm{}, ErrNotFound
+}
+
+// Delete removes an alarm regardless of session or fired state — the
+// web UI's delete button. Unlike Cancel (session-scoped, tool-facing) it
+// is an explicit user action on a specific alarm ID.
+func Delete(projectID, alarmID string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	alarms, err := load(projectID)
+	if err != nil {
+		return err
+	}
+	for i := range alarms {
+		if alarms[i].ID == alarmID {
+			alarms = append(alarms[:i], alarms[i+1:]...)
+			return save(projectID, alarms)
+		}
+	}
+	return ErrNotFound
+}
+
+// Import re-arms exported alarms under a (new) session ID. Past-due
+// untriggered alarms are marked fired instead of being carried over
+// armed: an import must never replay stale wake-ups — the sweep would
+// otherwise fire them within one tick. Future alarms stay armed with
+// their original trigger time; IDs are re-minted so an import into the
+// source project cannot collide with the originals.
+func Import(projectID, sessionID string, alarms []Alarm, now int64) error {
+	if len(alarms) == 0 {
+		return nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	existing, err := load(projectID)
+	if err != nil {
+		return err
+	}
+	for _, a := range alarms {
+		fired := a.Fired || a.TriggerAt <= now
+		existing = append(existing, Alarm{
+			ID:        util.ID("alm"),
+			SessionID: sessionID,
+			TriggerAt: a.TriggerAt,
+			Note:      a.Note,
+			Created:   a.Created,
+			Fired:     fired,
+		})
+	}
+	return save(projectID, existing)
 }

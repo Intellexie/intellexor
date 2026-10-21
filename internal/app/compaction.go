@@ -52,6 +52,12 @@ Your summary should be comprehensive enough to provide context but concise enoug
 
 const summarizeAsk = "Provide a detailed but concise summary of our conversation above. Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next."
 
+// summarizeAskNoTools is the trailing user message for the prefix-cache
+// friendly path: that request mirrors the step request (same system prompt
+// and tool definitions), so the model must answer with text instead of
+// calling tools.
+const summarizeAskNoTools = summarizeAsk + "\n\nReply with the summary text only — do not call any tools."
+
 const resumeText = "Use the above summary generated from your last session to resume from where you left off."
 
 // prunedToolOutput is what the request history shows for tool results whose
@@ -144,13 +150,39 @@ func (i *Instance) Compact(s *session.Session, providerID, modelID string) (sess
 	if agentName == "" {
 		agentName = "build"
 	}
-	return i.compactLocked(context.Background(), s, resolved, model, agentName)
+	// the manual path is abortable: register the cancel so the composer's
+	// stop button (and POST /session/:id/abort) interrupts the summary
+	// stream (opencode shows the compaction as "· cancelled" when aborted).
+	// The auto path never gets here — it calls compactLocked directly with
+	// the prompt loop's already-registered cancel.
+	ctx, cancel := context.WithCancel(context.Background())
+	i.setCancel(s.ID, cancel)
+	defer func() { cancel(); i.clearCancel(s.ID) }()
+	// An explicitly requested compaction model may differ from the
+	// conversation's model — its prefix cache is cold either way, so use the
+	// dedicated summarize prompt. The fallback path compacts with the
+	// conversation's own model; there the request mirrors the step request
+	// so vLLM's prefix cache covers the replayed history (compactLocked).
+	return i.compactLocked(ctx, s, resolved, model, agentName, providerID == "" && modelID == "")
 }
 
 // compactLocked summarizes the conversation into a `summary: true` assistant
 // message (opencode SessionCompaction.run). Callers must hold the session
 // lock; the auto path in runLoop does, the HTTP route goes through Compact.
-func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolved *provider.Resolved, model provider.Model, agentName string) (session.WithParts, error) {
+// mirrorStep: the compaction runs on the conversation's own model, so the
+// request reuses the step request's system prompt and tools — token-identical
+// to the previous step up to the trailing summarize ask, letting vLLM's
+// prefix cache serve the whole history instead of re-prefilling it.
+func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolved *provider.Resolved, model provider.Model, agentName string, mirrorStep bool) (session.WithParts, error) {
+	// show a busy indicator while compacting (opencode flips its status line
+	// to "compacting session"). The auto path runs inside the prompt loop,
+	// which already published a busy status — only the standalone manual
+	// path (/compact, POST /summarize) needs its own, typed "compact" so
+	// the UI can label it instead of showing a generic Thinking row.
+	standalone := !i.statusBusy(s.ID)
+	if standalone {
+		i.SetStatus(s.ID, StatusInfo{"type": "compact"})
+	}
 	// flag the session as compacting so clients can show it
 	// (opencode sets session.time.compacting)
 	now := util.Now()
@@ -159,6 +191,9 @@ func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolv
 		i.Hub.Publish("session.updated", map[string]any{"sessionID": s.ID, "info": *s})
 	}
 	defer func() {
+		if standalone {
+			i.clearStatus(s.ID) // no session.idle: a finished compaction is silent
+		}
 		if fresh, err := i.Mgr.Update(s.ID, func(u *session.Session) { u.Time.Compacting = nil }); err == nil {
 			*s = *fresh
 			i.Hub.Publish("session.updated", map[string]any{"sessionID": s.ID, "info": *s})
@@ -204,20 +239,37 @@ func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolv
 	i.Hub.Publish("message.part.updated", map[string]any{"sessionID": s.ID, "part": part, "time": util.Now()})
 
 	history := historyFrom(toSummarize)
+	ask := summarizeAsk
+	if mirrorStep {
+		// the request mirrors the step request (same system prompt and
+		// tools), so the model could call tools — pin it to a text answer
+		ask = summarizeAskNoTools
+	}
 	history = append(history, provider.Msg{
 		Role:    "user",
-		Content: []provider.ContentBlock{{Type: "text", Text: summarizeAsk}},
+		Content: []provider.ContentBlock{{Type: "text", Text: ask}},
 	})
-	maxTokens := int(model.Limit.Output)
-	if maxTokens <= 0 {
-		maxTokens = 8192
+	var req provider.Request
+	if mirrorStep {
+		// same model as the conversation: reuse the step request's system
+		// prompt and tools so the prefix up to the trailing ask is
+		// token-identical to the previous step — vLLM's prefix cache then
+		// serves the replayed history instead of re-prefilling it
+		req = i.stepRequest(s, agentName, model, "")
+	} else {
+		// dedicated compaction model: its prefix cache is cold regardless,
+		// so use the purpose-built summarize prompt without tools
+		maxTokens := int(model.Limit.Output)
+		if maxTokens <= 0 {
+			maxTokens = 8192
+		}
+		req = provider.Request{
+			Model:     model.ID,
+			System:    summarizeSystemPrompt,
+			MaxTokens: maxTokens,
+		}
 	}
-	req := provider.Request{
-		Model:     model.ID,
-		System:    summarizeSystemPrompt,
-		Messages:  history,
-		MaxTokens: maxTokens,
-	}
+	req.Messages = history
 	ch, err := resolved.Client().Stream(ctx, req, nil)
 	if err != nil {
 		return session.WithParts{}, err
@@ -356,7 +408,9 @@ func (i *Instance) autoCompact(ctx context.Context, s *session.Session, resolved
 	if !isOverflow(last.Tokens, model, reservedOf(cfg)) {
 		return
 	}
-	res, err := i.compactLocked(ctx, s, resolved, model, agentName)
+	// auto compaction always runs on the conversation's own model — mirror
+	// the step request so the replayed history hits vLLM's prefix cache
+	res, err := i.compactLocked(ctx, s, resolved, model, agentName, true)
 	if err != nil {
 		return
 	}

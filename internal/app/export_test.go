@@ -5,8 +5,10 @@ import (
 	"os"
 	"testing"
 
+	"github.com/Intellexie/intellexor/internal/alarm"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 // roundTrip marshals and unmarshals the payload, simulating the JSON file
@@ -211,4 +213,77 @@ func TestExportExcludesRevertedMessages(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("imported session must show the exported history, got %d", len(got))
 	}
+}
+
+// Wake-ups ride along with an export: future alarms are re-armed under
+// the new session id, but past-due untriggered ones are neutralized — an
+// import must never replay stale wake-ups (the sweep would fire them
+// within one tick otherwise).
+func TestExportImportCarriesAlarms(t *testing.T) {
+	os.Setenv("INTELLEXOR_DATA", t.TempDir())
+	store.ResetDataDirForTest()
+
+	work := t.TempDir()
+	i := New(work)
+	s := &session.Session{ProjectID: store.ProjectID(work), Directory: work, Title: "alarmed"}
+	if err := i.Mgr.Create(s); err != nil {
+		t.Fatal(err)
+	}
+	now := util.Now() / 1000
+	pid := store.ProjectID(work)
+	if _, err := alarm.Add(pid, s.ID, now+3600, "still armed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alarm.Add(pid, s.ID, now-60, "stale"); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := i.ExportSession(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Alarms) != 2 {
+		t.Fatalf("export must carry the session's alarms, got %d", len(payload.Alarms))
+	}
+
+	other := t.TempDir()
+	j := New(other)
+	dup, err := j.ImportSession(roundTrip(t, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	imported, err := alarm.List(store.ProjectID(other), dup.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imported) != 2 {
+		t.Fatalf("expected 2 imported alarms, got %d", len(imported))
+	}
+	byNote := map[string]alarm.Alarm{}
+	for _, a := range imported {
+		byNote[a.Note] = a
+	}
+	if a := byNote["still armed"]; a.Fired || a.TriggerAt != now+3600 {
+		t.Fatalf("future alarm must stay armed under the new session: %+v", a)
+	}
+	if a := byNote["stale"]; !a.Fired {
+		t.Fatalf("past-due alarm must be neutralized on import: %+v", a)
+	}
+
+	// the sweep right after the import must fire nothing
+	if due, err := alarm.ClaimDue(store.ProjectID(other), util.Now()/1000); err != nil || len(due) != 0 {
+		t.Fatalf("sweep fired imported alarms: %+v (%v)", due, err)
+	}
+
+	// the source project keeps its own alarms untouched
+	src, err := alarm.List(pid, s.ID, false)
+	if err != nil || len(src) != 2 {
+		t.Fatalf("source alarms must be untouched, got %d (%v)", len(src), err)
+	}
+
+	// defuse the source's stale alarm: the global background sweep must
+	// never claim it after this test's data dir is gone. Claim is atomic
+	// — if the sweep got there first, this is a no-op.
+	_, _ = alarm.Claim(pid, mustAlarmID(t, pid, s.ID, "stale"))
 }

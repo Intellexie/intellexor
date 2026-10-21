@@ -49,6 +49,54 @@ func (p *processor) publishPart(part session.Part) {
 	p.i.Hub.Publish("message.part.updated", map[string]any{"sessionID": p.s.ID, "part": part, "time": util.Now()})
 }
 
+// stepRequest builds the provider request base exactly as runStep sends it:
+// system prompt (agent override + extra system + instructions + board
+// context), the agent's tool definitions, and the model's options. Keeping
+// this in one place lets the compaction request mirror a step request
+// token-for-token, which is what makes vLLM's prefix cache cover the
+// replayed history (see compactLocked).
+func (i *Instance) stepRequest(s *session.Session, agentName string, model provider.Model, extraSystem string) provider.Request {
+	agent := i.Agent(agentName)
+	system := systemPrompt(i)
+	if agent.Prompt != "" {
+		system = agent.Prompt
+	}
+	if extraSystem != "" {
+		system += "\n\n" + extraSystem
+	}
+	if u := instructionText(i.Directory); u != "" {
+		system += "\n\n" + u
+	}
+	if bc := boardContext(i, s, agentName); bc != "" {
+		system += "\n\n" + bc
+	}
+
+	names := activeToolNames(i.Directory, agent)
+	names = toolNamesForModel(model.ID, names, agent.allowsTool("apply_patch"))
+	req := provider.Request{
+		Model:     model.ID,
+		System:    system,
+		Tools:     registryFor(i).Defs(names),
+		MaxTokens: int(model.Limit.Output),
+	}
+	if model.Reasoning {
+		req.Reasoning = true
+	}
+	if req.MaxTokens == 0 {
+		req.MaxTokens = 8192
+	}
+	if len(model.Options) > 0 {
+		req.Extra = map[string]any{}
+		for k, v := range model.Options {
+			req.Extra[k] = v
+		}
+	}
+	if model.Temperature && agent.Temperature != nil {
+		req.Temperature = agent.Temperature
+	}
+	return req
+}
+
 func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, model provider.Model, agentName string, agent AgentDef, extraSystem string) {
 	p.ruleset = agent.Permission
 	p.model = model
@@ -60,47 +108,8 @@ func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, mo
 		ID: util.ID("prt"), SessionID: p.s.ID, MessageID: p.msg.ID, Type: "step-start",
 	})
 
-	history := BuildHistory(i, p.s)
-	system := systemPrompt(i)
-	if agent.Prompt != "" {
-		system = agent.Prompt
-	}
-	if extraSystem != "" {
-		system += "\n\n" + extraSystem
-	}
-	if u := instructionText(i.Directory); u != "" {
-		system += "\n\n" + u
-	}
-	if bc := boardContext(i, p.s, agentName); bc != "" {
-		system += "\n\n" + bc
-	}
-
-	names := activeToolNames(i.Directory, agent)
-	names = toolNamesForModel(model.ID, names, agent.allowsTool("apply_patch"))
-	req := provider.Request{
-		Model:     model.ID,
-		System:    system,
-		Messages:  history,
-		Tools:     registryFor(i).Defs(names),
-		MaxTokens: int(model.Limit.Output),
-	}
-	if model.Reasoning {
-		req.Reasoning = true
-	}
-	if req.MaxTokens == 0 {
-		req.MaxTokens = 8192
-	}
-	if len(model.Options) > 0 {
-		if req.Extra == nil {
-			req.Extra = map[string]any{}
-		}
-		for k, v := range model.Options {
-			req.Extra[k] = v
-		}
-	}
-	if model.Temperature && agent.Temperature != nil {
-		req.Temperature = agent.Temperature
-	}
+	req := i.stepRequest(p.s, agentName, model, extraSystem)
+	req.Messages = BuildHistory(i, p.s)
 
 	ch, err := client.Stream(ctx, req, func(attempt int, serr *provider.StreamError, next time.Time) {
 		at := attempt + 1

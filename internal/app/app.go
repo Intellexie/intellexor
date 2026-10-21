@@ -148,6 +148,25 @@ func (i *Instance) SetStatus(sessionID string, st StatusInfo) {
 	}
 }
 
+// statusBusy reports whether the session currently holds a non-idle status.
+func (i *Instance) statusBusy(sessionID string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	_, ok := i.statuses[sessionID]
+	return ok
+}
+
+// clearStatus drops a status without publishing session.idle (and its
+// completion chime) — used for the compaction indicator, which is not a
+// run worth notifying about. Clients see the end via the idle-typed
+// session.status event alone.
+func (i *Instance) clearStatus(sessionID string) {
+	i.mu.Lock()
+	delete(i.statuses, sessionID)
+	i.mu.Unlock()
+	i.Hub.Publish("session.status", map[string]any{"sessionID": sessionID, "status": StatusInfo{"type": "idle"}})
+}
+
 func (i *Instance) Statuses() map[string]StatusInfo {
 	i.mu.Lock()
 	defer i.mu.Unlock()

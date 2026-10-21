@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/Intellexie/intellexor/internal/alarm"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
 	"github.com/Intellexie/intellexor/internal/util"
@@ -34,6 +35,7 @@ type ExportPayload struct {
 	Messages   []ExportMessage  `json:"messages"`
 	Todos      json.RawMessage  `json:"todos,omitempty"`
 	Diffs      json.RawMessage  `json:"diffs,omitempty"`
+	Alarms     []alarm.Alarm    `json:"alarms,omitempty"`
 }
 
 // ExportSession builds the payload for a session: the session info, every
@@ -66,6 +68,11 @@ func (i *Instance) ExportSession(s *session.Session) (*ExportPayload, error) {
 	// todo and diff state ride along (best effort, like Fork's copy)
 	_ = i.Mgr.ReadKV("todo", s.ID, &out.Todos)
 	_ = i.Mgr.ReadKV("session_diff", s.ID, &out.Diffs)
+	// armed wake-ups ride along too: the import re-arms them under the
+	// new session (past-due ones are neutralized there, never replayed)
+	if alarms, err := alarm.List(store.ProjectID(i.Directory), s.ID, false); err == nil && len(alarms) > 0 {
+		out.Alarms = alarms
+	}
 	return out, nil
 }
 
@@ -140,6 +147,16 @@ func (i *Instance) ImportSession(p *ExportPayload) (*session.Session, error) {
 	}
 	if len(p.Diffs) > 0 && string(p.Diffs) != "null" {
 		_ = i.Mgr.WriteKV("session_diff", dup.ID, p.Diffs)
+	}
+
+	// re-arm exported wake-ups under the new session id. alarm.Import
+	// marks past-due untriggered ones fired, so an import never replays
+	// stale wake-ups (the sweep would fire them within one tick).
+	if len(p.Alarms) > 0 {
+		if err := alarm.Import(store.ProjectID(i.Directory), dup.ID, p.Alarms, util.Now()/1000); err != nil {
+			return nil, err
+		}
+		i.publishAlarmUpdate()
 	}
 
 	i.Hub.Publish("session.created", map[string]any{"sessionID": dup.ID, "info": dup})

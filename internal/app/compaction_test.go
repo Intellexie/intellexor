@@ -473,3 +473,144 @@ func TestPruneUnderMinimum(t *testing.T) {
 		}
 	}
 }
+
+// TestCompactRequestShape pins the two compaction request shapes: the
+// fallback path (conversation's own model) mirrors the step request so
+// vLLM's prefix cache covers the replayed history; an explicitly requested
+// compaction model uses the dedicated summarize prompt instead.
+func TestCompactRequestShape(t *testing.T) {
+	os.Setenv("INTELLEXOR_DATA", t.TempDir())
+	store.ResetDataDirForTest()
+
+	base, bodies, mu := mockLLMUsage(t)
+	work := compactionConfig(t, base, "")
+	i := New(work)
+
+	s := &session.Session{ProjectID: store.ProjectID(work), Directory: work, Title: "request shape"}
+	if err := i.Mgr.Create(s); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"type": "text", "text": "hello world"})
+	if _, err := i.Prompt(s, PromptInput{Model: &ModelSel{ProviderID: "mock", ModelID: "test-model"}, Parts: []json.RawMessage{raw}}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), *bodies...)
+	}
+
+	// the mock also sees the async title request, so requests are classified
+	// by content rather than position: the step request ends with the bare
+	// user prompt, a compaction request ends with the summarize ask
+	type wireMsg struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	var probe struct {
+		Messages []wireMsg `json:"messages"`
+	}
+	isCompact := func(b string) bool { return strings.Contains(b, "summary of our conversation above") }
+	isStep := func(b string) bool {
+		if isCompact(b) || json.Unmarshal([]byte(b), &probe) != nil || len(probe.Messages) == 0 {
+			return false
+		}
+		last := probe.Messages[len(probe.Messages)-1]
+		return last.Role == "user" && string(last.Content) == `"hello world"`
+	}
+	var body struct {
+		Messages []wireMsg `json:"messages"`
+		Tools    []any     `json:"tools"`
+	}
+
+	// fallback path (no explicit model): the summarize request must mirror
+	// the step request — same system prompt, tools present, and the whole
+	// step conversation as a token-identical prefix (the prefix-cache hit)
+	if _, err := i.Compact(s, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var stepBody, summaryBody string
+	for _, b := range snapshot() {
+		if isStep(b) {
+			stepBody = b
+		}
+		if isCompact(b) {
+			summaryBody = b
+		}
+	}
+	if stepBody == "" || summaryBody == "" {
+		t.Fatalf("expected a step and a summary request, got %d bodies", len(snapshot()))
+	}
+	if err := json.Unmarshal([]byte(stepBody), &body); err != nil {
+		t.Fatal(err)
+	}
+	stepMsgs := append([]wireMsg(nil), body.Messages...)
+	body = struct {
+		Messages []wireMsg `json:"messages"`
+		Tools    []any     `json:"tools"`
+	}{}
+	if err := json.Unmarshal([]byte(summaryBody), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Messages) == 0 || body.Messages[0].Role != "system" {
+		t.Fatalf("expected a system message in the mirrored summary request, got %+v", body.Messages)
+	}
+	if string(body.Messages[0].Content) != string(stepMsgs[0].Content) {
+		t.Fatal("mirrored summary request must reuse the step request's system prompt")
+	}
+	if len(body.Tools) == 0 {
+		t.Fatal("mirrored summary request must carry the step request's tools")
+	}
+	if len(body.Messages) <= len(stepMsgs) {
+		t.Fatalf("expected the summarize ask appended after the step history, got %d messages", len(body.Messages))
+	}
+	for j := range stepMsgs {
+		if stepMsgs[j].Role != body.Messages[j].Role || string(stepMsgs[j].Content) != string(body.Messages[j].Content) {
+			t.Fatalf("summary request diverges from the step request at message %d", j)
+		}
+	}
+	if last := body.Messages[len(body.Messages)-1]; !strings.Contains(string(last.Content), "do not call any tools") {
+		t.Fatalf("mirrored path must pin the model to a text answer, got %s", last.Content)
+	}
+
+	// explicit compaction model: dedicated summarize prompt, no tools.
+	// A fresh turn first — after the first compaction the history starts
+	// at the summary, and compacting needs a user message to summarize.
+	raw2, _ := json.Marshal(map[string]any{"type": "text", "text": "second turn"})
+	if _, err := i.Prompt(s, PromptInput{Model: &ModelSel{ProviderID: "mock", ModelID: "test-model"}, Parts: []json.RawMessage{raw2}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.Compact(s, "mock", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	var explicit string
+	for _, b := range snapshot() {
+		if isCompact(b) && strings.Contains(b, "summarizing conversations") {
+			explicit = b
+		}
+	}
+	if explicit == "" {
+		t.Fatal("expected a dedicated-prompt summary request for the explicit model")
+	}
+	body = struct {
+		Messages []wireMsg `json:"messages"`
+		Tools    []any     `json:"tools"`
+	}{}
+	if err := json.Unmarshal([]byte(explicit), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Messages) == 0 || body.Messages[0].Role != "system" {
+		t.Fatalf("expected a system message in the explicit summary request, got %+v", body.Messages)
+	}
+	var sys string
+	if err := json.Unmarshal(body.Messages[0].Content, &sys); err != nil || sys != summarizeSystemPrompt {
+		t.Fatalf("explicit-model summary must use the dedicated summarize prompt, got %s", body.Messages[0].Content)
+	}
+	if len(body.Tools) != 0 {
+		t.Fatal("explicit-model summary must not carry tools")
+	}
+	if last := body.Messages[len(body.Messages)-1]; strings.Contains(string(last.Content), "do not call any tools") {
+		t.Fatal("dedicated summarize prompt needs no no-tools pin")
+	}
+}

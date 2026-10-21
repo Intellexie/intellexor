@@ -129,7 +129,14 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .dot-permission { background:#fcd53a; }
 .dot-error { background:var(--diff-del); }
 .dot-unseen { background:var(--accent); }
-.alarm-indicator { flex:0 0 auto; font-size:12px; line-height:1; }
+.alarm-indicator { flex:0 0 auto; font-size:12px; line-height:1; cursor:pointer; }
+.alarm-indicator:hover { transform:scale(1.15); }
+.alarm-list { margin-top:8px; }
+.alarm-row { border-bottom:1px solid var(--border); }
+.alarm-row:last-child { border-bottom:none; }
+.alarm-info { flex:1 1 auto; min-width:0; }
+.alarm-note { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.alarm-when { font-size:12px; color:var(--text-muted); font-variant-numeric:tabular-nums; }
 .empty-sessions { padding:16px 8px; color:var(--text-faint); font-size:13px; }
 
 /* collapsed sidebar (desktop) — the rail toggle restores it */
@@ -229,6 +236,8 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .assistant-block { margin:14px 0; }
 .assistant-text { white-space:normal; }
 .assistant-meta { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-faint); margin-top:4px; }
+/* header above a compaction summary message (opencode's "Compaction" row) */
+.compaction-label { font-size:12px; color:var(--text-faint); margin-bottom:2px; }
 .assistant-meta button { display:inline-flex; align-items:center; color:var(--text-faint); padding:2px; border-radius:4px; opacity:0; transition:opacity .15s; }
 .assistant-block:hover .assistant-meta button, .assistant-meta button:focus-visible { opacity:1; }
 .assistant-meta button:hover { color:var(--text-base); background:var(--layer-2); }

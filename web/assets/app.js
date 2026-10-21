@@ -63,7 +63,7 @@ const S = {
   toolOpen: new Map(), // tool partID -> user's explicit open/closed choice (survives timeline re-renders)
   reasoningOpen: new Map(), // reasoning partID -> user's explicit open/closed choice (survives timeline re-renders)
   tabs: [], // open session tabs, in order (persisted)
-  alarms: {}, // sessionID -> earliest pending wake-up triggerAt (ms) — drives the ⏰ indicator and its hover title
+  alarms: {}, // sessionID -> earliest pending wake-up triggerAt (unix seconds) — drives the ⏰ indicator and its hover title
   sidebarOpen: true, // resolved from localStorage/viewport by initSidebar()
   boardPanelOpen: false, // cards side panel (rail toggle), resolved by initBoardPanel()
   commands: null, // cached GET /command result (slash-command menu)
@@ -350,11 +350,17 @@ function handleEvent(ev) {
       if (!info) return;
       const idx = S.sessions.findIndex((s) => s.id === info.id);
       const wasReverted = idx >= 0 && !!S.sessions[idx].revert;
+      const wasCompacting = idx >= 0 && !!(S.sessions[idx].time && S.sessions[idx].time.compacting);
       if (idx >= 0) S.sessions[idx] = info; else S.sessions.unshift(info);
       sortSessions();
       renderSidebar();
       if (info.id === S.current) {
         renderHeader();
+        // the compacting flag drives the timeline's "Compacting" indicator
+        if (wasCompacting !== !!(info.time && info.time.compacting)) {
+          renderTimeline();
+          renderComposer();
+        }
         if (wasReverted !== !!info.revert) {
           // Reverting puts the reverted message back in the chat box; read it
           // from the local store before the reload hides it.
@@ -400,7 +406,9 @@ function handleEvent(ev) {
       if (p.status && p.status.type === "idle") {
         // record whether the session was really working before the entry is
         // wiped — session.idle needs it to decide on the completion chime
-        if (sessionBusy(p.sessionID)) idleAfterBusy.add(p.sessionID);
+        // (a compaction status is not a run: ending one stays silent)
+        const prev = S.statuses[p.sessionID];
+        if (prev && prev.type !== "idle" && prev.type !== "compact") idleAfterBusy.add(p.sessionID);
         delete S.statuses[p.sessionID];
       }
       else {
@@ -885,6 +893,7 @@ function renderTabs() {
     if (!pending && S.alarms[sid]) {
       const clock = el("span", "alarm-indicator", "⏰");
       clock.title = alarmTitle(sid);
+      clock.onclick = (e) => { e.stopPropagation(); openAlarmsModal(sid); };
       tab.appendChild(clock);
     }
     tab.appendChild(el("span", "tab-title", esc(title)));
@@ -1149,8 +1158,103 @@ async function loadAlarms() {
 function alarmTitle(sid) {
   const ts = S.alarms[sid];
   if (!ts) return "Wake-up scheduled";
-  const d = new Date(ts);
+  const d = new Date(ts * 1000); // triggerAt is unix seconds
   return "Wake-up scheduled for " + d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+// "dd hh:mm:ss" duration for the wake-up modal's countdown labels (days
+// prefix only when nonzero).
+function ddhms(ms) {
+  let s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400); s %= 86400;
+  const h = Math.floor(s / 3600); s %= 3600;
+  const m = Math.floor(s / 60); s %= 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return (d > 0 ? d + "d " : "") + pad(h) + ":" + pad(m) + ":" + pad(s);
+}
+
+// The wake-up modal behind a click on a session's ⏰ indicator: every
+// alarm of the session (pending and fired) with a live "will trigger in /
+// triggered ... ago" label plus Trigger now / Delete buttons. The modal
+// lives in #modal-root, so loadAlarms()'s re-renders never wipe it; the
+// countdown ticks locally every second and the list refetches after each
+// action (and on alarm.updated via loadAlarms for the indicators).
+async function openAlarmsModal(sid) {
+  const list = el("div", "alarm-list");
+  const ov = openModal("Wake-ups", (modal) => {
+    modal.appendChild(el("p", "m-sub", "Wake-ups the agent scheduled for this session."));
+    modal.appendChild(list);
+  });
+  let alarms = [];
+
+  async function reload() {
+    try {
+      alarms = await get("/alarm/session/" + sid) || [];
+    } catch (e) {
+      toast(e.message || "Failed to load wake-ups", true);
+    }
+    render();
+  }
+
+  function render() {
+    list.innerHTML = "";
+    if (!alarms.length) {
+      list.appendChild(el("p", "m-sub", "No wake-ups scheduled."));
+      return;
+    }
+    for (const a of alarms) {
+      const row = el("div", "m-row alarm-row");
+      const info = el("div", "alarm-info");
+      info.appendChild(el("div", "alarm-note", a.note || "Wake-up"));
+      const when = el("div", "alarm-when");
+      when.dataset.triggerAt = a.triggerAt;
+      when.dataset.fired = a.fired ? "1" : "";
+      info.appendChild(when);
+      row.appendChild(info);
+      const actions = el("div", "m-actions");
+      if (!a.fired) {
+        const trig = el("button", "btn ghost", "Trigger now");
+        trig.onclick = async () => {
+          try {
+            await post("/alarm/" + a.id + "/trigger");
+            await reload();
+            loadAlarms().catch(() => {});
+          } catch (e) { toast(e.message || "Failed to trigger wake-up", true); }
+        };
+        actions.appendChild(trig);
+      }
+      const rm = el("button", "btn danger", "Delete");
+      rm.onclick = async () => {
+        try {
+          await del("/alarm/" + a.id);
+          await reload();
+          loadAlarms().catch(() => {});
+        } catch (e) { toast(e.message || "Failed to delete wake-up", true); }
+      };
+      actions.appendChild(rm);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+    tick();
+  }
+
+  function tick() {
+    const now = Date.now();
+    for (const when of list.querySelectorAll(".alarm-when")) {
+      const ts = Number(when.dataset.triggerAt) * 1000; // unix seconds -> ms
+      when.textContent = when.dataset.fired
+        ? "triggered " + ddhms(now - ts) + " ago"
+        : "will trigger in " + ddhms(ts - now);
+    }
+  }
+
+  // local countdown while the modal is open; self-cleans when it closes
+  const iv = setInterval(() => {
+    if (!ov.isConnected) { clearInterval(iv); return; }
+    tick();
+  }, 1000);
+
+  await reload();
 }
 
 function renderSidebar() {
@@ -1212,6 +1316,7 @@ function renderSidebar() {
     if (S.alarms[s.id]) {
       const clock = el("span", "alarm-indicator", "⏰");
       clock.title = alarmTitle(s.id);
+      clock.onclick = (e) => { e.stopPropagation(); openAlarmsModal(s.id); };
       row.appendChild(clock);
     }
     const arch = el("button", "archive", ICONS.archive);
@@ -1425,6 +1530,7 @@ function buildHeader(sess) {
     if (S.alarms[sess.id]) {
       const clock = el("span", "alarm-indicator", "⏰");
       clock.title = alarmTitle(sess.id);
+      clock.onclick = () => openAlarmsModal(sess.id);
       header.appendChild(clock);
     }
   }
@@ -1697,14 +1803,28 @@ async function renderTimeline() {
     }
   }
   // thinking indicator — the agent · model label lives inside the bar
-  // (right-aligned) instead of on its own line under it
+  // (right-aligned) instead of on its own line under it.
+  // While the session is compacting (manual /compact publishes a "compact"
+  // status; auto compaction sets time.compacting inside the busy run) the
+  // row is labelled "Compacting" instead of "Thinking" — opencode shows the
+  // same distinction in its status line.
   const st = S.statuses[S.current];
-  if (st && (st.type === "busy" || st.type === "retry")) {
+  const curInfo = S.sessions.find((s) => s.id === S.current);
+  const compacting = !!st && (st.type === "compact" ||
+    (st.type === "busy" && curInfo && curInfo.time && !!curInfo.time.compacting));
+  if (st && (st.type === "busy" || st.type === "retry" || st.type === "compact")) {
     const think = el("div", "assistant-block");
     const runMeta = thinkMeta(currentRunLabel(store));
     if (st.type === "retry") {
       const row = el("div", "thinking-row");
       row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
+      if (runMeta) row.appendChild(runMeta);
+      think.appendChild(row);
+    } else if (compacting) {
+      const row = el("div", "thinking-row");
+      row.appendChild(el("span", "ricon", "✳"));
+      row.appendChild(el("span", "shimmer", "Compacting"));
+      row.appendChild(thinkingDots(true));
       if (runMeta) row.appendChild(runMeta);
       think.appendChild(row);
     } else if (!lastBlockHasText(store)) {
@@ -1821,6 +1941,9 @@ function renderUserMessage(info, parts, sid) {
 function renderAssistantMessage(info, parts, sid) {
   const target = sid || S.current;
   const block = el("div", "assistant-block");
+  // a compaction summary gets the same header opencode gives its compaction
+  // row — the streamed text below it is the summary itself
+  if (info.summary) block.appendChild(el("div", "compaction-label", "Compaction"));
   let hasVisible = false;
   for (const p of parts) {
     const node = renderPart(p, info);
@@ -2606,11 +2729,15 @@ function renderBoardChat() {
     }
     // thinking indicator while the orchestrator works
     const st = S.statuses[sid];
-    if (st && (st.type === "busy" || st.type === "retry")) {
+    if (st && (st.type === "busy" || st.type === "retry" || st.type === "compact")) {
       const think = el("div", "assistant-block");
       const row = el("div", "thinking-row");
       if (st.type === "retry") {
         row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
+      } else if (st.type === "compact") {
+        row.appendChild(el("span", "ricon", "✳"));
+        row.appendChild(el("span", "shimmer", "Compacting"));
+        row.appendChild(thinkingDots(true));
       } else if (!store || !lastBlockHasText(store)) {
         row.appendChild(el("span", "ricon", "🧠"));
         row.appendChild(el("span", "shimmer", "Thinking"));

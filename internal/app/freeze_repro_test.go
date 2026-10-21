@@ -124,7 +124,7 @@ func TestVLLMStyleBoardMoveThenFinish(t *testing.T) {
 // the prompt return, with the card in done and the tool part completed.
 func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 	provider.SetStreamIdleTimeoutForTest(500 * time.Millisecond)
-	defer provider.SetStreamIdleTimeoutForTest(3 * time.Minute)
+	defer provider.SetStreamIdleTimeoutForTest(15 * time.Minute)
 	// the retry backoff and budget must be shortened too: the production
 	// schedule (5s doubling to 10m, 5m budget) would blow the test's 15s
 	// budget on the stalls
@@ -213,7 +213,7 @@ func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 // abandoned instead of freezing the loop.
 func TestStalledMidStreamRecovers(t *testing.T) {
 	provider.SetStreamIdleTimeoutForTest(500 * time.Millisecond)
-	defer provider.SetStreamIdleTimeoutForTest(3 * time.Minute)
+	defer provider.SetStreamIdleTimeoutForTest(15 * time.Minute)
 
 	h := func(w http.ResponseWriter, r *http.Request) {
 		fl, _ := w.(http.Flusher)

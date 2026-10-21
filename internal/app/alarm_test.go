@@ -32,7 +32,7 @@ func mustJSON(v any) json.RawMessage {
 func TestAlarmToolSetsFutureAlarm(t *testing.T) {
 	i, s := setupAbortTest(t, respondEmptyStopHandler)
 
-	at := util.Now() + 60_000
+	at := util.Now()/1000 + 60
 	res, err := tool.AlarmTool{}.Run(&tool.Ctx{
 		Ctx:       t.Context(),
 		SessionID: s.ID,
@@ -64,7 +64,7 @@ func TestAlarmToolRejectsPastTimestamp(t *testing.T) {
 		Ctx:       t.Context(),
 		SessionID: s.ID,
 		Directory: i.Directory,
-	}, mustJSON(map[string]any{"timestamp": float64(util.Now() - 1000)}))
+	}, mustJSON(map[string]any{"timestamp": float64(util.Now()/1000 - 1)}))
 	if err == nil {
 		t.Fatal("expected an error for a past timestamp")
 	}
@@ -79,12 +79,12 @@ func TestAlarmToolReportsDeviceTime(t *testing.T) {
 	// a fixed instant, far enough in the future to pass the tool's check;
 	// the expected device-local rendering is computed with the same zone
 	// rules the tool uses, so the test is DST-proof
-	at := util.Now() + 365*24*60*60*1000
+	at := util.Now()/1000 + 365*24*60*60
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := time.UnixMilli(at).In(loc).Format("Monday, 02 Jan 2006 15:04:05 MST")
+	want := time.Unix(at, 0).In(loc).Format("Monday, 02 Jan 2006 15:04:05 MST")
 	res, err := tool.AlarmTool{}.Run(&tool.Ctx{
 		Ctx:       t.Context(),
 		SessionID: s.ID,
@@ -109,7 +109,7 @@ func TestAlarmToolReportsDeviceTime(t *testing.T) {
 		Ctx:       t.Context(),
 		SessionID: s.ID,
 		Directory: i.Directory,
-	}, mustJSON(map[string]any{"timestamp": float64(at + 60_000)}))
+	}, mustJSON(map[string]any{"timestamp": float64(at + 60)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +125,10 @@ func TestAlarmSweepWakesSession(t *testing.T) {
 	i, s := setupAbortTest(t, respondEmptyStopHandler)
 	pid := store.ProjectID(i.Directory)
 
-	if _, err := alarm.Add(pid, s.ID, util.Now()-1000, "build finished, check output"); err != nil {
+	if _, err := alarm.Add(pid, s.ID, util.Now()/1000-1, "build finished, check output"); err != nil {
 		t.Fatal(err)
 	}
-	sweepAlarms(i, pid, util.Now())
+	sweepAlarms(i, pid, util.Now()/1000)
 
 	// fireAlarm prompts asynchronously and the prompt takes the session
 	// lock — poll until the wake-up message lands
@@ -151,7 +151,7 @@ func TestAlarmSweepWakesSession(t *testing.T) {
 	}
 
 	// the alarm is marked fired: a second sweep must not wake again
-	if due, err := alarm.ClaimDue(pid, util.Now()); err != nil || len(due) != 0 {
+	if due, err := alarm.ClaimDue(pid, util.Now()/1000); err != nil || len(due) != 0 {
 		t.Fatalf("expected no due alarms after the sweep, got %d (%v)", len(due), err)
 	}
 	alarms, err := alarm.List(pid, s.ID, false)
@@ -173,14 +173,14 @@ func TestAlarmClaimDueIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := alarm.Add(pid, s.ID, util.Now()-1000, ""); err != nil {
+	if _, err := alarm.Add(pid, s.ID, util.Now()/1000-1, ""); err != nil {
 		t.Fatal(err)
 	}
-	first, err := alarm.ClaimDue(pid, util.Now())
+	first, err := alarm.ClaimDue(pid, util.Now()/1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := alarm.ClaimDue(pid, util.Now())
+	second, err := alarm.ClaimDue(pid, util.Now()/1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,10 +198,10 @@ func TestAlarmSweepBroadcastsUpdate(t *testing.T) {
 	ch := i.Hub.Subscribe()
 	defer i.Hub.Unsubscribe(ch)
 
-	if _, err := alarm.Add(pid, s.ID, util.Now()-1000, ""); err != nil {
+	if _, err := alarm.Add(pid, s.ID, util.Now()/1000-1, ""); err != nil {
 		t.Fatal(err)
 	}
-	sweepAlarms(i, pid, util.Now())
+	sweepAlarms(i, pid, util.Now()/1000)
 
 	waitUntil(t, 5*time.Second, func() bool {
 		for {
@@ -223,14 +223,14 @@ func TestAlarmPendingAcrossSessions(t *testing.T) {
 	i, s := setupAbortTest(t, respondEmptyStopHandler)
 	pid := store.ProjectID(i.Directory)
 
-	if _, err := alarm.Add(pid, s.ID, util.Now()+60_000, "first"); err != nil {
+	if _, err := alarm.Add(pid, s.ID, util.Now()/1000+60, "first"); err != nil {
 		t.Fatal(err)
 	}
 	other := &session.Session{ProjectID: pid, Directory: i.Directory, Title: "other"}
 	if err := i.Mgr.Create(other); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := alarm.Add(pid, other.ID, util.Now()+120_000, "second"); err != nil {
+	if _, err := alarm.Add(pid, other.ID, util.Now()/1000+120, "second"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -243,10 +243,10 @@ func TestAlarmPendingAcrossSessions(t *testing.T) {
 	}
 
 	// firing one removes it from the pending set
-	if _, err := alarm.Add(pid, s.ID, util.Now()-1000, "due"); err != nil {
+	if _, err := alarm.Add(pid, s.ID, util.Now()/1000-1, "due"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := alarm.ClaimDue(pid, util.Now()); err != nil {
+	if _, err := alarm.ClaimDue(pid, util.Now()/1000); err != nil {
 		t.Fatal(err)
 	}
 	pending, err = alarm.Pending(pid)

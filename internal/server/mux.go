@@ -113,6 +113,9 @@ func (s *Server) Handler() http.Handler {
 
 	// alarms (one-shot session wake-ups set via the schedule_wakeup tool)
 	handle("GET /alarm", s.listAlarms)
+	handle("GET /alarm/session/{sessionID}", s.sessionAlarms)
+	handle("POST /alarm/{alarmID}/trigger", s.triggerAlarm)
+	handle("DELETE /alarm/{alarmID}", s.deleteAlarm)
 
 	// provider / auth / config
 	handle("GET /provider", func(w http.ResponseWriter, r *http.Request) *apiError { providersHandler(s)(w, r); return nil })

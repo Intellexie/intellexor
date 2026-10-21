@@ -2,11 +2,7 @@ package provider
 
 import (
 	"encoding/json"
-	"os"
 	"sync"
-	"time"
-
-	"github.com/Intellexie/intellexor/internal/store"
 )
 
 type Cost struct {
@@ -109,15 +105,16 @@ type Catalog struct {
 }
 
 var (
-	catMu     sync.Mutex
-	catalog   *Catalog
-	fetchOnce sync.Once
+	catMu   sync.Mutex
+	catalog *Catalog
 )
 
-func cacheFile() string { return store.DataDir() + "/models.json" }
-
+// CatalogNow returns the built-in catalog. It is intentionally empty:
+// providers and models come from user config (intellexor.json /
+// opencode.json) only. The previous models.dev remote fetch and its
+// data-dir cache were removed — re-add them if a shared catalog is
+// wanted again.
 func CatalogNow() *Catalog {
-	fetchOnce.Do(func() { go fetchCatalog() })
 	catMu.Lock()
 	defer catMu.Unlock()
 	if catalog == nil {
@@ -125,50 +122,8 @@ func CatalogNow() *Catalog {
 		if err := json.Unmarshal([]byte(fallbackCatalog), &c); err == nil {
 			catalog = &c
 		}
-		if cat := loadCache(); cat != nil {
-			catalog = cat
-		}
 	}
 	return catalog
-}
-
-func Reload() {
-	go fetchCatalog()
-}
-
-func loadCache() *Catalog {
-	b, err := os.ReadFile(cacheFile())
-	if err != nil {
-		return nil
-	}
-	st, err := os.Stat(cacheFile())
-	if err != nil || time.Since(st.ModTime()) > 7*24*time.Hour {
-		return nil
-	}
-	var c Catalog
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil
-	}
-	return &c
-}
-
-func fetchCatalog() {
-	client := &httpFetchClient{timeout: 15 * time.Second}
-	body, err := client.get("https://models.dev/api.json")
-	if err != nil {
-		return
-	}
-	var c Catalog
-	if err := json.Unmarshal(body, &c.Providers); err != nil {
-		return
-	}
-	_ = os.MkdirAll(store.DataDir(), 0o755)
-	if b, err := json.Marshal(c); err == nil {
-		_ = os.WriteFile(cacheFile(), b, 0o644)
-	}
-	catMu.Lock()
-	catalog = &c
-	catMu.Unlock()
 }
 
 func (c *Catalog) ModelModels(providerID string) map[string]Model {

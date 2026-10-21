@@ -41,7 +41,8 @@ func startAlarmScheduler() {
 // alarmPass fires every due alarm, at most one sweep per project (several
 // instances can share a project — they all see the same alarm file).
 func alarmPass() {
-	now := util.Now()
+	// alarm timestamps are unix seconds (util.Now is milliseconds)
+	now := util.Now() / 1000
 	instMu.Lock()
 	insts := append([]*Instance(nil), instReg...)
 	instMu.Unlock()
@@ -69,18 +70,38 @@ func sweepAlarms(i *Instance, projectID string, now int64) {
 	// the claimed alarms are gone from the pending set — tell connected
 	// clients so the ⏰ indicator on the session disappears right away
 	// (fireAlarm's Prompt broadcast alone would only refresh the timeline).
-	// Publish on every instance of the project: the alarm's session may
-	// belong to a different directory than the sweep's instance.
+	i.publishAlarmUpdate()
+	for _, a := range due {
+		go fireAlarm(i, a)
+	}
+}
+
+// publishAlarmUpdate broadcasts alarm.updated on every instance hub of
+// this instance's project, so connected clients refresh the ⏰ indicators
+// (the alarm's session may belong to a different directory than the
+// mutating instance).
+func (i *Instance) publishAlarmUpdate() {
+	pid := store.ProjectID(i.Directory)
 	instMu.Lock()
 	for _, w := range instReg {
-		if store.ProjectID(w.Directory) == projectID {
+		if store.ProjectID(w.Directory) == pid {
 			w.Hub.Publish("alarm.updated", map[string]any{"directory": w.Directory})
 		}
 	}
 	instMu.Unlock()
-	for _, a := range due {
-		go fireAlarm(i, a)
-	}
+}
+
+// PublishAlarmUpdate is the exported hook for HTTP handlers that mutate
+// alarms outside the sweep (the web UI's trigger-now / delete buttons).
+func (i *Instance) PublishAlarmUpdate() { i.publishAlarmUpdate() }
+
+// FireAlarmNow delivers the wake-up message for an alarm the caller has
+// already claimed (marked fired) — the web UI's "trigger now" button.
+// Like the sweep, the prompt runs in its own goroutine (it blocks on the
+// session lock) and the indicators are refreshed via alarm.updated.
+func (i *Instance) FireAlarmNow(a alarm.Alarm) {
+	i.publishAlarmUpdate()
+	go fireAlarm(i, a)
 }
 
 // fireAlarm injects the wake-up message into the alarm's session, on
