@@ -114,9 +114,12 @@ jobs:
           if [ "$GOOS" = "windows" ]; then ldflags="-H windowsgui $ldflags"; fi
           if [ -n "${{ matrix.cc }}" ]; then export CC="${{ matrix.cc }}"; fi
           if [ "$GOOS" = "darwin" ]; then
-            # Wails' darwin frontend uses UTType but never links its framework
+            # Wails' darwin frontend uses UTType but never links its framework.
+            # CGO_LDFLAGS is passed to the linker unchecked; do NOT set
+            # CGO_LDFLAGS_ALLOW="-framework.*" — its regex matches the bare
+            # "-framework" token, which orphans the framework name and fails
+            # cgo validation with "invalid flag in #cgo LDFLAGS: Foundation".
             export CGO_LDFLAGS="-framework UniformTypeIdentifiers"
-            export CGO_LDFLAGS_ALLOW="-framework.*"
           fi
           mkdir -p dist
           go build -trimpath -tags "${{ matrix.tags }}" \
