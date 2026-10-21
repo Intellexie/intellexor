@@ -62,17 +62,25 @@ mode. Methods: `initialize`, `session/new|load|list|prompt|cancel`,
 By default Intellexor opens the web UI in a native desktop window (via
 [Wails](https://wails.io)) while the server keeps running as usual — the
 window talks to the same in-process handler, so nothing else changes. Pass
-`--headless` (or `-h`) to skip the window and run as a plain server (the
-behavior of binaries built without desktop support).
+`--headless` (or `-h`) to skip the window and run as a plain server.
 
-Desktop builds need the platform's GUI headers and the `desktop,production`
-build tags (on Ubuntu ≥ 24.04 use WebKit 4.1 via the `webkit2_41` tag):
+**There is exactly one app**: desktop vs headless is a runtime argument, not
+a build variant. Release binaries are built with the desktop window included;
+`--headless` turns any of them into a plain server. Building from source
+needs the platform's GUI headers and the `desktop,production` build tags (on
+Ubuntu ≥ 24.04 use WebKit 4.1 via the `webkit2_41` tag):
 
 ```sh
 # Linux: sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
 go build -tags "desktop,production,webkit2_41" -o bin/intellexor .
 ./bin/intellexor --dir /path/to/project
 ```
+
+The released Linux binary dynamically links libgtk/libwebkit — present on any
+desktop distro; headless server deployments belong in Docker (the image
+builds its own CGO-free binary). On macOS, add
+`CGO_LDFLAGS="-framework UniformTypeIdentifiers"` (Wails' darwin frontend
+uses UTType but never links its framework).
 
 Closing the window shuts the server down; if no display is available the
 process logs the GUI error and keeps serving headless.
