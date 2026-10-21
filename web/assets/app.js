@@ -1053,6 +1053,7 @@ function renderWorkspaceTabs() {
     bar.appendChild(tab);
   }
   const plus = el("button", "tab-new", ICONS.plus);
+  plus.appendChild(el("span", "tab-new-label", "workspace"));
   plus.title = "Open workspace";
   plus.onclick = () => openWorkspacePicker();
   bar.appendChild(plus);
@@ -1168,6 +1169,7 @@ function renderTabs() {
     bar.appendChild(tab);
   }
   const plus = el("button", "tab-new", ICONS.plus);
+  plus.appendChild(el("span", "tab-new-label", "session"));
   plus.title = "New session";
   plus.onclick = () => newSessionTab();
   bar.appendChild(plus);
@@ -1876,6 +1878,140 @@ function openScheduleMessageModal(sid) {
   });
 }
 
+// The "Link card" dialog (session header): attach the session to a kanban
+// card — either one still waiting in open, or a newly created one. The card
+// moves to In Progress with the session linked, exactly like a card the
+// session was started from: the agent learns about the card (board context
+// in its system prompt) and can move it to done, which pings its watchers
+// and auto-starts a follow-up card linked to it. Linking an existing
+// session's card back to open (switching or unlinking) releases it for
+// another start.
+async function openLinkCardModal(sess) {
+  const sid = sess.id;
+  let cards = [];
+  const list = el("div", "linkcard-list");
+  const ov = openModal("Link card", (modal) => {
+    modal.appendChild(el("p", "m-sub", "Link this session to a kanban card. The card moves to In Progress and behaves exactly like one the session was started from: the agent works on it, and when it is moved to done, its watchers are pinged and a follow-up card linked to it starts automatically."));
+    modal.appendChild(list);
+
+    const field = el("div", "m-field");
+    field.appendChild(el("label", "m-label", "Or create a new card"));
+    const input = el("input");
+    input.type = "text";
+    input.placeholder = "Describe the task for the agent…";
+    field.appendChild(input);
+    modal.appendChild(field);
+
+    const actions = el("div", "m-actions");
+    const spacer = el("span");
+    spacer.style.flex = "1";
+    const cancel = el("button", "btn ghost", "Cancel");
+    cancel.onclick = () => ov.remove();
+    actions.append(spacer, cancel);
+    const create = el("button", "btn primary", "Create & link");
+    create.onclick = async () => {
+      const title = input.value.trim();
+      if (!title) { input.focus(); return; }
+      create.disabled = true;
+      let card;
+      try {
+        card = await post("/board/card", { title, column: "open" });
+      } catch (e) {
+        create.disabled = false;
+        toast(e.message || String(e), true);
+        return;
+      }
+      // link() toasts, closes the modal and re-renders on failure
+      await link(card.id);
+    };
+    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); create.click(); } };
+    actions.appendChild(create);
+    modal.appendChild(actions);
+    input.focus();
+  });
+
+  let busy = false;
+  const current = () => cards.find((c) => c.sessionID === sid);
+  const openCards = () => cards.filter((c) => c.column === "open" && !c.sessionID);
+
+  // link the card to this session (moving it to In Progress), releasing a
+  // previously linked card back to open first so the session only ever has one
+  async function link(cardID) {
+    if (busy) return;
+    busy = true;
+    try {
+      const prev = current();
+      if (prev && prev.id !== cardID) {
+        await patch("/board/card/" + prev.id, { column: "open", sessionID: "" });
+      }
+      await patch("/board/card/" + cardID, { column: "inprogress", sessionID: sid });
+      ov.remove();
+      toast("Card #" + cardID + " linked — it is now In Progress");
+    } catch (e) {
+      toast(e.message || String(e), true);
+    }
+    busy = false;
+    await reload();
+  }
+
+  async function unlink() {
+    if (busy) return;
+    const cur = current();
+    if (!cur) return;
+    busy = true;
+    try {
+      await patch("/board/card/" + cur.id, { column: "open", sessionID: "" });
+      toast("Card #" + cur.id + " unlinked — it is back in Open");
+    } catch (e) {
+      toast(e.message || String(e), true);
+    }
+    busy = false;
+    await reload();
+  }
+
+  function render() {
+    list.innerHTML = "";
+    const cur = current();
+    if (cur) {
+      list.appendChild(el("p", "m-label", "Linked card"));
+      const row = el("div", "m-row linkcard-row");
+      row.appendChild(el("div", "linkcard-title", "#" + cur.id + " — " + cur.title));
+      const actions = el("div", "m-actions");
+      const un = el("button", "btn danger", "Unlink");
+      un.onclick = unlink;
+      actions.appendChild(un);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+    const open = openCards();
+    list.appendChild(el("p", "m-label", "Pick an open card"));
+    if (!open.length) {
+      list.appendChild(el("p", "m-sub", "No open cards — create a new one below."));
+    }
+    for (const c of open) {
+      const row = el("div", "m-row linkcard-row");
+      row.appendChild(el("div", "linkcard-title", "#" + c.id + " — " + c.title));
+      const actions = el("div", "m-actions");
+      const b = el("button", "btn ghost", "Link");
+      b.onclick = () => link(c.id);
+      actions.appendChild(b);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+  }
+
+  async function reload() {
+    try {
+      cards = await get("/board") || [];
+    } catch (e) {
+      toast(e.message || "Failed to load the board", true);
+    }
+    render();
+  }
+
+  await reload();
+}
+
 function renderSidebar() {
   const list = $("#session-list");
   list.innerHTML = "";
@@ -2275,6 +2411,11 @@ function buildHeaderActions(sess) {
   sched.title = "Schedule a message the session receives at a chosen time (like an alarm the agent sets itself)";
   sched.onclick = (e) => { e.preventDefault(); openScheduleMessageModal(sess.id); };
   wrap.appendChild(sched);
+  const link = el("a", "header-link", "Link card");
+  link.href = "#";
+  link.title = "Link this session to a kanban card — an existing open one or a newly created one; the card moves to In Progress";
+  link.onclick = (e) => { e.preventDefault(); openLinkCardModal(sess); };
+  wrap.appendChild(link);
   return wrap;
 }
 
@@ -3028,6 +3169,13 @@ function setBoardCollapsed(id, collapsed) {
 }
 
 let boardCards = [];
+
+// The unsaved "Add card…" draft (text + attachments) lives here, not in the
+// column's closure: renderBoard() rebuilds the whole board DOM on every
+// board.updated / session-status change, which would otherwise wipe whatever
+// was being typed the moment an agent moves a card or a session goes idle.
+let kanbanAddDraft = "";
+let kanbanAddFiles = [];
 
 // Cards that just started are detected by comparing columns across loads: a
 // card that moved from open to inprogress with a session attached was
@@ -3881,6 +4029,10 @@ function renderBoard() {
   if (board.querySelector('.kanban-card-title[contenteditable="true"]')) return;
   // the orchestrator chat is a board column — keep it across rebuilds
   const chat = $("#board-chat");
+  // was the add-card input focused? the rebuild replaces the node, so focus
+  // (and the caret) must be restored afterwards
+  const prevAdd = board.querySelector(".kanban-add-input");
+  const addFocused = !!prevAdd && document.activeElement === prevAdd;
   board.innerHTML = "";
   // collapsed columns live in a vertical rail on the left, stacked below
   // each other; expanded columns fill the rest of the board
@@ -3893,6 +4045,16 @@ function renderBoard() {
     if (!boardCollapsed[col.id]) board.appendChild(buildBoardColumn(col));
   }
   if (chat) board.appendChild(chat);
+  // restore focus into the rebuilt add-card input (the draft text itself is
+  // re-applied by buildBoardColumn from kanbanAddDraft)
+  if (addFocused) {
+    const nextAdd = board.querySelector(".kanban-add-input");
+    if (nextAdd) {
+      nextAdd.focus();
+      const end = nextAdd.value.length;
+      nextAdd.setSelectionRange(end, end);
+    }
+  }
   drawLinkLines(); // repaint the border-to-border lines between linked cards
 }
 
@@ -3966,7 +4128,8 @@ function buildBoardColumn(col) {
     const input = el("textarea", "kanban-add-input");
     input.rows = 1;
     input.placeholder = "Add card…";
-    const files = [];
+    input.value = kanbanAddDraft; // restore the unsaved draft across rebuilds
+    const files = kanbanAddFiles; // shared: attachments survive re-renders too
     const attachRow = el("div", "attach-row");
     const redraw = () => {
       renderAttachChipsInto(attachRow, files, (a) => {
@@ -3985,7 +4148,7 @@ function buildBoardColumn(col) {
       e.preventDefault();
       addFiles([...fl]);
     };
-    input.oninput = () => autosize(input);
+    input.oninput = () => { kanbanAddDraft = input.value; autosize(input); };
     const attachBtn = el("button", "kanban-add-attach", ICONS.plus);
     attachBtn.title = "Attach files";
     const fileInput = document.createElement("input");
@@ -4005,6 +4168,7 @@ function buildBoardColumn(col) {
       try {
         await post("/board/card", { title, column: "open", attachments });
         input.value = "";
+        kanbanAddDraft = "";
         files.length = 0;
         redraw();
         await loadBoard();

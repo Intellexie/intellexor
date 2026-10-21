@@ -36,6 +36,11 @@ var ErrBadLink = errors.New("card can only be linked to a card in the open colum
 // scheduled (clearing a schedule is always allowed).
 var ErrNotOpen = errors.New("only cards in the open column can be scheduled")
 
+// ErrBadSession is returned when a session is linked to a card it cannot
+// work on: the card is no longer waiting in the open column (already
+// started, moved or done), or another session is already linked to it.
+var ErrBadSession = errors.New("only cards waiting in the open column can be linked to a session")
+
 // OnMovedToDone, when set, is called after a card is moved into the done
 // column from another column — from any entry point (the agent's board tool,
 // the HTTP API, ACP), since they all go through Update. It is called without
@@ -272,7 +277,9 @@ func Add(projectID, title string, attachments []Attachment) (Card, error) {
 // Update edits a card's title, links it to a session, and/or moves it.
 // When column is set the card is placed before the card with ID before
 // (end of the column when before is empty or missing from it). Both
-// affected columns are renumbered. Moving a card out of open clears its
+// affected columns are renumbered. Linking a session is only allowed while
+// the card is still waiting in open and unowned — the same precondition
+// startCard enforces. Moving a card out of open clears its
 // start schedule (a schedule only makes sense for a waiting card — starting
 // it, by hand or by the scheduler, consumes it). Moving a card into done
 // fires OnMovedToDone (after the lock is released).
@@ -303,6 +310,15 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 	}
 	if idx < 0 {
 		return Card{}, false, ErrNotFound
+	}
+	// linking a session is only meaningful for a card that is still waiting
+	// in open and not owned by another session — the same precondition
+	// startCard enforces, so the web UI's link dialog cannot hijack a card
+	// that is in progress or done (clearing a sessionID is always allowed)
+	if sessionID != nil && *sessionID != "" {
+		if cards[idx].Column != "open" || (cards[idx].SessionID != "" && cards[idx].SessionID != *sessionID) {
+			return Card{}, false, ErrBadSession
+		}
 	}
 	if title != nil {
 		cards[idx].Title = *title

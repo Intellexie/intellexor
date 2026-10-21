@@ -77,3 +77,40 @@ func TestAddPersistsAttachments(t *testing.T) {
 		t.Fatalf("attachments did not survive the reload: %+v", cards[0].Attachments)
 	}
 }
+
+// A session can only be linked to a card that is still waiting in open and
+// not owned by another session — the same precondition startCard enforces.
+// Clearing a sessionID (empty string) is always allowed.
+func TestUpdateRejectsSessionLinkOnNonOpenOrOwnedCard(t *testing.T) {
+	projectID := setup(t)
+
+	card, err := Add(projectID, "Guarded", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// link session A while the card is open (the start flow) — allowed
+	col := "inprogress"
+	sessA, sessB := "sess-a", "sess-b"
+	if _, err := Update(projectID, card.ID, nil, &col, nil, &sessA); err != nil {
+		t.Fatal(err)
+	}
+	// another session cannot take the card while it is linked to A
+	if _, err := Update(projectID, card.ID, nil, nil, nil, &sessB); err != ErrBadSession {
+		t.Fatalf("re-linking an owned card: err = %v, want ErrBadSession", err)
+	}
+	// no session can be linked to a card that already left open
+	if _, err := Update(projectID, card.ID, nil, nil, nil, &sessA); err != ErrBadSession {
+		t.Fatalf("re-linking an in-progress card: err = %v, want ErrBadSession", err)
+	}
+	// clearing the link is always allowed (the card goes back to open,
+	// released from its session)
+	open := "open"
+	empty := ""
+	if _, err := Update(projectID, card.ID, nil, &open, nil, &empty); err != nil {
+		t.Fatal(err)
+	}
+	// and now B can take it
+	if _, err := Update(projectID, card.ID, nil, &col, nil, &sessB); err != nil {
+		t.Fatal(err)
+	}
+}

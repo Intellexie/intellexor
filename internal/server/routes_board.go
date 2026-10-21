@@ -104,6 +104,9 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 	if err == board.ErrNotFound {
 		return notFound("Card not found: " + r.PathValue("cardID"))
 	}
+	if err == board.ErrBadSession {
+		return badRequest("Only cards still waiting in the open column can be linked to a session")
+	}
 	if err != nil {
 		return badRequest(err.Error())
 	}
