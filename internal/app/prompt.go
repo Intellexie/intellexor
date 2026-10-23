@@ -172,8 +172,10 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		if ctx.Err() != nil {
 			break
 		}
-		// opencode checks context overflow before every step (getMessages)
-		// and summarizes into a fresh summary when the window is exceeded
+		// opencode compacts proactively before every step (runner/llm.ts +
+		// SessionCompaction.due): once the estimated context reaches the
+		// window minus its reserve, summarize into a fresh summary while the
+		// summary request still fits
 		i.autoCompact(ctx, s, resolved, model, agentName)
 
 		asst = session.AssistantMessage{

@@ -266,10 +266,13 @@ default — this covers vLLM, one-api, OpenRouter, Ollama, etc:
   "ask"}}`, last matching rule wins) but is currently inert — everything is
   allowed.
 - `compaction` controls context compaction (opencode-style): `"auto": false`
-  disables the automatic summarize-when-overflow pass, `"reserved"` overrides
-  the token reserve kept free below the model's context window (default: the
-  model's output limit, capped at 32000). `/compact` in the composer
-  summarizes the session on demand either way.
+  disables the automatic summarize pass, `"reserved"` overrides the token
+  reserve kept free below the model's context window (default: 15% of the
+  window, at least 16000 for windows that can afford it). Auto compaction
+  fires proactively — once the estimated context (the last response's
+  measured prompt size plus the unmeasured growth since) reaches the window
+  minus that reserve — so the summary request itself still fits.
+  `/compact` in the composer summarizes the session on demand either way.
 
 ## HTTP API
 

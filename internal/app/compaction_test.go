@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -87,33 +88,79 @@ func compactionConfigLimits(t *testing.T, base, extra string, context, output fl
 	return work
 }
 
-func TestIsOverflow(t *testing.T) {
-	m := provider.Model{Limit: provider.Limit{Context: 200000, Output: 32000}}
-	// count = input + cache.read + output; usable = window - min(output, 32000)
-	if isOverflow(session.Tokens{Input: 100000, Cache: session.CacheTokens{Read: 30000}, Output: 5000}, m, nil) {
-		t.Fatal("135500 count vs 168000 usable: no overflow expected")
+func TestCompactionCeiling(t *testing.T) {
+	// ceiling = window - max(floor(15%), 16k for windows >= 32k)
+	if c := compactionCeiling(100000, nil); c != 84000 {
+		t.Fatalf("100k window: 15k share < 16k min, expected ceiling 84000, got %v", c)
 	}
-	if !isOverflow(session.Tokens{Input: 180000, Output: 5000}, m, nil) {
-		t.Fatal("185000 count vs 168000 usable: overflow expected")
+	if c := compactionCeiling(200000, nil); c != 170000 {
+		t.Fatalf("200k window: 15%% share wins, expected ceiling 170000, got %v", c)
 	}
-	// unknown window never triggers (opencode: context === 0)
-	if isOverflow(session.Tokens{Input: 999999}, provider.Model{}, nil) {
+	if c := compactionCeiling(20000, nil); c != 17000 {
+		t.Fatalf("20k window cannot afford the 16k min: expected ceiling 17000, got %v", c)
+	}
+	if !math.IsInf(compactionCeiling(0, nil), 1) {
+		t.Fatal("unknown window must never trigger auto compaction")
+	}
+	r := float64(5000)
+	if c := compactionCeiling(100000, &r); c != 95000 {
+		t.Fatalf("compaction.reserved overrides the computed reserve: expected 95000, got %v", c)
+	}
+}
+
+// TestCompactionDue pins the proactive trigger: the estimate is the last
+// response's measured prompt size plus the unmeasured growth since (local
+// tool results, the new user message), and compaction fires at the ceiling —
+// while the context still fits the raw window, so the summary request itself
+// is guaranteed room. The old post-overflow check (count > window - output)
+// would not have fired in this scenario.
+func TestCompactionDue(t *testing.T) {
+	model := provider.Model{Limit: provider.Limit{Context: 10000, Output: 1000}}
+	// ceiling = 10000 - 1500 = 8500; old usable would have been 9000
+	msgs := []session.WithParts{
+		{Info: session.UserMessage{ID: "u1", Role: "user"}},
+		{Info: session.AssistantMessage{ID: "a1", Role: "assistant", Tokens: session.Tokens{Input: 8000, Output: 100}}},
+		{Info: session.UserMessage{ID: "u2", Role: "user"}, Parts: []session.Part{
+			{Type: "text", Text: strings.Repeat("x", 4000)}, // ~1000 unmeasured tokens
+		}},
+	}
+	// 8000 + 100 measured + ~1000 tail = ~9100 >= 8500: due, although the
+	// context still fits the window (old check: 8100 <= 9000, not due)
+	if !compactionDue(msgs, model, nil) {
+		t.Fatal("estimated 9100 >= ceiling 8500: compaction must be due")
+	}
+	// without the unmeasured tail the context is under the ceiling
+	short := []session.WithParts{msgs[0], msgs[1],
+		{Info: session.UserMessage{ID: "u2", Role: "user"}, Parts: []session.Part{
+			{Type: "text", Text: "hi"},
+		}},
+	}
+	if compactionDue(short, model, nil) {
+		t.Fatal("estimated ~8100 < ceiling 8500: not due yet")
+	}
+	// an explicit reserved buffer moves the ceiling (window - reserved):
+	// 2000 makes it due (ceiling 8000 < estimate 9100), 500 delays it
+	// (ceiling 9500 > 9100)
+	r := float64(2000)
+	if !compactionDue(msgs, model, &r) {
+		t.Fatal("reserved 2000 -> ceiling 8000, estimated 9100: due expected")
+	}
+	r = float64(500)
+	if compactionDue(msgs, model, &r) {
+		t.Fatal("reserved 500 -> ceiling 9500, estimated 9100: not due")
+	}
+	// unknown window never triggers
+	if compactionDue(msgs, provider.Model{}, nil) {
 		t.Fatal("unknown window must never trigger")
 	}
-	// output reserve capped at outputTokenMax
-	big := provider.Model{Limit: provider.Limit{Context: 100000, Output: 200000}}
-	if !isOverflow(session.Tokens{Input: 69000}, big, nil) {
-		t.Fatal("reserve must cap at 32000: 69000 > 100000-32000")
+	// without any measured response, the whole history is estimated
+	noAnchor := []session.WithParts{
+		{Info: session.UserMessage{ID: "u1", Role: "user"}, Parts: []session.Part{
+			{Type: "text", Text: strings.Repeat("x", 4000)},
+		}},
 	}
-	// config reserved overrides the output-based reserve: reserving less
-	// delays compaction (usable = window - reserved)
-	small := provider.Model{Limit: provider.Limit{Context: 10000, Output: 8000}}
-	if !isOverflow(session.Tokens{Input: 2500}, small, nil) {
-		t.Fatal("default reserve = output limit 8000 -> usable 2000: overflow expected")
-	}
-	r := float64(1000)
-	if isOverflow(session.Tokens{Input: 2500}, small, &r) {
-		t.Fatal("reserved 1000 -> usable 9000: no overflow expected")
+	if est := estimateContext(noAnchor); est != 1000 {
+		t.Fatalf("no anchor: estimate the whole history, expected 1000, got %v", est)
 	}
 }
 

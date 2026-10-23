@@ -12,25 +12,32 @@ import (
 	"github.com/Intellexie/intellexor/internal/util"
 )
 
-// Context compaction, mirroring opencode v1
-// (packages/opencode/src/session/compaction.ts + the overflow check in
-// session/prompt.ts getMessages):
+// Context compaction, mirroring opencode
+// (packages/core/src/session/compaction.ts + the due() check in
+// runner/llm.ts):
 //
 //   - the conversation up to now is summarized into an assistant message with
 //     `summary: true`; later requests replay history starting from that
 //     message (filterCompacted), so everything the summary covers leaves the
 //     context window
-//   - auto compaction runs before a step when the newest assistant usage
-//     shows the context overflowing the model window minus the output
-//     reserve; a synthetic user message then asks the model to resume from
-//     the summary
+//   - auto compaction runs proactively before a step: once the estimated
+//     context (the last response's measured prompt size plus a char estimate
+//     of the unmeasured growth since) reaches the window minus a 15% reserve,
+//     the conversation is summarized while the summary request is guaranteed
+//     to still fit; a synthetic user message then asks the model to resume
+//     from the summary
 //   - prune clears old tool outputs (ToolTime.Compacted) so stale results
 //     stop occupying the window; BuildHistory renders them as
 //     "[Old tool result content cleared]"
 
 const (
-	// outputTokenMax caps the output reserve (opencode SessionPrompt.OUTPUT_TOKEN_MAX).
-	outputTokenMax = 32000
+	// reserveShare: share of the context window kept free before auto
+	// compaction triggers (opencode RESERVE_SHARE).
+	reserveShare = 0.15
+	// reserveMin: the least of the window kept free for the summary and the
+	// model's reply (opencode RESERVE_MIN) — only for windows that can
+	// afford it (>= 2*reserveMin).
+	reserveMin = 16000
 	// pruneMinimum: a prune pass only rewrites parts when it frees at least this many tokens.
 	pruneMinimum = 20000
 	// pruneProtect: tool output within this budget of the newest end stays verbatim.
@@ -68,27 +75,70 @@ func estimateTokens(s string) float64 {
 	return math.Round(float64(len(s)) / charsPerToken)
 }
 
-// isOverflow reports whether the newest assistant usage shows the context
-// over the model's usable window (opencode SessionCompaction.isOverflow):
-// count = input + cache.read + output vs window - output reserve. A model
-// with an unknown window (0) never triggers.
-func isOverflow(tokens session.Tokens, model provider.Model, reserved *float64) bool {
-	window := model.Limit.Context
+// compactionCeiling returns the largest context that does not yet trigger
+// auto compaction (opencode calculateCeiling): the window minus a 15% reserve,
+// at least 16k for windows that can afford it. An explicit compaction.reserved
+// config overrides the computed reserve. An unknown window (0) returns +Inf:
+// auto compaction never triggers.
+func compactionCeiling(window float64, reserved *float64) float64 {
 	if window <= 0 {
-		return false
+		return math.Inf(1)
 	}
-	count := tokens.Input + tokens.Cache.Read + tokens.Output
-	var usable float64
-	if reserved != nil {
-		usable = window - *reserved
-	} else {
-		out := model.Limit.Output
-		if out <= 0 || out > outputTokenMax {
-			out = outputTokenMax
+	if reserved != nil && *reserved < window {
+		return window - *reserved
+	}
+	r := math.Floor(window * reserveShare)
+	if window >= 2*reserveMin && r < reserveMin {
+		r = reserveMin
+	}
+	return window - r
+}
+
+// estimateHistory char-estimates wire messages at charsPerToken (opencode
+// estimateMessage/estimateRequest).
+func estimateHistory(msgs []provider.Msg) float64 {
+	var chars int
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			chars += len(b.Text) + len(b.Thinking) + len(b.Output) + len(b.Input) + len(b.Data)
 		}
-		usable = window - out
 	}
-	return count > usable
+	return math.Round(float64(chars) / charsPerToken)
+}
+
+// estimateContext mirrors opencode estimateContext: the provider-measured
+// prompt size at the latest response plus a char-based estimate of the
+// messages since it — local tool results the provider never saw and the new
+// user message. Without any measured response yet it estimates the whole
+// replayed history.
+func estimateContext(msgs []session.WithParts) float64 {
+	anchor := -1
+	var measured float64
+	for j := len(msgs) - 1; j >= 0; j-- {
+		if a, ok := msgs[j].Info.(session.AssistantMessage); ok && a.Tokens.Input+a.Tokens.Cache.Read > 0 {
+			anchor = j
+			measured = a.Tokens.Input + a.Tokens.Cache.Read + a.Tokens.Cache.Write + a.Tokens.Output + a.Tokens.Reasoning
+			break
+		}
+	}
+	if anchor < 0 {
+		return estimateHistory(historyFrom(msgs))
+	}
+	// the anchor's own output is already in the measured count; its local
+	// tool results (the wire user message after it) are not — count them
+	tail := historyFrom(msgs[anchor:])
+	if len(tail) > 0 && tail[0].Role == "assistant" {
+		tail = tail[1:]
+	}
+	return measured + estimateHistory(tail)
+}
+
+// compactionDue reports whether auto compaction should run before the next
+// step (opencode SessionCompaction.due): the estimated context has reached
+// the ceiling. Firing at the ceiling — not after the window is exhausted —
+// is what guarantees the summary request itself still fits.
+func compactionDue(msgs []session.WithParts, model provider.Model, reserved *float64) bool {
+	return estimateContext(msgs) >= compactionCeiling(model.Limit.Context, reserved)
 }
 
 func reservedOf(cfg *config.CompactionCfg) *float64 {
@@ -270,6 +320,20 @@ func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolv
 		}
 	}
 	req.Messages = history
+	// keep the summary request inside the window: the trigger reserves
+	// headroom, but a single huge step can eat into it — cap the output to
+	// what the estimate says is left (opencode sizes the summary request to
+	// its budget). The prefix-cache mirror is unaffected: max_tokens is not
+	// part of the cached prefix.
+	if window := model.Limit.Context; window > 0 {
+		room := window - estimateContext(toSummarize) - estimateTokens(ask)
+		if room < 1024 {
+			room = 1024
+		}
+		if mt := int(room); req.MaxTokens > mt {
+			req.MaxTokens = mt
+		}
+	}
 	ch, err := resolved.Client().Stream(ctx, req, nil)
 	if err != nil {
 		return session.WithParts{}, err
@@ -382,10 +446,11 @@ func (i *Instance) appendResumeMessage(s *session.Session, resolved *provider.Re
 	i.Hub.Publish("message.part.updated", map[string]any{"sessionID": s.ID, "part": p, "time": util.Now()})
 }
 
-// autoCompact mirrors opencode's per-step overflow check in getMessages: when
-// the newest assistant usage shows the context over the usable window,
-// summarize and continue from the summary. Called before each step of the
-// prompt loop; a failed summary leaves history untouched.
+// autoCompact mirrors opencode's per-step proactive check (runner/llm.ts
+// runStep + SessionCompaction.due): once the estimated context reaches the
+// window minus its reserve, summarize and continue from the summary — while
+// the summary request is guaranteed to still fit. Called before each step of
+// the prompt loop; a failed summary leaves history untouched.
 func (i *Instance) autoCompact(ctx context.Context, s *session.Session, resolved *provider.Resolved, model provider.Model, agentName string) {
 	cfg := compactionCfg(i.Directory)
 	if cfg != nil && cfg.Auto != nil && !*cfg.Auto {
@@ -395,17 +460,18 @@ func (i *Instance) autoCompact(ctx context.Context, s *session.Session, resolved
 	if err != nil {
 		return
 	}
-	var last *session.AssistantMessage
-	for j := len(msgs) - 1; j >= 0; j-- {
-		if a, ok := msgs[j].Info.(session.AssistantMessage); ok {
-			last = &a
+	filtered := filterCompacted(msgs)
+	hasAssistant := false
+	for _, m := range filtered {
+		if _, ok := m.Info.(session.AssistantMessage); ok {
+			hasAssistant = true
 			break
 		}
 	}
-	if last == nil {
-		return
+	if !hasAssistant {
+		return // nothing to compact yet
 	}
-	if !isOverflow(last.Tokens, model, reservedOf(cfg)) {
+	if !compactionDue(filtered, model, reservedOf(cfg)) {
 		return
 	}
 	// auto compaction always runs on the conversation's own model — mirror
