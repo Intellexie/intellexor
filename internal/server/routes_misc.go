@@ -137,8 +137,14 @@ func (s *Server) replyQuestion(w http.ResponseWriter, r *http.Request) *apiError
 
 func (s *Server) rejectQuestion(w http.ResponseWriter, r *http.Request) *apiError {
 	in := s.Instance(directoryOf(r))
-	if err := in.Quest.Reject(r.PathValue("requestID")); err != nil {
+	sessionID, err := in.Quest.Reject(r.PathValue("requestID"))
+	if err != nil {
 		return notFound("Question not found: " + r.PathValue("requestID"))
+	}
+	// dismissing a question also stops the run: the agent is blocked on the
+	// answer and must not resume with the refusal as a tool result
+	if sessionID != "" {
+		in.Abort(sessionID)
 	}
 	writeTrue(w)
 	return nil

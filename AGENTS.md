@@ -33,6 +33,21 @@ Tests are fully local (httptest fake providers streaming SSE) — no network or 
 - HTTP API follows opencode v1 shapes: errors as `{name, data}`, success as bare JSON.
 - `internal/server/templates/*.txt` are the built-in command prompts (e.g. `/init`, `/review`).
 
+## API documentation (`api_docs.md`)
+
+`api_docs.md` (repo root) is the **complete client-facing API reference** — HTTP endpoints, SSE event catalog, ACP JSON-RPC surface, and all wire types — written for agents building UI clients against this server.
+
+**MAINTAIN IT: every time the API changes, update `api_docs.md` in the same change.** Concretely, whenever a commit touches any of the following, check the doc for drift and fix it:
+
+- `internal/server/` (routes_*.go, mux.go, server.go, workspace.go) — new/changed/removed endpoints, request/response shapes, error names
+- `internal/session/types.go` — wire types (Session, Message, Part, ToolState, …)
+- `internal/acp/` — JSON-RPC methods, `session/update` variants, error codes
+- `internal/board/`, `internal/cron/`, `internal/alarm/` — data models and semantics
+- `internal/bus/` + publish call sites in `internal/app/` — event types and their `properties` payloads
+- `internal/config/`, `internal/auth/`, `internal/provider/` — config/auth/provider shapes
+
+When adding an endpoint or event, add it to the relevant section **and** the §14 quick-reference table (events also go in the §11.3 catalog). Keep the timestamp-unit warnings (ms vs seconds) accurate. If unsure whether something changed the public surface, diff the route registrations in `internal/server/mux.go` and the `Hub.Publish` call sites against the doc.
+
 You are runniong as the process "intellexor", if you kill it you will kill the session completely.
 When the user asks you to "deploy it", commit eveything, increment the tag, point the "latest" tag to the latest commit and push.
 Github PAT is available in GITHUB_PAT env-var. 

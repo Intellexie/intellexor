@@ -5366,10 +5366,26 @@ async function replyPermission(id, reply) {
 
 function buildQuestionDock(q) {
   const dock = el("div", "dock");
-  let qi = 0;
-  const answers = q.questions.map(() => []);
+  // Answers, current index, and the input draft live on the request object:
+  // renderComposerRegion() rebuilds this dock from scratch on every bus
+  // event, and closure-local state would silently reset (wiping typed
+  // answers) each time.
+  if (!Array.isArray(q._answers) || q._answers.length !== q.questions.length) {
+    q._answers = q.questions.map(() => []);
+  }
+  const answers = q._answers;
+  if (typeof q._qi !== "number" || q._qi < 0 || q._qi >= q.questions.length) q._qi = 0;
+  let qi = q._qi;
+  let draft = typeof q._draft === "string" ? q._draft : "";
+  let inputEl = null;
+
+  const submit = () => {
+    post(`/question/${q.id}/reply`, { answers }).catch((e) => toast(e.message, true));
+  };
 
   function render() {
+    q._qi = qi;
+    const wasFocused = !!(inputEl && document.activeElement === inputEl);
     dock.innerHTML = "";
     const cur = q.questions[qi];
     const head = el("div", "d-head");
@@ -5395,14 +5411,28 @@ function buildQuestionDock(q) {
     }
     dock.appendChild(opts);
     const input = el("input", "q-input");
+    inputEl = input;
     input.placeholder = "Type your answer…";
+    input.value = draft;
+    input.oninput = () => { draft = input.value; q._draft = draft; };
+    // Enter commits a custom answer; on the last question it sends the reply
+    // right away instead of forcing a second click on Submit.
+    const commitCustom = (sendNow) => {
+      const v = input.value.trim();
+      if (!v) return;
+      answers[qi] = [v];
+      draft = ""; q._draft = "";
+      if (!sendNow && qi < q.questions.length - 1) qi++;
+      if (sendNow) submit();
+      else render();
+    };
     input.onkeydown = (e) => {
-      if (e.key === "Enter" && input.value.trim()) {
-        answers[qi] = [input.value.trim()];
-        render();
-      }
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      commitCustom(qi === q.questions.length - 1);
     };
     dock.appendChild(input);
+    if (wasFocused) input.focus();
     const actions = el("div", "d-actions");
     const dismiss = el("button", "btn ghost", "Dismiss");
     dismiss.onclick = async () => {
@@ -5419,11 +5449,13 @@ function buildQuestionDock(q) {
       next.onclick = () => { qi++; render(); };
       actions.appendChild(next);
     } else {
-      const submit = el("button", "btn primary", "Submit");
-      submit.onclick = async () => {
-        await post(`/question/${q.id}/reply`, { answers }).catch((e) => toast(e.message, true));
+      const submitBtn = el("button", "btn primary", "Submit");
+      submitBtn.onclick = () => {
+        // an uncommitted draft still counts if nothing was selected
+        if (!answers[qi].length && draft.trim()) answers[qi] = [draft.trim()];
+        submit();
       };
-      actions.appendChild(submit);
+      actions.appendChild(submitBtn);
     }
     dock.appendChild(actions);
   }

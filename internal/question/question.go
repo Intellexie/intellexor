@@ -82,7 +82,10 @@ func (s *Service) Reply(id string, answers [][]string) error {
 	return nil
 }
 
-func (s *Service) Reject(id string) error {
+// Reject refuses the request: the blocked Ask returns RejectedError and the
+// session ID of the refused request is returned so callers can stop the run
+// (dismissing a question must not let the agent keep going).
+func (s *Service) Reject(id string) (string, error) {
 	s.mu.Lock()
 	e, ok := s.pending[id]
 	if ok {
@@ -90,11 +93,11 @@ func (s *Service) Reject(id string) error {
 	}
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("Question not found")
+		return "", errors.New("Question not found")
 	}
 	e.answers <- nil
 	s.hub.Publish("question.rejected", map[string]any{"sessionID": e.req.SessionID, "requestID": id})
-	return nil
+	return e.req.SessionID, nil
 }
 
 func (s *Service) Pending() []Request {
