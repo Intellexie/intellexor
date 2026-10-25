@@ -151,6 +151,7 @@ func (c *Client) streamOpenAI(ctx context.Context, req Request) (<-chan StreamEv
 		var tcOrder []int
 		var usage Usage
 		var finish string
+		sawChunk := false
 
 		closeText := func() {
 			if textStarted {
@@ -184,6 +185,7 @@ func (c *Client) streamOpenAI(ctx context.Context, req Request) (<-chan StreamEv
 		}
 
 		err := postSSE(ctx, url, c.openaiHeaders(), body, c.streamIdle(), func(event string, data []byte) (bool, error) {
+			sawChunk = true
 			var chunk struct {
 				Choices []struct {
 					Delta struct {
@@ -274,6 +276,18 @@ func (c *Client) streamOpenAI(ctx context.Context, req Request) (<-chan StreamEv
 		emitToolCalls()
 		if err != nil && ctx.Err() == nil {
 			out <- StreamEvent{Type: "error", Err: toStreamError(err)}
+			return
+		}
+		// A connection that dies mid-stream with a clean EOF (FIN, no reset)
+		// makes postSSE return nil — without this check the truncated turn
+		// would be reported as a bogus finish and the lost tail silently
+		// accepted. Any chunk without a finish_reason means the stream was
+		// cut short: surface a retryable error so the step gets retried.
+		if finish == "" && sawChunk && ctx.Err() == nil {
+			out <- StreamEvent{Type: "error", Err: &StreamError{
+				Message:     "provider closed the connection mid-stream before finishing",
+				IsRetryable: true,
+			}}
 			return
 		}
 		u := usage

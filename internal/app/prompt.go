@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Intellexie/intellexor/internal/config"
 
@@ -15,6 +16,13 @@ import (
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/util"
 )
+
+// maxStepRetries bounds the app-level step retry for mid-stream provider
+// failures (connection reset, truncated SSE): one initial attempt plus three
+// retries, on the shared provider backoff schedule (5s, 10s, 20s). The
+// provider client's own retry budget (5 minutes, nothing-on-the-wire only)
+// still applies within each attempt.
+const maxStepRetries = 3
 
 var isGitRootCache = map[string]bool{}
 
@@ -178,24 +186,66 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		// summary request still fits
 		i.autoCompact(ctx, s, resolved, model, agentName)
 
-		asst = session.AssistantMessage{
-			ID:         util.ID("msg"),
-			SessionID:  s.ID,
-			Role:       "assistant",
-			ParentID:   userMsg.ID,
-			Time:       session.MsgTime{Created: util.Now()},
-			ModelID:    model.ID,
-			ProviderID: resolved.ID,
-			Mode:       agent.Mode,
-			Agent:      agentName,
-			Path:       session.Path{Cwd: i.Directory, Root: i.Worktree},
-			Variant:    variantOf(in.Variant, s.Model),
-		}
-		_ = i.Mgr.SaveMessage(s, asst)
-		i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": asst})
+		// A mid-stream provider failure (connection reset by peer, truncated
+		// SSE, stall after partial output) cannot be retried inside the
+		// provider client — the text already forwarded would be replayed and
+		// duplicated. The step is retried here instead: a fresh assistant
+		// message is opened and the request resent. The history rebuild ends
+		// with the last user message or tool output (the dead partial turn is
+		// excluded from history, see historyFrom), which is exactly what the
+		// model needs to continue the run. The failed attempt stays in the
+		// transcript with its error and a retry marker.
+		var p *processor
+		for attempt := 0; ; attempt++ {
+			asst = session.AssistantMessage{
+				ID:         util.ID("msg"),
+				SessionID:  s.ID,
+				Role:       "assistant",
+				ParentID:   userMsg.ID,
+				Time:       session.MsgTime{Created: util.Now()},
+				ModelID:    model.ID,
+				ProviderID: resolved.ID,
+				Mode:       agent.Mode,
+				Agent:      agentName,
+				Path:       session.Path{Cwd: i.Directory, Root: i.Worktree},
+				Variant:    variantOf(in.Variant, s.Model),
+			}
+			_ = i.Mgr.SaveMessage(s, asst)
+			i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": asst})
 
-		p := newProcessor(i, s, &asst)
-		p.runStep(ctx, resolved, model, agentName, agent, in.System)
+			p = newProcessor(i, s, &asst)
+			p.runStep(ctx, resolved, model, agentName, agent, in.System)
+
+			if !p.failed || p.aborted || !p.retryable || attempt >= maxStepRetries {
+				break
+			}
+
+			// abort always wins over the backoff sleep
+			delay := provider.Backoff(attempt + 1)
+			errMsg := "retryable provider error"
+			if p.msg.Error != nil {
+				if m, ok := p.msg.Error.Data["message"].(string); ok && m != "" {
+					errMsg = m
+				}
+			}
+			i.SetStatus(s.ID, StatusInfo{"type": "retry", "attempt": attempt + 1,
+				"message": errMsg, "next": util.Now() + delay.Milliseconds()})
+			p.publishPart(session.Part{
+				ID: util.ID("prt"), SessionID: s.ID, MessageID: asst.ID, Type: "retry",
+				Attempt: attempt + 1, Error: p.msg.Error,
+				Time: &session.PartTime{Start: util.Now()},
+			})
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+			case <-timer.C:
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			i.SetStatus(s.ID, StatusInfo{"type": "busy"})
+		}
 
 		stepTools = p.toolsCalled
 

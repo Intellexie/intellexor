@@ -210,10 +210,14 @@ func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 }
 
 // A stream that stalls MID-body (bytes flowed, then silence) must also be
-// abandoned instead of freezing the loop.
+// abandoned instead of freezing the loop. With the step-level retry the stall
+// is first retried (backoff shortened for the test); when every attempt
+// stalls again, the turn ends with the retryable stall error.
 func TestStalledMidStreamRecovers(t *testing.T) {
 	provider.SetStreamIdleTimeoutForTest(500 * time.Millisecond)
 	defer provider.SetStreamIdleTimeoutForTest(15 * time.Minute)
+	provider.SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
+	defer provider.SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
 
 	h := func(w http.ResponseWriter, r *http.Request) {
 		fl, _ := w.(http.Flusher)

@@ -26,6 +26,7 @@ type processor struct {
 	toolsCalled int
 	failed      bool
 	aborted     bool
+	retryable   bool // last failure was retryable (mid-stream reset, 5xx, stall)
 
 	doomSig   string
 	doomCount int
@@ -491,6 +492,7 @@ func (p *processor) flushDiffs() {
 func (p *processor) failWith(e *provider.StreamError) {
 	i := p.i
 	p.failed = true
+	p.retryable = e != nil && e.IsRetryable
 	p.flushOpenParts()
 	if e == nil {
 		e = &provider.StreamError{Message: "Unknown error"}

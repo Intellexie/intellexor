@@ -153,6 +153,12 @@ func SetRetryBackoffForTest(base, max time.Duration) {
 // SetRetryBudgetForTest overrides the total retry budget (tests only).
 func SetRetryBudgetForTest(d time.Duration) { retryBudget = d }
 
+// Backoff exposes the retry delay schedule to the app-level step retry. A
+// mid-stream failure (after partial output was forwarded) cannot be retried
+// inside Stream without duplicating the text already on the wire, so the
+// prompt loop retries the whole step and reuses this schedule.
+func Backoff(attempt int) time.Duration { return backoff(attempt) }
+
 // backoff returns the wait before retry after the given 1-based attempt.
 // Doubled multiplicatively but clamped, so it is overflow-safe for any
 // attempt count.

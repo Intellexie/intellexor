@@ -52,6 +52,16 @@ func historyFrom(msgs []session.WithParts) []provider.Msg {
 			if info.Error != nil && info.Error.Name == "MessageAbortedError" {
 				continue
 			}
+			// A failed assistant turn with no tool results (mid-stream
+			// connection reset, truncated SSE) must not be replayed: the next
+			// request has to end with the last user message or tool output so
+			// the model redoes the turn, not with a half-dead assistant
+			// message it would try to continue. Turns that did complete tool
+			// calls keep their tool_use/tool_result pairs — only the dangling
+			// text of a tool-less failure is dropped.
+			if info.Error != nil && info.Error.Name == "APIError" && !hasToolResult(m.Parts) {
+				continue
+			}
 			var blocks []provider.ContentBlock
 			var results []provider.ContentBlock
 			for _, p := range m.Parts {
@@ -88,6 +98,19 @@ func historyFrom(msgs []session.WithParts) []provider.Msg {
 		}
 	}
 	return out
+}
+
+// hasToolResult reports whether any tool part of the message reached a
+// terminal state, meaning the message carries valid tool_use/tool_result
+// pairs worth replaying even though the turn itself errored afterwards.
+func hasToolResult(parts []session.Part) bool {
+	for _, p := range parts {
+		if p.Type == "tool" && p.State != nil &&
+			(p.State.Status == "completed" || p.State.Status == "error") {
+			return true
+		}
+	}
+	return false
 }
 
 func mustMarshal(v any) json.RawMessage {
