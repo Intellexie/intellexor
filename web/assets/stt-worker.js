@@ -56,6 +56,39 @@ async function buildPipeline(device) {
   });
 }
 
+// Split a long recording into segments cut at the quietest point near each
+// target boundary. Parakeet handles minutes of audio, but browser engines
+// (wasm memory ceilings, WebGPU buffer limits, fp16 drift over very long
+// sequences) are far less forgiving than native runtimes — and one giant
+// sequence is exactly where transcripts start looping or dropping whole
+// sentences. Cutting at silence keeps every word intact.
+function splitChunks(samples, rate, targetSec = 25, searchSec = 4) {
+  if (samples.length <= rate * (targetSec + searchSec)) return [samples];
+  const chunks = [];
+  const win = Math.round(0.24 * rate); // quiet window we cut inside of
+  const step = Math.round(0.02 * rate);
+  let start = 0;
+  while (start < samples.length) {
+    const idealEnd = start + targetSec * rate;
+    if (samples.length - idealEnd <= searchSec * rate) {
+      chunks.push(samples.subarray(start));
+      break;
+    }
+    const lo = Math.max(start + rate, idealEnd - searchSec * rate); // never < 1s segments
+    const hi = Math.min(samples.length - win, idealEnd + searchSec * rate);
+    let best = lo, bestEnergy = Infinity;
+    for (let p = lo; p <= hi; p += step) {
+      let e = 0;
+      for (let i = p; i < p + win; i += 4) { const v = samples[i]; e += v * v; }
+      if (e < bestEnergy) { bestEnergy = e; best = p; }
+    }
+    const end = best + Math.round(win / 2); // cut mid-silence
+    chunks.push(samples.subarray(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
 self.onmessage = async (e) => {
   const { id, type, payload } = e.data || {};
   if (id === undefined) return;
@@ -75,10 +108,20 @@ self.onmessage = async (e) => {
       post(id, { device });
     } else if (type === "transcribe") {
       if (!transcriber) throw new Error("engine not loaded");
-      // Parakeet is CTC: no language/task prompt tokens, and it handles
-      // long recordings natively (FastConformer subsampling) — no chunking.
-      const out = await transcriber(payload.samples);
-      post(id, { text: (out && out.text ? out.text : "").trim() });
+      // Parakeet is CTC: no language/task prompt tokens. Long recordings
+      // are decoded in silence-aligned segments (see splitChunks) — the
+      // model itself handles long input, but browser runtimes degrade on
+      // one giant sequence.
+      const rate = transcriber.processor?.feature_extractor?.config?.sampling_rate || 16000;
+      const chunks = splitChunks(payload.samples, rate);
+      let text = "";
+      for (let i = 0; i < chunks.length; i++) {
+        const out = await transcriber(chunks[i]);
+        const t = (out && out.text ? out.text : "").trim();
+        if (t) text += (text ? " " : "") + t;
+        self.postMessage({ type: "decode-progress", done: i + 1, total: chunks.length });
+      }
+      post(id, { text: text.trim() });
     } else {
       throw new Error("unknown task: " + type);
     }

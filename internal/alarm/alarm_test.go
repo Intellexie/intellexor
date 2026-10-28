@@ -174,3 +174,53 @@ func listOne(projectID, sessionID string) Alarm {
 	}
 	return alarms[0]
 }
+
+// DeleteFired removes only the session's already-fired alarms; pending
+// alarms and other sessions' alarms must survive.
+func TestDeleteFired(t *testing.T) {
+	os.Setenv("INTELLEXOR_DATA", t.TempDir())
+	store.ResetDataDirForTest()
+
+	pid := "clear"
+	if _, err := Add(pid, "ses_a", util.Now()/1000-10, "past"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Add(pid, "ses_a", util.Now()/1000+60, "future"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Add(pid, "ses_b", util.Now()/1000-10, "other session"); err != nil {
+		t.Fatal(err)
+	}
+	// mark ses_a's past alarm and ses_b's alarm fired, as a sweep would
+	if _, err := ClaimDue(pid, util.Now()/1000); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := DeleteFired(pid, "ses_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 removed, got %d", n)
+	}
+
+	kept, err := List(pid, "ses_a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 || kept[0].Fired {
+		t.Fatalf("expected only the pending alarm to survive, got %+v", kept)
+	}
+	other, err := List(pid, "ses_b", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 1 || !other[0].Fired {
+		t.Fatalf("other session's fired alarm must be untouched, got %+v", other)
+	}
+
+	// a second run is a no-op
+	if n, err := DeleteFired(pid, "ses_a"); err != nil || n != 0 {
+		t.Fatalf("expected no-op, got n=%d err=%v", n, err)
+	}
+}

@@ -22,6 +22,7 @@
 12. [ACP protocol](#12-acp-protocol) — JSON-RPC 2.0 over the same port
 13. [Typical client flows](#13-typical-client-flows)
 14. [Endpoint quick reference](#14-endpoint-quick-reference)
+15. [UI requirements & feature-parity spec](#15-ui-requirements--feature-parity-spec) — build a complete new UI from this
 
 ---
 
@@ -523,6 +524,7 @@ One-shot wake-ups for a session: at `triggerAt` a user message `alarm-triggered`
 | `GET /alarm/session/{sessionID}` | — | **200** all alarms of that session (pending + fired) |
 | `POST /alarm` | `{ "sessionID": "...", "triggerAt": <unix sec>, "note": "..." }` | **200** created `Alarm` (400 if sessionID missing/unknown, triggerAt ≤ 0 or in the past) |
 | `POST /alarm/{alarmID}/trigger` | — | **200** the claimed `Alarm` (`fired: true`); injects the wake message now |
+| `POST /alarm/session/{sessionID}/clear-finished` | — | **200** `{ "removed": <n> }` — deletes all already-fired alarms of the session; pending alarms are untouched |
 | `DELETE /alarm/{alarmID}` | — | **200** literal `null` |
 
 All alarm mutations broadcast **`alarm.updated`** `{ "directory": "..." }` on every hub of the project. The firing itself surfaces as a normal prompt (`message.updated` / `message.part.updated`), not a dedicated event.
@@ -820,7 +822,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `POST /board/card`, `PATCH/DELETE /board/card/{id}` | mutate |
 | `GET /board/export`, `POST /board/import?mode=` | backup / restore |
 | `GET/POST /cron`, `GET /cron/preview?spec=`, `PATCH/DELETE /cron/{id}` | cron jobs |
-| `GET /alarm`, `POST /alarm`, `GET /alarm/session/{sid}`, `POST /alarm/{id}/trigger`, `DELETE /alarm/{id}` | wake-ups |
+| `GET /alarm`, `POST /alarm`, `GET /alarm/session/{sid}`, `POST /alarm/session/{sid}/clear-finished`, `POST /alarm/{id}/trigger`, `DELETE /alarm/{id}` | wake-ups |
 | `GET/PATCH /config`, `GET /global/config`, `PATCH /global/config` | config |
 | `GET /config/providers`, `/config/files`, `/config/entries` | introspection |
 | `PUT/DELETE /config/provider/{pid}[/model/{mid}]`, `PUT/DELETE /config/agent/{aid}` | config editing (`?file=` on DELETE) |
@@ -830,3 +832,178 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `GET /agent`, `GET /command`, `GET /mcp` | agents, commands, mcp |
 | `GET /file`, `GET /file/content` | file browser |
 | `GET /doc` | OpenAPI stub |
+
+---
+
+## 15. UI requirements & feature-parity spec
+
+This section specifies **what a complete Intellexor UI must do**. Sections 1–14 define the protocol; this section defines the product. It is derived from the current reference implementation (`web/assets/` — a ~6,600-line vanilla-JS single-page app) and is written so an agent can build a **completely new UI** (any framework) against a **running Intellexor instance** without reading the reference code. Where a requirement maps to an endpoint or event, it is named explicitly.
+
+### 15.1 Deployment & packaging constraints
+
+- **The UI is compiled into the binary.** Assets live in `web/assets/` and are loaded via `go:embed` (`web/embed.go`). There is **no dev server and no hot reload** — any asset change requires `go build`. A replacement UI must either replace the files in `web/assets/` (keeping `embed.go`) or be served by the same mechanism.
+- **One port serves everything.** The UI, the HTTP API, and ACP share a single socket (default 4096; the URL the server prints is the source of truth). The UI must use **relative URLs** — it may be served from any host/port.
+- **Directory routing is a query param, not a path prefix.** All API calls append `?directory=<abs path>` (§1.3); the UI never relies on URL-path-based instance routing.
+- **Desktop mode:** when built with the `desktop` tags, the same UI runs inside a Wails webview. The reference UI detects this and swaps `fetch`/`EventSource` for the Wails bridge (`window.go.main.Api.Call`, `window.runtime.EventsOn("server-event", …)`). A new UI may ignore this and use plain HTTP/SSE — the server side is identical — but must not break when `window.go` is absent.
+- **No build toolchain is required** (the reference UI is framework-free with two vendored libs: `marked` for markdown and `DOMPurify` for sanitization). A new UI may use a bundler, but its output must land in `web/assets/` and be committed.
+- **Static assets that must exist** (served from the embedded FS): `/logo.png` (favicon + branding), `/notification.mp3` (completion sound), and — only if speech-to-text is kept — `/stt-worker.js` plus the `/stt/` ONNX bundle. Everything else is optional.
+
+### 15.2 Information architecture & layout
+
+Required top-level structure (names are free; behavior is not):
+
+1. **Icon rail** (far left, ~64px): brand/logo, sidebar toggle, board-panel toggle, current workspace avatar, other open workspaces, new-workspace button, settings button.
+2. **Board panel** (optional left panel, ~300px): compact list of `open` + `inprogress` kanban cards; click opens the board.
+3. **Session sidebar** (~280px): workspace title, "New session" button, session list grouped by day (Today / Yesterday / Older), sorted by `time.updated` descending, with an "Archived (N)" collapsible section.
+4. **Main area**: everything else — workspace tab bar, session tab bar, and the active view.
+5. Overlays: modal root and a toast stack (bottom-right).
+
+**Views** (hash routing is the reference approach; any router is fine):
+
+| View | Trigger | Content |
+|---|---|---|
+| Landing / new session | `#/` | Brand mark, hint text, composer. Sending creates the session lazily. |
+| Chat | `#/{sessionID}` | Header + timeline + composer. |
+| Subagent (read-only) | `#/{childSessionID}` | Same timeline, no composer; "← Back to parent" + "subagent · read-only" badge. |
+| Kanban board | `#/board` | Fixed first tab in the session tab bar. |
+| Cron jobs | `#/cron` | Fixed last tab. |
+
+**Tab bars:**
+
+- **Workspace tabs** — one per open working directory; persisted client-side; switching workspaces must **not** reload the page (tear down directory-scoped state, refetch boot data, reconnect SSE with the new `?directory=`). Show an "unseen activity" dot per workspace (compare last-visited timestamp against `GET /workspace`'s `busy`/`lastActivity`).
+- **Session tabs** — Board (fixed first), one tab per open session (persisted per workspace), "+" (new session), Cron (fixed last). Tab indicators: spinner (busy), yellow dot (pending permission), red dot (error), unseen dot, ⏰ (pending alarm). Middle-click closes; right-click renames. A "pending" tab may be created client-side before the session exists; the backing session is created via `POST /session` immediately or lazily on first send, then the placeholder id is swapped.
+
+**Responsive:** below 768px the sidebar and board panel become off-canvas drawers with a backdrop; the rail shrinks; the timeline/composer tighten. The app must be usable at phone widths.
+
+### 15.3 Design system
+
+The reference implementation defines a token-based theme; a new UI should keep the *mechanism* (semantic tokens re-declared per theme on `<html data-color-scheme="…">`) even if it changes the values.
+
+- **Theme switching:** three-state (system / light / dark), persisted in `localStorage`. `system` follows `matchMedia("(prefers-color-scheme: dark)")` with a live change listener. The active theme is applied by setting `data-color-scheme` on `<html>` — **not** via `@media` queries — so JS can resolve "system" itself.
+- **Required semantic tokens** (per theme): surfaces (`bg-base`, `bg-deep`, `layer-1..4`), text (`text-base`, `text-muted`, `text-faint`, `text-inverse`), borders (`border-weak/base/strong`), accent + accent-fg, hover/active surfaces, status pairs (ok/warn/err as bg+fg), diff tints (add/del), code background, shadow, and a glass token (`rgba` surface + `backdrop-filter: blur`) for floating panels.
+- **Reference palette:** grey ramp `#080808 → #ffffff` (13 steps); accent `#3b5cf6` (light) / `#a2bcff` (dark); diff add `#12c905` / del `#fc533a`; fonts Inter (UI) + JetBrains Mono (mono); radii 4–12px; base font 14px/150%.
+- **Motion:** subtle — hover transitions ~.15s, panel collapse .18s, modal/toast entrances .15–.2s, streaming "shimmer" and bouncing-dots indicators. **All animation must be disabled under `prefers-reduced-motion: reduce`.**
+- **Scrollbars:** custom, thin (8px), theme-aware.
+
+### 15.4 Chat view — composer
+
+The composer is the heart of the app. Requirements:
+
+- **Input:** auto-growing textarea (max ~240px), Enter sends, Shift+Enter newlines, IME-composition-safe (don't send while composing).
+- **Per-session drafts:** text and attachments are kept per session (and for the landing view) and survive tab switches and re-renders; caret/focus must be preserved across re-renders.
+- **Attachments:** "+" button **and paste** (images/files) → chips with remove buttons; sent as `{type:"file", mime, url (data URL), filename}` parts (§3.14).
+- **Three send modes** (§3.14, §3.17, §3.18):
+  - text starting with `!` → `POST /session/{id}/shell` (visual "shell mode" styling while the draft starts with `!`);
+  - text starting with `/` matching a command from `GET /command` → `POST /session/{id}/command`;
+  - otherwise → `POST /session/{id}/prompt_async` with `{agent, model?, parts}`.
+- **Slash-command menu:** typing `/` opens a filterable popover of `GET /command` results plus client-side UI commands (`/undo`, `/redo`, `/new`, `/models`); keyboard navigation (↑/↓/Enter/Tab/Escape); commands whose template contains `$ARGUMENTS`/`$1` keep the `/name ` prefix so arguments can be typed.
+- **Agent selector:** from `GET /agent` (build/plan/orchestrator/general/explore), persisted per workspace.
+- **Model selector:** searchable popover over `GET /provider` (grouped by provider, sorted by `release_date` desc), persisted per workspace.
+- **Send/stop toggle:** while the session is busy the send button becomes **Stop** → `POST /session/{id}/abort`; **Escape also aborts**. After aborting, if the session is still busy ~1.5s later, toast "Abort requested — waiting for the running tool to exit…".
+- **Docks above the composer** (priority order: permissions > questions > todos; plus the mic dock when recording) — see §15.9.
+- **Hint row:** current git branch from `GET /vcs` (or "No Git").
+
+### 15.5 Chat view — timeline
+
+- **Load:** `GET /session/{id}/message?limit=100` — only the last ~100 *display units* are kept (a user prompt, response text block, thinking block, or tool call each count as one; synthetic/ignored parts are free). SSE events for messages older than the loaded window must be **ignored** to prevent out-of-order appends. Re-fetches must not clobber locally buffered streaming text (longer-text-wins).
+- **Render from events** (§11.3): `message.updated` (new message), `message.part.delta` (stream text — throttle re-renders to ~120ms), `message.part.updated` (authoritative parts; patch in place when possible), `message.removed`, `session.status`, `session.idle`, `session.error`.
+- **User messages:** plain-text bubble (escaped, *not* markdown), attachment chips (image thumbnails), hover-revealed meta (agent · model, time), **Copy** button, and **Revert** button → `POST /session/{id}/revert {messageID}` (puts the message text back into the composer and reloads). When `sess.revert` is set, show a **revert banner** with Restore → `POST /session/{id}/unrevert`.
+- **Assistant messages:** markdown rendering (GFM, `breaks: true`) **sanitized with DOMPurify**; fenced code blocks get a copy button; links open in new tabs (`rel="noopener"`). A **Fork** button → `POST /session/{id}/fork {messageID}` → navigate to the cloned session. On error, an error card. Completed messages show a meta line (agent · model · duration).
+- **Part types to render** (§2.3):
+  - `text` — markdown bubble; skip `synthetic`/`ignored`/empty parts.
+  - `reasoning` — collapsible "🧠 Thinking [N chars]" row, collapsed by default; open/closed state must survive re-renders; live char count while streaming.
+  - `tool` — see below.
+  - `file` — attachment chip row.
+  - `retry` — "retrying — attempt N" line.
+  - `compaction` — "Session compacted" divider; a message with `info.summary` renders the streaming summary.
+- **Tool call rows:** header (icon + friendly name + sub-label + animated ellipsis while running + chevron); `+N −M` changes badge from `state.metadata.filediff`; collapsible body **lazily filled on first open**; user's open/closed choice survives re-renders; errored tools (`state.status === "error"`) default open with an error card. Per-tool minimum:
+  - `bash` → "Shell", command as sub-label, `<pre>` body with `$ command` + `metadata.output`.
+  - `read` → "Read", file basename, output body.
+  - `edit`/`write`/`apply_patch` → **diff body** (render `metadata.diff` unified-diff with add/del/hunk styling), **default open**.
+  - `task` → subagent row; if `state.metadata.sessionId` exists the row links to the child's read-only session view (spinner while the child is busy).
+  - `todowrite` → **not rendered in the timeline** (todos appear in the dock).
+  - `grep`/`glob`/`webfetch`/`question`/`invalid` → friendly labels; unknown tools → capitalized name + output body.
+- **Thinking indicator:** while status is `busy`/`retry`/`compact`, show a shimmer row ("Thinking" + animated dots + right-aligned `agent · model` label); `retry` shows "retrying in Ns — attempt #N" from `status.next`/`status.attempt`; `compact` shows "Compacting".
+- **Autoscroll:** stick to bottom when within ~60px of it; floating "jump to latest" button when scrolled up >200px.
+- **No message editing/deletion UI is required** (the endpoints exist, §3.11–3.12, but the reference UI only exposes revert).
+
+### 15.6 Session management
+
+- Create (`POST /session`), rename (`PATCH /session/{id} {title}` — via context menu or double-click on the header title), archive (`PATCH {time:{archived: <ms>}}`; restore with `0`), delete (`DELETE /session/{id}` with confirm).
+- Sidebar rows show status indicators: spinner (busy/retry/compact), yellow dot (pending permission), red dot (errored), unseen dot (new user message while not viewing), ⏰ (pending alarm).
+- **Context/cost display:** header SVG ring showing `sess.context` (fallback: last assistant message tokens) vs the model's `limit.context`; click opens a popover with Total Tokens, Context, Context Limit, Usage %, Input/Output/Reasoning/Cache Read/Cache Write, and Total Cost (`sess.cost`). Abbreviate numbers (k/M).
+- **Export:** `GET /session/{id}/export` → download `intellexor-session-{slug}.json`. **Import:** only while the session is empty → file picker → `POST /session/import` → navigate to the new session.
+- **Subagents:** `GET /session/{id}/children`; child sessions are viewable read-only.
+- Last-open chat per workspace is restored on boot.
+
+### 15.7 Kanban board
+
+- Three columns `open` / `inprogress` / `done` (§5), cards sorted by `order`; per-column collapse persisted (collapsed columns become vertical buttons in a rail, still droppable). Reload on `board.updated`.
+- **Create:** header modal **and** an inline "Add card…" textarea pinned to the bottom of the Open column — both support attachments/paste; `POST /board/card {title, column:"open", attachments}`. Drafts survive re-renders. Cards can only be created in Open. Enter creates; Ctrl/Shift+Enter newline.
+- **Edit/delete:** Open cards only — edit modal or double-click title (contenteditable) → `PATCH /board/card/{id}`; delete with confirm.
+- **Move:** HTML5 drag & drop with insert-before computed from pointer position; optimistic local reorder, then `PATCH {column, before}`. Moving out of In Progress asks "Stop the agent?".
+- **Start:** Open cards get **Start** → `POST /session` → `PATCH {column:"inprogress", sessionID}` → `POST /session/{sid}/prompt_async` with the card title + attachments → open a tab without switching. Cards with `sessionID` get **View**; in-progress cards show a spinner while their session is busy.
+- **Schedule:** Open cards get **Schedule** → datetime picker + presets (1h/2h/8h/24h) → `PATCH {startAt}` (unix ms; 0 removes). Show a 🕐 badge with humanized time; the server starts the card.
+- **Linking (follow-ups):** each card has a draggable link pill; dropping it on an Open card sets `PATCH {link: dst}` — when the source is done, the target auto-starts. Render animated dashed SVG bezier curves between linked cards (border-to-border, highlighted on hover); redraw on resize/scroll. Click the pill to unlink (`link: ""`).
+- **Watchers:** show 👁 + count (`c.watchers`).
+- **Export/import:** `GET /board/export`; import via file picker with an explicit **Merge** or **Replace** choice → `POST /board/import?mode=merge|replace`.
+- **Orchestrator chat column:** a full chat panel pinned to agent `orchestrator`, living in a real session (id persisted per project). Reuses the timeline renderers, has its own composer/streaming/abort, is collapsible to a thin vertical strip and horizontally resizable (~230–720px). "+" offers chat history (previous orchestrator sessions) or New chat.
+
+### 15.8 Cron & alarms
+
+- **Cron tab** (§6): rows with a running indicator (⏳ while any run session is busy), title, "paused" badge, spec, "next {rel}", "last {rel}", "N runs", prompt preview. Actions: Pause/Play (`PATCH {paused}` — pause holds only the next run), View (newest busy run session, else last), Edit, Delete (confirm). Create/edit modal: title, prompt, schedule field accepting cron expressions / `@macros` / `@every <duration>`, presets, and **live validation** via debounced `GET /cron/preview?spec=…` showing the next fire time or an error. Reload on `cron.updated`.
+- **Alarms** (§7): `GET /alarm` (map sessionID → earliest `triggerAt`, **unix seconds**) drives ⏰ indicators in header/tabs/sidebar. ⏰ opens a modal listing the session's alarms (`GET /alarm/session/{sid}`) with live countdowns, **Trigger now** (`POST /alarm/{id}/trigger`), and Delete. "Add scheduled message" → note + datetime picker + presets (5/15/30 min, 1h, Tomorrow 9:00) → `POST /alarm {sessionID, triggerAt (unix s), note}` — the session receives an `alarm-triggered` user message at that time.
+
+### 15.9 Docks: permissions, questions, todos
+
+All docks render **above the composer**, only for the current session or its task children.
+
+- **Permission dock** (⚠ inert in the default build — implement anyway, it's harmless): "Permission required" + human description + pattern chips; buttons **Deny / Allow always / Allow once** → `POST /permission/{id}/reply {reply: "reject"|"always"|"once"}`. Events: `permission.asked` / `permission.replied`.
+- **Question dock** (live — the `question` tool, §4.2): a multi-question wizard — "N of M" progress, question text, option buttons (single- or multi-select per `multiple`), free-text input for custom answers, Back/Next/Submit, and **Dismiss** (`POST /question/{id}/reject`). Wizard state (answers/step/draft) must survive composer re-renders. Submit → `POST /question/{id}/reply {answers}`. Events: `question.asked` / `question.replied` / `question.rejected`.
+- **Todos dock:** "X of N todos completed" checklist with ✓/current styling; clear button (`DELETE /session/{id}/todo`) when idle. Event: `todo.updated`; initial load `GET /session/{id}/todo`.
+
+### 15.10 Settings / config UI
+
+Two-pane modal (side nav: **General / Providers / Agents**; Models reached per-provider):
+
+- **General:** color scheme segmented control (system/light/dark); animated-background on/off; server version from `GET /global/health`.
+- **Providers:** list from `GET /config/entries` (name, model count, type badge, file path). Add/Edit form: ID, type (`@ai-sdk/openai-compatible`), display name, endpoint URL (`options.baseURL`), API key (`options.apiKey`), target config file (`GET /config/files`; default to the closest existing project file). Save: `PUT /config/provider/{id} {file, entry}` (whole-entry replace; preserve unknown fields). Remove: `DELETE /config/provider/{id}?file=…` with confirm.
+- **Models:** per-provider list with capability badges (tools/reasoning/attachments/temperature) and limits. Add/Edit: model ID, name, capability checkboxes, context/output limits → `PUT /config/provider/{id}/model/{mid} {file, entry}`; `DELETE …?file=…`.
+- **Agents:** built-in agents (read-only, from `GET /agent`'s `data.builtin`) plus configured agents. Add/Edit: name, description, model (`provider/model`), mode (subagent/primary/all), system prompt, tool-group checkboxes, config file → `PUT /config/agent/{name} {file, entry}`; `DELETE /config/agent/{id}?file=…`.
+- After any config write, re-fetch `GET /provider` (and auto-pick a default model if none is selected).
+
+### 15.11 Extras
+
+- **Speech-to-text (optional but expected):** mic button in the composer; click-to-record, click-again-to-stop; transcription appended to the draft. The reference implementation uses transformers.js (ONNX, NVIDIA Parakeet) in a module worker served from `/stt/`; long recordings are decoded in silence-aligned ~25 s segments (the worker splits at the quietest point near each boundary, so no words are clipped) with `decode-progress` messages driving the dock. Capture goes through an AudioWorklet whose (silent) output is routed through a zero-gain node into the destination — engines only pull nodes reachable from the destination, and a zero-output capture node is never processed on some of them. Dock states: downloading (progress + cancel), recording (timer), decoding (segment progress). Requires a secure context. A new UI may omit STT or swap the engine, but the mic dock states are the UX baseline.
+- **Notifications:** completion sound (`/notification.mp3`) played when a top-level session goes idle after being busy — **unlocked by the first user gesture** (browser autoplay policy) and suppressed for ~10s after a user-initiated abort. No desktop notifications: instead a **tab progress indicator** (animated favicon + spinner in `document.title` while the current session runs; amber dot when other sessions work; red dot on error).
+- **Animated background (optional):** canvas aurora + dot grid + vignette behind the app; full strength on the landing view, dimmed elsewhere; pausable (`visibilitychange`), static under `prefers-reduced-motion`, theme-aware.
+- **Keyboard:** Enter/Shift+Enter (send/newline), Escape (abort / close menus/modals), command-menu arrows, middle-click tab close. No global hotkey layer required.
+- **Toasts:** bottom-right stack for errors and confirmations (e.g. abort requests).
+
+### 15.12 State, reconnection & performance requirements
+
+- **Boot sequence:** health check (`GET /global/health`, with a "Cannot reach Intellexor server" fallback page) → `GET /path` → `GET /vcs` → `GET /session` (filter out subagents) → restore tabs & last session → `GET /alarm` → `GET /session/status` → `GET /permission` → `GET /question` → `GET /provider` → `GET /command` → connect SSE → route.
+- **SSE:** one directory-scoped stream (`GET /event?directory=…`) plus a global stream (`GET /global/event`) for cross-workspace activity dots. `EventSource` auto-reconnects; on `server.connected` the client must refetch `GET /session/status` and re-render everything so indicators recover after downtime.
+- **State model:** a single in-memory store keyed by session id (`{order, info, parts}` per session) is sufficient; rendering may be full-rebuild per view, **but** streaming text should be patched in place (throttled ~120ms) and re-renders must preserve composer focus/caret, open menus, contenteditable edits, and unsaved drafts.
+- **Markdown cache:** memoize rendered markdown (the reference uses an LRU of ~400 entries) — long sessions re-render often.
+- **Timezone:** send an `X-Timezone` header with API calls (the server uses it for scheduling display).
+
+### 15.13 Feature-parity checklist
+
+A new UI is feature-complete when all of the following are true:
+
+- [ ] Landing view with lazy session creation; chat view; read-only subagent view
+- [ ] Workspace tabs (switch without reload, unseen dots) and session tabs (all five indicators, pending-tab promotion, middle-click close, right-click rename)
+- [ ] Composer: drafts per session, attachments + paste, `!` shell mode, `/` command menu with args, agent & model pickers, send/stop toggle, Escape-to-abort
+- [ ] Timeline: streaming deltas (throttled), markdown + sanitized code blocks with copy, reasoning rows, per-tool rows with lazy bodies and diffs, thinking/retry/compaction indicators, autoscroll + jump-to-latest, 100-unit window with out-of-order protection
+- [ ] Message actions: copy, revert (+ banner/restore), fork
+- [ ] Session: create/rename/archive/delete, day-grouped sidebar with status dots, context/cost ring + popover, export/import
+- [ ] Docks: permission (Deny/Allow once/Allow always), question wizard with dismiss, todos with clear
+- [ ] Board: 3 columns, drag & drop with insert-before, add-card inline + modal with attachments, edit/delete, Start/Schedule/View, link pills + SVG link lines, watchers, collapse, export/import (merge/replace), orchestrator chat column
+- [ ] Cron tab: rows with running indicator, pause/play, live spec validation via preview endpoint, create/edit/delete
+- [ ] Alarms: ⏰ indicators, alarm list modal with countdowns, trigger-now, scheduled-message modal
+- [ ] Settings: theme + background toggles, provider/model/agent CRUD against the config endpoints
+- [ ] SSE reconnection recovery on `server.connected`; global stream for workspace dots
+- [ ] Sound notification with gesture unlock + abort suppression; tab progress indicator
+- [ ] Responsive down to phone widths; `prefers-reduced-motion` honored
+- [ ] Works from any host/port with `?directory=` routing and relative URLs; compiles into the binary via `web/embed.go`

@@ -435,15 +435,20 @@ function handleEvent(ev) {
       const idx = S.sessions.findIndex((s) => s.id === info.id);
       const wasReverted = idx >= 0 && !!S.sessions[idx].revert;
       const wasCompacting = idx >= 0 && !!(S.sessions[idx].time && S.sessions[idx].time.compacting);
+      const prev = idx >= 0 ? S.sessions[idx] : null;
       if (idx >= 0) S.sessions[idx] = info; else S.sessions.unshift(info);
       sortSessions();
-      renderSidebar();
+      // the server publishes session.updated once per LLM step (token counts
+      // move) — only rebuild the sidebar when a field it displays changed
+      // (title, sort position, archived state) or the session is new
+      const sidebarSig = (s) => [s.title, s.time && s.time.updated, s.time && s.time.archived].join("|");
+      if (!prev || sidebarSig(prev) !== sidebarSig(info)) renderSidebar();
       if (info.id === S.current) {
-        renderHeader();
+        updateHeaderSession(info);
         // the compacting flag drives the timeline's "Compacting" indicator
         if (wasCompacting !== !!(info.time && info.time.compacting)) {
-          renderTimeline();
-          renderComposer();
+          updateThinkingIndicator();
+          updateComposerChrome();
         }
         if (wasReverted !== !!info.revert) {
           // Reverting puts the reverted message back in the chat box; read it
@@ -499,15 +504,24 @@ function handleEvent(ev) {
         S.statuses[p.sessionID] = p.status;
         S.errored.delete(p.sessionID); // fresh activity clears a stale error flag
       }
-      renderSidebar();
-      renderComposer();
-      // also re-render when a subagent shown in the current timeline changed
-      // state — its task row carries a live progress indicator
-      if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
-      renderBoard(); // in-progress cards show a spinner while their session is busy
-      renderBoardPanel();
-      if (p.sessionID === boardChatSessionId()) renderBoardChat(); // thinking indicator + stop button
-      if (S.view === "cron") renderCronList(); // running crons show the hourglass
+      updateSidebarRow(p.sessionID);
+      updateComposerChrome();
+      // the timeline itself only changes for the current session (thinking
+      // indicator) or a task child (row spinner) — both patched in place
+      if (p.sessionID === S.current) {
+        updateThinkingIndicator();
+      } else if (taskChildOfCurrent(p.sessionID)) {
+        updateTaskRows($("#timeline-inner"), S.current, p.sessionID);
+      }
+      updateBoardSpinners(); // in-progress cards show a spinner while their session is busy
+      updateBoardPanelSpinners();
+      if (p.sessionID === boardChatSessionId()) {
+        updateBoardChatThinking(); // thinking indicator + stop button
+        updateBoardChatChrome();
+      } else if (taskChildOf(boardChatSessionId(), p.sessionID)) {
+        updateTaskRows($("#board-chat-timeline-inner"), boardChatSessionId(), p.sessionID);
+      }
+      updateCronSpinners(); // running crons show the hourglass
       updateTab();
       break;
     }
@@ -518,13 +532,25 @@ function handleEvent(ev) {
       const wasBusy = idleAfterBusy.delete(p.sessionID) || sessionBusy(p.sessionID);
       delete S.statuses[p.sessionID];
       S.streaming.clear();
-      renderSidebar();
-      renderComposer();
-      if (p.sessionID === S.current || taskChildOfCurrent(p.sessionID)) renderTimeline();
-      renderBoard(); // clear the spinner on the card this session was working on
-      renderBoardPanel();
-      if (p.sessionID === boardChatSessionId()) renderBoardChat(); // clear the thinking indicator
-      if (S.view === "cron") renderCronList(); // clear the hourglass on the finished run
+      updateSidebarRow(p.sessionID);
+      updateComposerChrome();
+      if (p.sessionID === S.current) {
+        // one full rebuild per run end is fine: it moves the agent · model
+        // label into the completed message's last tool row and stops the
+        // live dots — things part-level patches don't cover
+        renderTimeline();
+      } else if (taskChildOfCurrent(p.sessionID)) {
+        updateTaskRows($("#timeline-inner"), S.current, p.sessionID);
+      }
+      updateBoardSpinners(); // clear the spinner on the card this session was working on
+      updateBoardPanelSpinners();
+      if (p.sessionID === boardChatSessionId()) {
+        renderBoardChat(); // clear the thinking indicator + settle the last row
+        updateBoardChatChrome();
+      } else if (taskChildOf(boardChatSessionId(), p.sessionID)) {
+        updateTaskRows($("#board-chat-timeline-inner"), boardChatSessionId(), p.sessionID);
+      }
+      updateCronSpinners(); // clear the hourglass on the finished run
       updateTab();
       // the agent finished working — chime, but only for real completions of
       // top-level sessions (subagents going idle just hand control back to
@@ -537,9 +563,9 @@ function handleEvent(ev) {
     }
     case "session.error": {
       if (p.sessionID) S.errored.add(p.sessionID);
-      renderSidebar();
-      renderBoard();
-      renderBoardPanel();
+      updateSidebarRow(p.sessionID); // error dot on the row
+      updateBoardSpinners();
+      updateBoardPanelSpinners();
       updateTab();
       break;
     }
@@ -565,7 +591,7 @@ function handleEvent(ev) {
       }
       if (info.role === "user" && p.sessionID !== S.current) {
         S.unseen.add(p.sessionID);
-        renderSidebar();
+        updateSidebarRow(p.sessionID); // unseen dot
       }
       break;
     }
@@ -585,7 +611,17 @@ function handleEvent(ev) {
       trimWindow(store); // a new part can push the window over the cap
       if (p.sessionID === S.current) {
         if (!patchPartIn($("#timeline-inner"), part, store.info[part.messageID])) {
-          renderTimeline();
+          // brand-new part: append to the tail message's block when possible
+          // instead of rebuilding the whole timeline
+          if (!appendPartIn($("#timeline-inner"), part, store)) {
+            renderTimeline();
+          } else {
+            // the part may have retired the Thinking row (tail block now
+            // has visible content)
+            updateThinkingIndicator();
+            const tl = $("#timeline");
+            if (tl && S.scrollStick) tl.scrollTop = tl.scrollHeight;
+          }
         } else {
           const tl = $("#timeline");
           if (tl && S.scrollStick) tl.scrollTop = tl.scrollHeight;
@@ -593,7 +629,13 @@ function handleEvent(ev) {
       }
       if (p.sessionID === boardChatSessionId()) {
         if (!patchPartIn($("#board-chat-timeline-inner"), part, store.info[part.messageID])) {
-          renderBoardChat();
+          if (!appendPartIn($("#board-chat-timeline-inner"), part, store)) {
+            renderBoardChat();
+          } else {
+            updateBoardChatThinking();
+            const tl = $("#board-chat-timeline");
+            if (tl && boardChatNearBottom(tl)) tl.scrollTop = tl.scrollHeight;
+          }
         } else {
           const tl = $("#board-chat-timeline");
           if (tl && boardChatNearBottom(tl)) tl.scrollTop = tl.scrollHeight;
@@ -648,12 +690,12 @@ function handleEvent(ev) {
     case "permission.asked":
       S.permissions = S.permissions.filter((r) => r.id !== p.id);
       S.permissions.push(p);
-      renderSidebar();
+      updateSidebarRow(p.sessionID); // permission dot
       if (isDockSession(p.sessionID)) renderComposerRegion();
       break;
     case "permission.replied":
       S.permissions = S.permissions.filter((r) => r.id !== p.requestID);
-      renderSidebar();
+      updateSidebarRow(p.sessionID);
       if (isDockSession(p.sessionID)) renderComposerRegion();
       break;
     case "question.asked":
@@ -703,12 +745,12 @@ function sessionBusy(sessionID) {
   return !!(st && st.type !== "idle");
 }
 
-// True when sessionID is a subagent referenced by a task tool part in the
-// current session's timeline — its row shows the open link and, while the
+// True when sessionID is a subagent referenced by a task tool part in
+// session `sid`'s timeline — its row shows the open link and, while the
 // subagent is still working, a progress indicator.
-function taskChildOfCurrent(sessionID) {
-  if (!S.current || !sessionID || sessionID === S.current) return false;
-  const store = S.msgs.get(S.current);
+function taskChildOf(sessionID, childID) {
+  if (!sessionID || !childID || sessionID === childID) return false;
+  const store = S.msgs.get(sessionID);
   if (!store) return false;
   for (const mid of store.order) {
     const parts = store.parts[mid];
@@ -716,10 +758,36 @@ function taskChildOfCurrent(sessionID) {
     for (const pid of Object.keys(parts)) {
       const part = parts[pid];
       if (part && part.type === "tool" && part.tool === "task" &&
-          part.state && part.state.metadata && part.state.metadata.sessionId === sessionID) return true;
+          part.state && part.state.metadata && part.state.metadata.sessionId === childID) return true;
     }
   }
   return false;
+}
+
+function taskChildOfCurrent(sessionID) {
+  return taskChildOf(S.current, sessionID);
+}
+
+// Re-render the task rows in a timeline that reference subagent session
+// `childSid` — their spinner follows the child's busy state. A targeted swap
+// via patchPartIn (its outerHTML guard makes it a no-op when nothing changed)
+// instead of the full timeline rebuild this used to trigger.
+function updateTaskRows(container, sid, childSid) {
+  if (!container || !sid || !childSid) return;
+  const store = S.msgs.get(sid);
+  if (!store) return;
+  for (const mid of store.order) {
+    const info = store.info[mid];
+    if (!info) continue;
+    const parts = store.parts[mid] || {};
+    for (const pid of Object.keys(parts)) {
+      const p = parts[pid];
+      if (!p || p.type !== "tool" || p.tool !== "task") continue;
+      const st = toolState(p);
+      if (!(st.metadata && st.metadata.sessionId === childSid)) continue;
+      patchPartIn(container, p, info);
+    }
+  }
 }
 
 function msgStore(sid) {
@@ -749,8 +817,8 @@ function scheduleDeltaRender() {
 // timeline (message.part.updated fires for every tool state change during a
 // run). Returns false when the node is missing or the part type has no
 // patchable node — callers then fall back to a full render (cheap now that
-// renderMarkdown is memoized). Only text and reasoning nodes carry
-// data-part; tool rows always take the fallback.
+// renderMarkdown is memoized). Text, reasoning and tool nodes carry
+// data-part; anything else takes the fallback.
 function patchPartIn(container, part, info) {
   if (!container || !info) return false;
   const node = container.querySelector(`[data-part="${cssId(part.id)}"]`);
@@ -772,7 +840,45 @@ function patchPartIn(container, part, info) {
     outer.replaceWith(fresh);
     return true;
   }
+  if (part.type === "tool") {
+    // data-part lives on the .tool wrapper; swap the whole row so running
+    // state, streamed output and the expand choice (S.toolOpen) stay
+    // consistent — without this, every tool state change forced a full
+    // timeline rebuild that reset the scroll position mid-read.
+    // Completed messages are excluded: their meta line is embedded in the
+    // last tool row by renderAssistantMessage, which renderPart doesn't do.
+    if (info.time && info.time.completed) return false;
+    const fresh = renderPart(part, info);
+    if (!fresh || !fresh.classList.contains("tool")) return false;
+    // running tools fire part.updated repeatedly with state that doesn't
+    // change the rendering (status pings, metadata touches) — skip the swap
+    // when the fresh row is identical, so selection inside an open body
+    // isn't needlessly destroyed
+    if (fresh.outerHTML === node.outerHTML) return true;
+    node.replaceWith(fresh);
+    return true;
+  }
   return false;
+}
+
+// Append a brand-new part to the tail message's block instead of rebuilding
+// the whole timeline. Only safe when the part belongs to the last message in
+// the store, that message is an assistant message, and its block is already
+// in the DOM. Returns false when the caller must fall back to a full
+// renderTimeline(); returns true (with nothing drawn) for parts that render
+// nothing (todowrite, empty text) — they are stored and need no node.
+function appendPartIn(container, part, store) {
+  if (!container || !store) return false;
+  const lastMid = store.order[store.order.length - 1];
+  if (!lastMid || part.messageID !== lastMid) return false;
+  const info = store.info[lastMid];
+  if (!info || info.role !== "assistant") return false;
+  const block = container.querySelector(`[data-msg="${cssId(lastMid)}"]`);
+  if (!block) return false;
+  const fresh = renderPart(part, info);
+  if (!fresh) return true;
+  block.appendChild(fresh);
+  return true;
 }
 
 // Update only the parts with live deltas; falls back to a full timeline
@@ -789,7 +895,16 @@ function renderStreamingText() {
     const part = store.parts[mid] && store.parts[mid][pid];
     if (!part) { needFull = true; continue; }
     const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
-    if (!node) { needFull = true; continue; }
+    if (!node) {
+      // first delta for a part whose bubble doesn't exist yet — append it to
+      // the tail message's block instead of rebuilding the whole timeline
+      if (appendPartIn(inner, part, store)) {
+        updateThinkingIndicator(); // the new content may retire the Thinking row
+        continue;
+      }
+      needFull = true;
+      continue;
+    }
     node.innerHTML = renderMarkdown(part.text || "");
     // collapsed reasoning header: keep the character count in sync with the stream
     if (part.type === "reasoning") {
@@ -1623,6 +1738,24 @@ function showBoardPanelTip(row, c) {
   boardPanelTip.style.visibility = "";
 }
 
+// Toggle the busy spinner on board-panel rows in place — same rationale as
+// updateBoardSpinners, for the collapsed panel's card list.
+function updateBoardPanelSpinners() {
+  const list = $("#board-panel-list");
+  if (!list || !S.boardPanelOpen) return;
+  list.querySelectorAll(".board-panel-card[data-id]").forEach((row) => {
+    const c = boardCardById(row.dataset.id);
+    const want = !!(c && c.column === "inprogress" && c.sessionID && sessionBusy(c.sessionID));
+    const has = !!row.querySelector("span.spinner");
+    if (want === has) return;
+    if (want) row.appendChild(el("span", "spinner", ICONS.spinner));
+    else {
+      const sp = row.querySelector("span.spinner");
+      if (sp) sp.remove();
+    }
+  });
+}
+
 function renderBoardPanel() {
   const list = $("#board-panel-list");
   if (!list || !S.boardPanelOpen) return;
@@ -1710,9 +1843,20 @@ function ddhms(ms) {
 // action (and on alarm.updated via loadAlarms for the indicators).
 async function openAlarmsModal(sid) {
   const list = el("div", "alarm-list");
+  const footer = el("div", "m-actions");
+  const clearBtn = el("button", "btn ghost", "Clear finished");
+  clearBtn.onclick = async () => {
+    try {
+      await post("/alarm/session/" + sid + "/clear-finished");
+      await reload();
+      loadAlarms().catch(() => {});
+    } catch (e) { toast(e.message || "Failed to clear finished wake-ups", true); }
+  };
+  footer.appendChild(clearBtn);
   const ov = openModal("Wake-ups", (modal) => {
     modal.appendChild(el("p", "m-sub", "Wake-ups the agent scheduled for this session."));
     modal.appendChild(list);
+    modal.appendChild(footer);
   });
   let alarms = [];
 
@@ -1727,6 +1871,7 @@ async function openAlarmsModal(sid) {
 
   function render() {
     list.innerHTML = "";
+    footer.style.display = alarms.some((a) => a.fired) ? "" : "none";
     if (!alarms.length) {
       list.appendChild(el("p", "m-sub", "No wake-ups scheduled."));
       return;
@@ -2056,39 +2201,65 @@ function renderSidebar() {
       continue;
     }
     const s = it.sess;
-    row.oncontextmenu = (e) => {
-      e.preventDefault();
-      openContextMenu(e.clientX, e.clientY, [
-        { label: "Rename", icon: ICONS.edit, action: () => openRenamePopover(e.clientX, e.clientY, s) },
-        { label: "Archive", icon: ICONS.archive, action: () => archiveSession(s) },
-        { label: "Delete…", icon: ICONS.trash, action: () => deleteSessionConfirm(s) },
-      ]);
-    };
-    if (S.statuses[s.id] && S.statuses[s.id].type !== "idle") {
-      row.appendChild(el("span", "spinner", ICONS.spinner));
-    } else if (S.permissions.some((p) => p.sessionID === s.id)) {
-      row.appendChild(el("span", "dot dot-permission"));
-    } else if (S.errored.has(s.id)) {
-      row.appendChild(el("span", "dot dot-error"));
-    } else if (S.unseen.has(s.id)) {
-      row.appendChild(el("span", "dot dot-unseen"));
-    } else {
-      row.appendChild(el("span", "dot", "&nbsp;"));
-    }
-    row.appendChild(el("span", "title", esc(s.title || "New session")));
-    if (S.alarms[s.id]) {
-      const clock = el("span", "alarm-indicator", "⏰");
-      clock.title = alarmTitle(s.id);
-      clock.onclick = (e) => { e.stopPropagation(); openAlarmsModal(s.id); };
-      row.appendChild(clock);
-    }
-    const arch = el("button", "archive", ICONS.archive);
-    arch.title = "Archive";
-    arch.onclick = (e) => { e.stopPropagation(); archiveSession(s); };
-    row.appendChild(arch);
-    list.appendChild(row);
+    list.appendChild(buildSessionRow(s));
   }
   if (archivedItems.length) renderArchivedSection(list, archivedItems);
+  renderTabs();
+}
+
+// Build one sidebar session row (dot/spinner state, title, alarm clock,
+// archive button). Shared by renderSidebar and updateSidebarRow so a single
+// row can be patched in place without rebuilding the list.
+function buildSessionRow(s) {
+  const row = el("div", "session-row" + (s.id === S.current ? " active" : ""));
+  row.dataset.sid = s.id;
+  row.onclick = () => navigate("/" + s.id);
+  row.oncontextmenu = (e) => {
+    e.preventDefault();
+    openContextMenu(e.clientX, e.clientY, [
+      { label: "Rename", icon: ICONS.edit, action: () => openRenamePopover(e.clientX, e.clientY, s) },
+      { label: "Archive", icon: ICONS.archive, action: () => archiveSession(s) },
+      { label: "Delete…", icon: ICONS.trash, action: () => deleteSessionConfirm(s) },
+    ]);
+  };
+  if (S.statuses[s.id] && S.statuses[s.id].type !== "idle") {
+    row.appendChild(el("span", "spinner", ICONS.spinner));
+  } else if (S.permissions.some((p) => p.sessionID === s.id)) {
+    row.appendChild(el("span", "dot dot-permission"));
+  } else if (S.errored.has(s.id)) {
+    row.appendChild(el("span", "dot dot-error"));
+  } else if (S.unseen.has(s.id)) {
+    row.appendChild(el("span", "dot dot-unseen"));
+  } else {
+    row.appendChild(el("span", "dot", "&nbsp;"));
+  }
+  row.appendChild(el("span", "title", esc(s.title || "New session")));
+  if (S.alarms[s.id]) {
+    const clock = el("span", "alarm-indicator", "⏰");
+    clock.title = alarmTitle(s.id);
+    clock.onclick = (e) => { e.stopPropagation(); openAlarmsModal(s.id); };
+    row.appendChild(clock);
+  }
+  const arch = el("button", "archive", ICONS.archive);
+  arch.title = "Archive";
+  arch.onclick = (e) => { e.stopPropagation(); archiveSession(s); };
+  row.appendChild(arch);
+  return row;
+}
+
+// Patch a single session row in place (spinner/dot/title/alarm changes)
+// instead of rebuilding the whole sidebar — status events fire per subagent
+// lifecycle and the rebuild destroyed hover state each time. No-op for
+// sessions that have no row (subagents, archived, pending tabs); falls back
+// to a full renderSidebar when the row is missing from the DOM (the list is
+// sorted by time.updated, which status events don't touch, so an existing
+// row's position is always still correct).
+function updateSidebarRow(sid) {
+  const s = S.sessions.find((x) => x.id === sid);
+  if (!s || s.parentID || (s.time && s.time.archived)) return;
+  const row = $(`#session-list .session-row[data-sid="${cssId(sid)}"]`);
+  if (!row) { renderSidebar(); return; }
+  row.replaceWith(buildSessionRow(s));
   renderTabs();
 }
 
@@ -2481,6 +2652,36 @@ function renderHeader() {
   buildHeader(sess);
 }
 
+// Targeted header refresh for session.updated — the server publishes it once
+// per LLM step (context/token counts move) and a full rebuild each time was
+// wasted work. Patches only what the event can change: title text, alarm
+// clock, action links (Import appears/retires) and the context circle.
+// Falls back to a full buildHeader when the header isn't built yet.
+function updateHeaderSession(sess) {
+  const header = $("#chat-header");
+  if (!header || !sess || !header.querySelector(".spacer")) { renderHeader(); return; }
+  const t = header.querySelector(".title");
+  if (t && t.contentEditable !== "true") {
+    const want = sess.title || "New session";
+    if (t.textContent !== want) t.textContent = want;
+  }
+  const clock = header.querySelector(".alarm-indicator");
+  if (S.alarms[sess.id] && !clock) {
+    const c = el("span", "alarm-indicator", "⏰");
+    c.title = alarmTitle(sess.id);
+    c.onclick = () => openAlarmsModal(sess.id);
+    header.insertBefore(c, header.querySelector(".spacer"));
+  } else if (!S.alarms[sess.id] && clock) {
+    clock.remove();
+  }
+  const actions = header.querySelector(".header-actions");
+  if (actions) actions.replaceWith(buildHeaderActions(sess));
+  const circle = header.querySelector(".ctx-circle");
+  const fresh = buildContextCircle(sess);
+  if (circle) circle.replaceWith(fresh);
+  else header.appendChild(fresh);
+}
+
 function buildContextCircle(sess) {
   const size = 16;
   const wrap = el("span", "ctx-circle");
@@ -2622,6 +2823,10 @@ async function renderTimeline() {
   const store = msgStore(S.current);
   const tl = $("#timeline");
   const wasStick = S.scrollStick;
+  // Anchor for non-stick rebuilds: wiping the DOM collapses #timeline-inner,
+  // the browser clamps scrollTop to 0, and the user is dumped at the top.
+  // Remember the offset and put it back after the rebuild.
+  const prevTop = tl ? tl.scrollTop : 0;
   inner.innerHTML = "";
 
   const sess = S.sessions.find((s) => s.id === S.current);
@@ -2669,37 +2874,26 @@ async function renderTimeline() {
   const curInfo = S.sessions.find((s) => s.id === S.current);
   const compacting = !!st && (st.type === "compact" ||
     (st.type === "busy" && curInfo && curInfo.time && !!curInfo.time.compacting));
-  if (st && (st.type === "busy" || st.type === "retry" || st.type === "compact")) {
-    const think = el("div", "assistant-block");
-    const runMeta = thinkMeta(currentRunLabel(store));
-    if (st.type === "retry") {
-      const row = el("div", "thinking-row");
-      row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
-      if (runMeta) row.appendChild(runMeta);
-      think.appendChild(row);
-    } else if (compacting) {
-      const row = el("div", "thinking-row");
-      row.appendChild(el("span", "ricon", "✳"));
-      row.appendChild(el("span", "shimmer", "Compacting"));
-      row.appendChild(thinkingDots(true));
-      if (runMeta) row.appendChild(runMeta);
-      think.appendChild(row);
-    } else if (!lastBlockHasText(store)) {
-      const row = el("div", "thinking-row");
-      row.appendChild(el("span", "ricon", "🧠"));
-      row.appendChild(el("span", "shimmer", "Thinking"));
-      row.appendChild(thinkingDots(true));
-      if (runMeta) row.appendChild(runMeta);
-      think.appendChild(row);
-    }
-    inner.appendChild(think);
-  }
+  const think = buildThinkingBlock(st, {
+    compacting,
+    // busy only shows a row when the tail block has no visible content yet;
+    // retry and compacting always show
+    hidden: !!st && st.type === "busy" && !compacting && lastBlockHasText(store),
+    runMeta: thinkMeta(currentRunLabel(store)),
+  });
+  if (think) inner.appendChild(think);
   // turn files summary
   if (turnFiles.length) {
     inner.appendChild(renderTurnFiles(turnFiles));
   }
   if (wasStick) tl.scrollTop = tl.scrollHeight;
-  else updateJumpButton(tl); // content grew while scrolled up — no scroll event fires, refresh visibility
+  else {
+    // restore the pre-rebuild offset (clamped if content shrank), then
+    // refresh jump-button visibility (no scroll event fires if the offset
+    // didn't actually change)
+    tl.scrollTop = prevTop;
+    updateJumpButton(tl);
+  }
 }
 
 function lastBlockHasText(store) {
@@ -2712,6 +2906,84 @@ function lastBlockHasText(store) {
     }
   }
   return false;
+}
+
+// Build the "Thinking / Compacting / retrying" indicator block. Shared by the
+// main timeline and the board chat panel so both render identically.
+// opts.compacting labels the row "Compacting"; opts.hidden suppresses the row
+// (busy with visible tail content); opts.runMeta is the right-aligned
+// agent · model label. Returns null when nothing should be shown.
+function buildThinkingBlock(st, opts = {}) {
+  if (!st || (st.type !== "busy" && st.type !== "retry" && st.type !== "compact")) return null;
+  if (opts.hidden) return null;
+  const row = el("div", "thinking-row");
+  if (st.type === "retry") {
+    row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
+  } else if (opts.compacting) {
+    row.appendChild(el("span", "ricon", "✳"));
+    row.appendChild(el("span", "shimmer", "Compacting"));
+    row.appendChild(thinkingDots(true));
+  } else {
+    row.appendChild(el("span", "ricon", "🧠"));
+    row.appendChild(el("span", "shimmer", "Thinking"));
+    row.appendChild(thinkingDots(true));
+  }
+  if (opts.runMeta) row.appendChild(opts.runMeta);
+  const think = el("div", "assistant-block thinking-block");
+  think.appendChild(row);
+  return think;
+}
+
+// Show/hide/refresh the thinking indicator at the end of a timeline without a
+// full rebuild — session.status busy/idle used to re-render the whole
+// timeline just for this. `inner` is the timeline container, `sid` the
+// conversation the status belongs to, `opts` forwarded to buildThinkingBlock
+// (plus opts.stick: the container's stick-to-bottom check, since the board
+// chat panel has its own).
+function updateThinkingIndicatorFor(inner, sid, opts = {}) {
+  if (!inner) return;
+  const old = inner.querySelector(":scope > .thinking-block");
+  const st = S.statuses[sid];
+  const fresh = st ? buildThinkingBlock(st, opts) : null;
+  // identical markup (busy → busy): keep the existing node so the dot
+  // animation and any text selection inside survive
+  if (old && fresh && old.innerHTML === fresh.innerHTML) return;
+  if (old) old.remove();
+  if (!fresh) return;
+  inner.appendChild(fresh);
+  const tl = inner.parentElement;
+  const stick = opts.stick ? opts.stick(tl) : S.scrollStick;
+  if (tl && stick) tl.scrollTop = tl.scrollHeight;
+}
+
+// Main-timeline wrapper: recompute the visibility/label opts for S.current.
+function updateThinkingIndicator() {
+  const inner = $("#timeline-inner");
+  if (!inner || !S.current) return;
+  const store = msgStore(S.current);
+  const st = S.statuses[S.current];
+  const curInfo = S.sessions.find((s) => s.id === S.current);
+  const compacting = !!st && (st.type === "compact" ||
+    (st.type === "busy" && curInfo && curInfo.time && !!curInfo.time.compacting));
+  updateThinkingIndicatorFor(inner, S.current, {
+    compacting,
+    hidden: !!st && st.type === "busy" && !compacting && lastBlockHasText(store),
+    runMeta: thinkMeta(currentRunLabel(store)),
+  });
+}
+
+// Board-chat wrapper: same, for the orchestrator conversation panel.
+function updateBoardChatThinking() {
+  const inner = $("#board-chat-timeline-inner");
+  const sid = boardChatSessionId();
+  if (!inner) return;
+  const store = sid ? S.msgs.get(sid) : null;
+  const st = sid ? S.statuses[sid] : null;
+  updateThinkingIndicatorFor(inner, sid, {
+    compacting: !!st && st.type === "compact",
+    hidden: !!st && st.type === "busy" && (!store || lastBlockHasText(store)),
+    stick: (tl) => boardChatNearBottom(tl),
+  });
 }
 
 // "agent · model" for the run in progress — taken from the streaming
@@ -2798,6 +3070,8 @@ function renderUserMessage(info, parts, sid) {
 function renderAssistantMessage(info, parts, sid) {
   const target = sid || S.current;
   const block = el("div", "assistant-block");
+  // lets appendPartIn add new parts to this block without a full rebuild
+  block.dataset.msg = info.id;
   // a compaction summary gets the same header opencode gives its compaction
   // row — the streamed text below it is the summary itself
   if (info.summary) block.appendChild(el("div", "compaction-label", "Compaction"));
@@ -2938,6 +3212,9 @@ function renderTool(p, info) {
   const name = p.tool;
   const titleRow = el("div", "tool-row");
   const wrap = el("div", "tool" + (st.status === "error" ? " error" : ""));
+  // lets patchPartIn swap this row in place on tool state changes instead of
+  // rebuilding the whole timeline (which resets the scroll position)
+  wrap.dataset.part = p.id;
   const input = st.input || {};
   const running = st.status === "running";
 
@@ -2988,6 +3265,8 @@ function renderTool(p, info) {
       sub = inStr(input.description);
       const childSid = st.metadata && typeof st.metadata.sessionId === "string" ? st.metadata.sessionId : "";
       if (childSid) {
+        // lets updateTaskRows find this row when the subagent's status changes
+        wrap.dataset.taskSession = childSid;
         // opencode-style: the row opens the subagent's session (read-only)
         taskLink = childSid;
       } else {
@@ -3574,6 +3853,9 @@ function renderBoardChat() {
   if (!inner) return;
   const tl = $("#board-chat-timeline");
   const stick = boardChatNearBottom(tl);
+  // preserve the offset across the rebuild — wiping the DOM clamps scrollTop
+  // to 0 and would dump a reader scrolled into an expanded tool call at the top
+  const prevTop = tl ? tl.scrollTop : 0;
   inner.innerHTML = "";
   const sid = boardChatSessionId();
   if (sid) {
@@ -3591,31 +3873,23 @@ function renderBoardChat() {
         }
       }
     }
-    // thinking indicator while the orchestrator works
+    // thinking indicator while the orchestrator works (shared builder —
+    // same shapes as the main timeline's)
     const st = S.statuses[sid];
-    if (st && (st.type === "busy" || st.type === "retry" || st.type === "compact")) {
-      const think = el("div", "assistant-block");
-      const row = el("div", "thinking-row");
-      if (st.type === "retry") {
-        row.appendChild(el("span", "retry", `retrying in ${Math.max(0, Math.round(((st.next || 0) - Date.now()) / 1000))}s — attempt #${st.attempt}`));
-      } else if (st.type === "compact") {
-        row.appendChild(el("span", "ricon", "✳"));
-        row.appendChild(el("span", "shimmer", "Compacting"));
-        row.appendChild(thinkingDots(true));
-      } else if (!store || !lastBlockHasText(store)) {
-        row.appendChild(el("span", "ricon", "🧠"));
-        row.appendChild(el("span", "shimmer", "Thinking"));
-        row.appendChild(thinkingDots(true));
-      }
-      think.appendChild(row);
-      inner.appendChild(think);
-    }
+    const think = buildThinkingBlock(st, {
+      compacting: !!st && st.type === "compact",
+      hidden: !!st && st.type === "busy" && (!store || lastBlockHasText(store)),
+    });
+    if (think) inner.appendChild(think);
   } else if (boardChatLoaded) {
     inner.appendChild(el("div", "board-chat-empty",
       "Chat with the orchestrator — it coordinates the work on this board: breaking tasks into cards, starting sessions on them, linking follow-ups and scheduling cron jobs."));
   }
   updateBoardChatChrome();
-  if (tl && stick) tl.scrollTop = tl.scrollHeight;
+  if (tl) {
+    if (stick) tl.scrollTop = tl.scrollHeight;
+    else tl.scrollTop = prevTop;
+  }
 }
 
 // Send/stop button and header spinner follow the busy state.
@@ -3647,7 +3921,16 @@ function renderBoardChatStreaming() {
     const part = store.parts[mid] && store.parts[mid][pid];
     if (!part) { needFull = true; continue; }
     const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
-    if (!node) { needFull = true; continue; }
+    if (!node) {
+      // first delta before the bubble exists — append instead of full rebuild
+      if (appendPartIn(inner, part, store)) {
+        updateBoardChatThinking();
+        touched = true;
+        continue;
+      }
+      needFull = true;
+      continue;
+    }
     node.innerHTML = renderMarkdown(part.text || "");
     if (part.type === "reasoning") {
       const c = inner.querySelector(`[data-rcount="${cssId(pid)}"]`);
@@ -4019,6 +4302,33 @@ async function viewCard(c) {
 
 function boardCardsIn(column) {
   return boardCards.filter((c) => c.column === column).sort((a, b) => a.order - b.order);
+}
+
+function boardCardById(id) {
+  return boardCards.find((c) => c.id === id) || null;
+}
+
+// Toggle the busy spinner on kanban cards in place — session.status/idle fire
+// per subagent lifecycle, and the full board rebuild this used to trigger was
+// the heaviest DOM op in the app (and the reason renderBoard needs its
+// focus/contenteditable rescue logic). Cards are keyed by data-id; the
+// spinner is the head's first child when present.
+function updateBoardSpinners() {
+  const board = $("#kanban");
+  if (!board) return;
+  board.querySelectorAll(".kanban-card[data-id]").forEach((card) => {
+    const c = boardCardById(card.dataset.id);
+    const want = !!(c && c.column === "inprogress" && c.sessionID && sessionBusy(c.sessionID));
+    const head = card.querySelector(".kanban-card-head");
+    if (!head) return;
+    const has = !!head.querySelector(":scope > span.spinner");
+    if (want === has) return;
+    if (want) head.insertBefore(el("span", "spinner", ICONS.spinner), head.firstChild);
+    else {
+      const sp = head.querySelector(":scope > span.spinner");
+      if (sp) sp.remove();
+    }
+  });
 }
 
 function renderBoard() {
@@ -4687,8 +4997,32 @@ function renderCronList() {
   for (const j of cronJobs) list.appendChild(cronRow(j));
 }
 
+// Toggle the hourglass on cron rows in place — a run starting/ending only
+// changes this one glyph, not the row's schedule/meta/prompt content.
+function updateCronSpinners() {
+  const list = $("#cron-list");
+  if (!list || S.view !== "cron") return;
+  list.querySelectorAll(".cron-row[data-cron]").forEach((row) => {
+    const j = cronJobs.find((x) => x.id === row.dataset.cron);
+    const want = !!(j && cronRunning(j));
+    const has = !!row.querySelector(".cron-hourglass");
+    if (want === has) return;
+    const head = row.querySelector(".cron-row-head");
+    if (!head) return;
+    if (want) {
+      const hg = el("span", "cron-hourglass", "⏳");
+      hg.title = "A run is in progress";
+      head.insertBefore(hg, head.firstChild);
+    } else {
+      const hg = row.querySelector(".cron-hourglass");
+      if (hg) hg.remove();
+    }
+  });
+}
+
 function cronRow(j) {
   const row = el("div", "cron-row" + (j.paused ? " paused" : ""));
+  row.dataset.cron = j.id;
   const main = el("div", "cron-row-main");
 
   const head = el("div", "cron-row-head");
@@ -5047,6 +5381,12 @@ function buildComposerRegion(region) {
       }
       if (e.key === "Escape") { e.preventDefault(); closeCmdMenu(); return; }
     }
+    if (e.key === "Tab" && !e.isComposing) {
+      // cycle agents: Tab forward, Shift+Tab backward
+      e.preventDefault();
+      cycleAgent(e.shiftKey ? -1 : 1);
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       doSend();
@@ -5098,6 +5438,7 @@ function buildComposerRegion(region) {
 
   const busy = isBusy();
   const send = el("button", "c-btn " + (busy ? "stop" : "send"), busy ? ICONS.stop : ICONS.up);
+  send.id = "send-btn";
   send.title = busy ? "Stop" : "Send";
   send.onclick = () => (busy ? abort() : doSend());
   actions.appendChild(send);
@@ -5121,6 +5462,19 @@ function autosize(ta) {
 
 function isBusy() {
   return !!(S.current && S.statuses[S.current]);
+}
+
+// Send/stop button follows the busy state without a composer rebuild —
+// the rebuild would wipe focus, caret, slash menu and the mic dock.
+// The board chat has the same pattern in updateBoardChatChrome.
+function updateComposerChrome() {
+  const send = $("#send-btn");
+  if (!send) return;
+  const busy = isBusy();
+  send.className = "c-btn " + (busy ? "stop" : "send");
+  send.innerHTML = busy ? ICONS.stop : ICONS.up;
+  send.title = busy ? "Stop" : "Send";
+  send.onclick = () => (busy ? abort() : doSend());
 }
 
 async function abort() {
@@ -5234,23 +5588,36 @@ function renderAttachChips(row) {
 
 /* ---------- agent / model selectors ---------- */
 
+const AGENT_LIST = ["build", "plan", "orchestrator", "general", "explore"];
+
+function setAgent(a) {
+  S.agent = a;
+  wsSet("agent", a);
+  renderComposerRegion();
+}
+
+function cycleAgent(dir) {
+  let i = AGENT_LIST.indexOf(S.agent);
+  if (i < 0) i = 0;
+  setAgent(AGENT_LIST[(i + dir + AGENT_LIST.length) % AGENT_LIST.length]);
+}
+
 function buildAgentSelect() {
   const btn = el("button", "c-select");
   const colors = { build: "#034cff", plan: "#a753ae", orchestrator: "#0d9f6f", general: "#2090f5", explore: "#fcb239" };
+  btn.title = "Switch agent (Tab in composer)";
   btn.innerHTML =
     `<span class="agent-dot" style="background:${colors[S.agent] || "#999"}"></span>
      <span class="name">${esc(cap(S.agent))}</span>${ICONS.chev}`;
   btn.onclick = (e) => {
     e.stopPropagation();
     const pop = el("div", "popover");
-    for (const a of ["build", "plan", "orchestrator", "general", "explore"]) {
+    for (const a of AGENT_LIST) {
       const item = el("button", "p-item" + (S.agent === a ? " on" : ""));
       item.innerHTML = `<span class="agent-dot" style="background:${colors[a]}"></span><span>${cap(a)}</span>`;
       item.onclick = () => {
-        S.agent = a;
-        wsSet("agent", a);
         closePopovers();
-        renderComposerRegion();
+        setAgent(a);
       };
       pop.appendChild(item);
     }

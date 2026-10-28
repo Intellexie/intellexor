@@ -290,6 +290,32 @@ func Delete(projectID, alarmID string) error {
 	return ErrNotFound
 }
 
+// DeleteFired removes every already-fired alarm of the given session —
+// the web UI's "Clear finished" button in the wake-up modal. Pending
+// (unfired) alarms are untouched, and alarms of other sessions are never
+// affected. Returns the number of alarms removed.
+func DeleteFired(projectID, sessionID string) (int, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	alarms, err := load(projectID)
+	if err != nil {
+		return 0, err
+	}
+	var kept []Alarm
+	removed := 0
+	for _, a := range alarms {
+		if a.SessionID == sessionID && a.Fired {
+			removed++
+			continue
+		}
+		kept = append(kept, a)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	return removed, save(projectID, kept)
+}
+
 // Import re-arms exported alarms under a (new) session ID. Past-due
 // untriggered alarms are marked fired instead of being carried over
 // armed: an import must never replay stale wake-ups — the sweep would

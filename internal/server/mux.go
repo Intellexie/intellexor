@@ -115,6 +115,7 @@ func (s *Server) Handler() http.Handler {
 	handle("GET /alarm", s.listAlarms)
 	handle("POST /alarm", s.createAlarm)
 	handle("GET /alarm/session/{sessionID}", s.sessionAlarms)
+	handle("POST /alarm/session/{sessionID}/clear-finished", s.clearFinishedAlarms)
 	handle("POST /alarm/{alarmID}/trigger", s.triggerAlarm)
 	handle("DELETE /alarm/{alarmID}", s.deleteAlarm)
 
@@ -288,6 +289,15 @@ func (s *Server) cors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-opencode-directory, x-opencode-workspace")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	w.Header().Set("Vary", "Origin")
+	// Cross-origin isolation: without it, browsers refuse SharedArrayBuffer
+	// and onnxruntime-web pins its wasm threads to 1 — the CPU speech-to-text
+	// fallback runs ~4-8x slower than it could. credentialless (not
+	// require-corp) keeps CORS-enabled cross-origin fetches working, which
+	// the one-time speech model download from the HF hub relies on; all app
+	// assets are same-origin. Browsers without credentialless support
+	// (Safari) simply ignore it and keep today's single-threaded behavior.
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
 }
 
 // ---- SSE ----

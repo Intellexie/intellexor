@@ -28,10 +28,11 @@
     device: "", // "webgpu" | "wasm" — reported by the worker after load
     recordingSince: 0,
     error: "",
+    decode: null, // {done, total} — chunked decode progress
   };
 
-  let worker = null, client = null, loaded = false;
-  let mediaStream = null, audioCtx = null, sourceNode = null, procNode = null;
+  let worker = null, client = null, loaded = false, loadPromise = null;
+  let mediaStream = null, audioCtx = null, sourceNode = null, procNode = null, workletNode = null, sinkNode = null;
   let chunks = [], totalSamples = 0, tickTimer = null;
   const hooks = { onUpdate: () => {}, onText: () => {}, toast: () => {} };
 
@@ -66,6 +67,11 @@
         }
         if (msg.type === "fallback") {
           hooks.toast("WebGPU unavailable — speech-to-text falling back to CPU", true);
+          return;
+        }
+        if (msg.type === "decode-progress") {
+          S.decode = { done: msg.done || 0, total: msg.total || 0 };
+          updThrottled();
           return;
         }
         const { id, dir, data, error } = msg;
@@ -107,26 +113,33 @@
     });
   }
 
-  async function ensureModel() {
-    if (loaded) return true;
-    S.state = "loading"; S.error = ""; S.progress = { loaded: 0, total: 0 }; upd();
-    try {
-      await ensureWorker();
-      const res = await client.post("load", {
-        device: navigator.gpu ? "webgpu" : "wasm",
-      });
-      S.device = (res && res.device) || "";
-      loaded = true;
-      S.state = "ready";
-      upd();
-      return true;
-    } catch (e) {
-      S.error = (e && e.message) || String(e);
-      S.state = "idle";
-      upd();
-      hooks.toast("Speech model init failed: " + S.error, true);
-      return false;
+  // Idempotent: concurrent callers share one in-flight load.
+  function ensureModel() {
+    if (loaded) return Promise.resolve(true);
+    if (!loadPromise) {
+      S.state = "loading"; S.error = ""; S.progress = { loaded: 0, total: 0 }; upd();
+      loadPromise = (async () => {
+        try {
+          await ensureWorker();
+          const res = await client.post("load", {
+            device: navigator.gpu ? "webgpu" : "wasm",
+          });
+          S.device = (res && res.device) || "";
+          loaded = true;
+          S.state = "ready";
+          upd();
+          return true;
+        } catch (e) {
+          S.error = (e && e.message) || String(e);
+          S.state = "idle";
+          loadPromise = null; // allow a retry on the next attempt
+          upd();
+          hooks.toast("Speech model init failed: " + S.error, true);
+          return false;
+        }
+      })();
     }
+    return loadPromise;
   }
 
   function downsample(buffer, fromRate) {
@@ -162,20 +175,49 @@
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     });
     audioCtx = new AudioContext({ sampleRate: TARGET_RATE });
+    // A suspended context silently captures nothing — e.g. when the page
+    // was restored from a back-forward cache or the webview throttles us.
+    if (audioCtx.state === "suspended") { try { await audioCtx.resume(); } catch {} }
     sourceNode = audioCtx.createMediaStreamSource(mediaStream);
-    procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-    procNode.onaudioprocess = (e) => {
-      if (S.state !== "recording") return;
-      const samples = downsample(e.inputBuffer.getChannelData(0), audioCtx.sampleRate);
-      chunks.push(new Float32Array(samples));
-      totalSamples += samples.length;
-    };
-    sourceNode.connect(procNode);
-    procNode.connect(audioCtx.destination);
-
+    // Reset the buffer before anything can flow into it, and mark
+    // recording BEFORE the graph is wired: the chunk callback drops
+    // samples captured outside the recording window.
     chunks = []; totalSamples = 0;
     S.recordingSince = Date.now();
     S.state = "recording";
+    const onChunk = (samples) => {
+      if (S.state !== "recording") return;
+      const s = downsample(samples, audioCtx.sampleRate);
+      chunks.push(new Float32Array(s));
+      totalSamples += s.length;
+    };
+    // Every capture path drains through this silent sink into the
+    // destination: engines only pull nodes reachable from the destination,
+    // and a zero-output capture node is never processed on some of them
+    // (WebKitGTK/Safari). Gain 0 keeps it inaudible — no echo.
+    sinkNode = audioCtx.createGain();
+    sinkNode.gain.value = 0;
+    sinkNode.connect(audioCtx.destination);
+
+    // Preferred capture: AudioWorklet (audio render thread — no dropped
+    // or repeated buffers). Fallback: deprecated ScriptProcessor (main
+    // thread, glitches under load) for browsers without worklet support.
+    let usedWorklet = false;
+    try {
+      await audioCtx.audioWorklet.addModule("/mic-worklet.js");
+      workletNode = new AudioWorkletNode(audioCtx, "intellexor-capture");
+      workletNode.port.onmessage = (e) => onChunk(e.data);
+      sourceNode.connect(workletNode);
+      workletNode.connect(sinkNode);
+      usedWorklet = true;
+    } catch {}
+    if (!usedWorklet) {
+      procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      procNode.onaudioprocess = (e) => onChunk(e.inputBuffer.getChannelData(0));
+      sourceNode.connect(procNode);
+      procNode.connect(sinkNode); // required to pull ScriptProcessor — via mute, not speakers
+    }
+
     upd();
 
     // recording-timer display only — no decoding while recording
@@ -184,18 +226,24 @@
 
   function stopRecording() {
     clearInterval(tickTimer); tickTimer = null;
+    try { workletNode && workletNode.disconnect(); } catch {}
+    try { workletNode && (workletNode.port.onmessage = null); } catch {}
+    workletNode = null;
     try { procNode && (procNode.onaudioprocess = null); } catch {}
     try { procNode && procNode.disconnect(); } catch {}
     try { sourceNode && sourceNode.disconnect(); } catch {}
+    try { sinkNode && sinkNode.disconnect(); } catch {}
     if (mediaStream) for (const t of mediaStream.getTracks()) t.stop();
 
     S.state = "decoding";
+    S.decode = null;
     upd();
     const finish = () => {
       try { audioCtx && audioCtx.close(); } catch {}
-      audioCtx = null; procNode = null; sourceNode = null; mediaStream = null;
+      audioCtx = null; procNode = null; sourceNode = null; mediaStream = null; sinkNode = null;
       chunks = []; totalSamples = 0;
       S.state = "ready";
+      S.decode = null;
       upd();
     };
     if (totalSamples > 0) {
@@ -214,7 +262,7 @@
 
   async function toggle() {
     if (S.state === "recording") { stopRecording(); return; }
-    if (S.state === "loading" || S.state === "decoding") return;
+    if (S.state === "decoding") return;
     if (!window.caches) {
       hooks.toast("Speech-to-text needs a secure context (https:// or localhost)", true);
       return;
@@ -223,7 +271,9 @@
       hooks.toast("Microphone unavailable — requires a secure context (https:// or localhost)", true);
       return;
     }
-    if (!loaded) {
+    // Load on first use only — the ~1.2 GB download must never start
+    // unless the user actually asked for speech-to-text.
+    if (S.state === "loading" || !loaded) {
       const ok = await ensureModel();
       if (!ok) return;
     }
@@ -280,7 +330,8 @@
     } else if (S.state === "decoding") {
       const head = el("div", "d-head");
       const dev = S.device === "webgpu" ? "On GPU" : "On CPU";
-      head.innerHTML = `<span class="d-title">Transcribing…</span>` +
+      const prog = S.decode && S.decode.total > 1 ? ` — segment ${S.decode.done}/${S.decode.total}` : "";
+      head.innerHTML = `<span class="d-title">Transcribing${prog}…</span>` +
         (S.device ? `<span class="mic-device">${dev}</span>` : "");
       d.appendChild(head);
     }
@@ -291,7 +342,7 @@
     // transformers.js downloads can't be aborted cleanly — kill the worker
     // and start over on the next toggle.
     if (worker) { try { worker.terminate(); } catch {} }
-    worker = null; client = null; loaded = false;
+    worker = null; client = null; loaded = false; loadPromise = null;
     S.state = "idle";
     upd();
   }

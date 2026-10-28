@@ -95,6 +95,22 @@ func (s *Server) triggerAlarm(w http.ResponseWriter, r *http.Request) *apiError 
 	return nil
 }
 
+// clearFinishedAlarms deletes every already-fired wake-up of the session
+// ("Clear finished" in the wake-up modal). Pending alarms are untouched.
+func (s *Server) clearFinishedAlarms(w http.ResponseWriter, r *http.Request) *apiError {
+	in, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
+	if err != nil {
+		return err
+	}
+	n, cerr := alarm.DeleteFired(store.ProjectID(in.Directory), sess.ID)
+	if cerr != nil {
+		return badRequest(cerr.Error())
+	}
+	in.PublishAlarmUpdate()
+	writeJSON(w, 200, map[string]int{"removed": n})
+	return nil
+}
+
 // deleteAlarm removes a wake-up ("Delete" in the modal) — pending or
 // already fired, any session of the project.
 func (s *Server) deleteAlarm(w http.ResponseWriter, r *http.Request) *apiError {
