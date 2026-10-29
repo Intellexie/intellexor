@@ -5547,6 +5547,17 @@ async function doSend() {
   if (text) parts.push({ type: "text", text });
   for (const a of currentAttachments()) parts.push(a);
   composerFiles.delete(draftKey());
+  // The composer is no longer rebuilt on session.status (that rebuild wiped
+  // focus, caret and the slash menu) — so nothing else syncs the DOM with the
+  // now-empty draft. Clear the box and chips in place.
+  const box = $("#composer-region textarea");
+  if (box) {
+    box.value = "";
+    autosize(box);
+    box.classList.remove("shell-mode");
+  }
+  const chips = $("#attach-row");
+  if (chips) renderAttachChips(chips);
   // sending is explicit — the user message (arriving via SSE) and everything
   // after it must be visible, even if the user was scrolled up
   S.scrollStick = true;
