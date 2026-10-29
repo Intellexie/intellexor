@@ -6868,9 +6868,17 @@ async function route() {
   // fetch its info so the read-only view can resolve parentID/title
   if (S.current && !isPendingTab(S.current) &&
       !S.sessions.find((s) => s.id === S.current) && !S.subagents.has(S.current)) {
-    await get("/session/" + S.current)
-      .then((info) => { if (info && info.id) S.subagents.set(info.id, info); })
-      .catch(() => {});
+    try {
+      const info = await get("/session/" + S.current);
+      if (info && info.id) S.subagents.set(info.id, info);
+    } catch (e) {
+      // session was deleted externally (e.g. while the page was closed) —
+      // don't strand the user on a dead route, fall back to the root view
+      if (e && e.payload && e.payload.name === "SessionNotFoundError") {
+        navigate("");
+        return;
+      }
+    }
   }
   if (S.current) openTab(S.current); // one tab per opened session, like opencode web
   renderSidebar();
@@ -6891,6 +6899,18 @@ async function loadSession(sid) {
     S.unseen.delete(sid);
     renderSidebar();
   } catch (e) {
+    // session vanished between the list load and this fetch (deleted
+    // externally) — go back to the root view instead of a dead composer
+    if (e && e.payload && e.payload.name === "SessionNotFoundError") {
+      S.tabs = S.tabs.filter((id) => id !== sid);
+      saveTabs();
+      S.sessions = S.sessions.filter((s) => s.id !== sid);
+      S.msgs.delete(sid);
+      delete S.statuses[sid];
+      renderSidebar();
+      if (sid === S.current) navigate("");
+      return;
+    }
     toast(e.message, true);
   }
 }
