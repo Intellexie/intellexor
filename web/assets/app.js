@@ -457,6 +457,9 @@ function handleEvent(ev) {
             const text = userMessageText(msgStore(info.id), info.revert.messageID);
             if (text) setComposerText(text);
           }
+          // a revert (button or /undo //redo) is an explicit user action —
+          // always land on the newest visible message
+          S.scrollStick = true;
           loadMessages(info.id).then(() => renderTimeline()).catch(() => {});
         }
       }
@@ -532,6 +535,8 @@ function handleEvent(ev) {
       const wasBusy = idleAfterBusy.delete(p.sessionID) || sessionBusy(p.sessionID);
       delete S.statuses[p.sessionID];
       S.streaming.clear();
+      deltaPaintedLen.clear();
+      deltaPaintedLenBoard.clear();
       updateSidebarRow(p.sessionID);
       updateComposerChrome();
       if (p.sessionID === S.current) {
@@ -607,6 +612,8 @@ function handleEvent(ev) {
       // text/reasoning part finalized — stop delta-streaming into it
       if ((part.type === "text" || part.type === "reasoning") && part.time && part.time.end) {
         S.streaming.delete(part.id);
+        deltaPaintedLen.delete(part.id);
+        deltaPaintedLenBoard.delete(part.id);
       }
       trimWindow(store); // a new part can push the window over the cap
       if (p.sessionID === S.current) {
@@ -803,6 +810,15 @@ function msgStore(sid) {
 const DELTA_RENDER_MS = 120;
 let deltaTimer = 0;
 let deltaLast = 0;
+
+// Text length each streaming part had at its last paint, per timeline. A
+// tick only re-renders parts that grew since — without this, every tick
+// re-parsed and re-set innerHTML on every entry in S.streaming even when
+// only one of them was actually receiving deltas (the others were already
+// painted and waiting for their next delta or finalization).
+const deltaPaintedLen = new Map();     // main timeline: partID -> painted length
+const deltaPaintedLenBoard = new Map(); // board chat timeline
+
 function scheduleDeltaRender() {
   if (deltaTimer) return;
   deltaTimer = setTimeout(() => {
@@ -894,11 +910,14 @@ function renderStreamingText() {
     if (!store.info[mid]) continue;
     const part = store.parts[mid] && store.parts[mid][pid];
     if (!part) { needFull = true; continue; }
+    // nothing grew since the last paint — the node already shows this text
+    if (deltaPaintedLen.get(pid) === (part.text || "").length) continue;
     const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
     if (!node) {
       // first delta for a part whose bubble doesn't exist yet — append it to
       // the tail message's block instead of rebuilding the whole timeline
       if (appendPartIn(inner, part, store)) {
+        deltaPaintedLen.set(pid, (part.text || "").length);
         updateThinkingIndicator(); // the new content may retire the Thinking row
         continue;
       }
@@ -906,6 +925,7 @@ function renderStreamingText() {
       continue;
     }
     node.innerHTML = renderMarkdown(part.text || "");
+    deltaPaintedLen.set(pid, (part.text || "").length);
     // collapsed reasoning header: keep the character count in sync with the stream
     if (part.type === "reasoning") {
       const c = inner.querySelector(`[data-rcount="${cssId(pid)}"]`);
@@ -917,6 +937,11 @@ function renderStreamingText() {
   }
   if (needFull) {
     renderTimeline();
+    // the rebuild painted every streaming part at its current length
+    for (const [pid, mid] of S.streaming) {
+      const part = store.parts[mid] && store.parts[mid][pid];
+      if (part) deltaPaintedLen.set(pid, (part.text || "").length);
+    }
     return;
   }
   const tl = $("#timeline");
@@ -2842,6 +2867,7 @@ async function renderTimeline() {
         await post(`/session/${S.current}/unrevert`);
         await loadMessages(S.current);
         await refreshSession(S.current);
+        S.scrollStick = true; // restoring is explicit — land on the latest
         renderTimeline();
         toast("Messages restored");
       } catch (e) {
@@ -3046,8 +3072,10 @@ function renderUserMessage(info, parts, sid) {
       await post(`/session/${target}/revert`, { messageID: info.id });
       await loadMessages(target);
       await refreshSession(target);
-      if (target === S.current) renderTimeline();
-      else renderBoardChat();
+      // reverting is an explicit user action — always land on the newest
+      // visible message, even if the user was scrolled up
+      if (target === S.current) { S.scrollStick = true; renderTimeline(); }
+      else renderBoardChat(true);
       if (text) {
         if (target === S.current) setComposerText(text);
         else if (target === boardChatSessionId()) setBoardChatText(text);
@@ -3767,7 +3795,7 @@ async function boardChatSend() {
     await loadMessages(sid).catch(() => {});
     await post(`/session/${sid}/prompt_async`, { agent: ORCHESTRATOR_AGENT, parts: [{ type: "text", text }] });
     await refreshSession(sid);
-    renderBoardChat();
+    renderBoardChat(true); // explicit send — always land on the latest
   } catch (e) {
     if (ta && !ta.value) ta.value = text; // give the draft back — nothing was sent
     autosize(ta);
@@ -3847,12 +3875,14 @@ function boardChatNearBottom(tl) {
 
 // Render the orchestrator conversation into the panel. A full rebuild, like
 // renderTimeline — cheap at chat scale and immune to partial-update bugs.
-function renderBoardChat() {
+// forceBottom scrolls to the latest message regardless of the current scroll
+// position (used after explicit user actions: send, revert).
+function renderBoardChat(forceBottom) {
   if (boardChatCollapsed()) return; // hidden strip — nothing to paint
   const inner = $("#board-chat-timeline-inner");
   if (!inner) return;
   const tl = $("#board-chat-timeline");
-  const stick = boardChatNearBottom(tl);
+  const stick = forceBottom || boardChatNearBottom(tl);
   // preserve the offset across the rebuild — wiping the DOM clamps scrollTop
   // to 0 and would dump a reader scrolled into an expanded tool call at the top
   const prevTop = tl ? tl.scrollTop : 0;
@@ -3920,10 +3950,12 @@ function renderBoardChatStreaming() {
     if (!store.info[mid]) continue; // another conversation's part
     const part = store.parts[mid] && store.parts[mid][pid];
     if (!part) { needFull = true; continue; }
+    if (deltaPaintedLenBoard.get(pid) === (part.text || "").length) continue;
     const node = inner.querySelector(`[data-part="${cssId(pid)}"]`);
     if (!node) {
       // first delta before the bubble exists — append instead of full rebuild
       if (appendPartIn(inner, part, store)) {
+        deltaPaintedLenBoard.set(pid, (part.text || "").length);
         updateBoardChatThinking();
         touched = true;
         continue;
@@ -3932,6 +3964,7 @@ function renderBoardChatStreaming() {
       continue;
     }
     node.innerHTML = renderMarkdown(part.text || "");
+    deltaPaintedLenBoard.set(pid, (part.text || "").length);
     if (part.type === "reasoning") {
       const c = inner.querySelector(`[data-rcount="${cssId(pid)}"]`);
       if (c) {
@@ -3943,6 +3976,10 @@ function renderBoardChatStreaming() {
   }
   if (needFull) {
     renderBoardChat();
+    for (const [pid, mid] of S.streaming) {
+      const part = store.parts[mid] && store.parts[mid][pid];
+      if (part) deltaPaintedLenBoard.set(pid, (part.text || "").length);
+    }
     return;
   }
   if (!touched) return;
@@ -4714,10 +4751,21 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 let linkLineRO = null; // keeps lines aligned while the board box changes
 let linkLineROBoard = null;
 
+// Scroll and resize fire far faster than the lines need repainting; coalesce
+// to one draw per frame instead of measuring every card per event.
+let linkLineRAF = 0;
+function scheduleLinkLines() {
+  if (linkLineRAF) return;
+  linkLineRAF = requestAnimationFrame(() => {
+    linkLineRAF = 0;
+    drawLinkLines();
+  });
+}
+
 function drawLinkLines() {
   const board = $("#kanban");
   if (!board) return;
-  if (!linkLineRO) linkLineRO = new ResizeObserver(() => drawLinkLines());
+  if (!linkLineRO) linkLineRO = new ResizeObserver(() => scheduleLinkLines());
   if (linkLineROBoard !== board) {
     if (linkLineROBoard) linkLineRO.unobserve(linkLineROBoard);
     linkLineRO.observe(board);
@@ -4727,7 +4775,7 @@ function drawLinkLines() {
     board._linkLinesBound = true;
     // column scrolls move cards within content space; capture catches the
     // (non-bubbling) scroll events of the column card lists
-    board.addEventListener("scroll", () => drawLinkLines(), true);
+    board.addEventListener("scroll", () => scheduleLinkLines(), true);
     // hovering the source or the target card lights its line up green
     board.addEventListener("mouseover", (e) => {
       const card = e.target.closest(".kanban-card");
@@ -5499,6 +5547,9 @@ async function doSend() {
   if (text) parts.push({ type: "text", text });
   for (const a of currentAttachments()) parts.push(a);
   composerFiles.delete(draftKey());
+  // sending is explicit — the user message (arriving via SSE) and everything
+  // after it must be visible, even if the user was scrolled up
+  S.scrollStick = true;
 
   try {
     let sid = await ensureSessionId();

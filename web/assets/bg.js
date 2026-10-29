@@ -55,7 +55,14 @@ window.IntellexorBG = (() => {
   let W = 0, H = 0;   // canvas size in device pixels
   let dpr = 1;
   let pal = null;     // { rgb: [[r,g,b]...], alpha, glow }
-  let last = 0;       // previous frame timestamp, for sparkle physics
+
+  // The aurora drifts slowly — 30fps is visually indistinguishable from the
+  // display's refresh rate but halves the full-screen gradient fill cost
+  // (the loop used to redraw the whole viewport at 60fps+ forever, which
+  // showed up as ~60% of a core on idle). Frames between ticks are skipped
+  // without touching the canvas.
+  const FRAME_MIN_MS = 1000 / 30;
+  let lastDraw = 0;
 
   function readPalette() {
     const cs = getComputedStyle(document.documentElement);
@@ -121,9 +128,11 @@ window.IntellexorBG = (() => {
   function frame(now) {
     raf = 0;
     if (!active || !canvas.isConnected) return; // stops the loop
-    const dt = Math.min(Math.max((now - last) / 1000, 0), 0.05);
-    last = now;
-    draw(now / 1000, dt);
+    if (now - lastDraw >= FRAME_MIN_MS) {
+      const dt = Math.min(Math.max((now - lastDraw) / 1000, 0), 0.05);
+      lastDraw = now;
+      draw(now / 1000, dt);
+    }
     raf = requestAnimationFrame(frame);
   }
 
@@ -133,7 +142,7 @@ window.IntellexorBG = (() => {
     readPalette();
     resize();
     if (reduced.matches) { still(); return; }
-    last = performance.now();
+    lastDraw = performance.now();
     if (!raf) raf = requestAnimationFrame(frame);
   }
 
@@ -149,7 +158,7 @@ window.IntellexorBG = (() => {
       // Re-assert while already on: if the canvas left the DOM and was
       // re-attached, the loop is dead — revive it without resetting state.
       if (on && !raf && canvas.isConnected && !reduced.matches) {
-        last = performance.now();
+        lastDraw = performance.now();
         raf = requestAnimationFrame(frame);
       }
       return;
@@ -170,7 +179,7 @@ window.IntellexorBG = (() => {
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
     } else if (!raf) {
-      last = performance.now();
+      lastDraw = performance.now();
       raf = requestAnimationFrame(frame);
     }
   });
