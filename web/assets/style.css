@@ -375,6 +375,13 @@ pre:hover .copy-code { opacity:1; }
 .jump-latest { position:absolute; bottom:150px; left:50%; transform:translateX(-50%); z-index:6; width:32px; height:28px; border-radius:var(--radius-lg); background:var(--layer-2); border:1px solid var(--border-weak); display:none; align-items:center; justify-content:center; box-shadow:var(--shadow); }
 .jump-latest.show { display:flex; }
 
+/* lazy history loading (scroll-to-top) and start-of-history marker.
+.history-loading is fixed, not in-flow: it must never shift the scroll
+position it is about to restore. */
+.history-loading { position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:6; padding:4px 12px; border-radius:999px; background:var(--layer-2); border:1px solid var(--border-weak); color:var(--text-faint); font-size:12px; box-shadow:var(--shadow); pointer-events:none; }
+.history-start { display:flex; align-items:center; gap:12px; margin:18px 0 6px; color:var(--text-faint); font-size:12px; }
+.history-start::before,.history-start::after { content:""; flex:1; height:1px; background:var(--border-weak); }
+
 /* ---------- composer ---------- */
 .composer-region { flex:0 0 auto; padding:0 16px 12px; }
 .composer-inner { max-width:800px; margin:0 auto; }

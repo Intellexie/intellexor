@@ -1,10 +1,8 @@
 package server
 
 import (
-	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -145,81 +143,6 @@ func (s *Server) workspaceInfos() []workspaceInfo {
 	return out
 }
 
-// renameWorkspace sets (or clears) a workspace's display name. An empty
-// name resets to the directory base name.
-func (s *Server) renameWorkspace(w http.ResponseWriter, r *http.Request) *apiError {
-	var body struct {
-		Directory string `json:"directory"`
-		Name      string `json:"name"`
-	}
-	if e := decodeBody(r, &body); e != nil {
-		return e
-	}
-	if body.Directory == "" {
-		return badRequest("directory is required")
-	}
-	list := loadWorkspaces()
-	found := false
-	for i := range list {
-		if list[i].Directory == body.Directory {
-			list[i].Name = strings.TrimSpace(body.Name)
-			found = true
-			break
-		}
-	}
-	// the default directory is usually not registered (it exists implicitly)
-	// — renaming it seeds its record so the name persists
-	if !found && body.Directory == s.DefaultDir {
-		list = append(list, Workspace{Directory: body.Directory, Name: strings.TrimSpace(body.Name), AddedAt: time.Now().UnixMilli()})
-		found = true
-	}
-	if !found {
-		return notFound("Workspace not found: " + body.Directory)
-	}
-	if err := saveWorkspaces(list); err != nil {
-		return badRequest(err.Error())
-	}
-	writeTrue(w)
-	return nil
-}
-
-func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) *apiError {
-	writeJSON(w, 200, s.workspaceInfos())
-	return nil
-}
-
-func (s *Server) createWorkspace(w http.ResponseWriter, r *http.Request) *apiError {
-	var body struct {
-		Path string `json:"path"`
-	}
-	if e := decodeBody(r, &body); e != nil {
-		return e
-	}
-	if body.Path == "" {
-		return badRequest("path is required")
-	}
-	abs, err := filepath.Abs(body.Path)
-	if err != nil {
-		return badRequest("invalid path: " + body.Path)
-	}
-	st, err := os.Stat(abs)
-	if err != nil {
-		return notFound("Directory not found: " + abs)
-	}
-	if !st.IsDir() {
-		return badRequest("Not a directory: " + abs)
-	}
-	// eagerly create the instance so the workspace is fully usable the moment
-	// the UI switches to it (config merge, agents, providers)
-	s.Instance(abs)
-	ensureWorkspaceConfig(abs)
-	registerWorkspace(abs)
-	for _, info := range s.workspaceInfos() {
-		if info.Directory == abs {
-			writeJSON(w, 200, info)
-			return nil
-		}
-	}
-	writeJSON(w, 200, workspaceInfo{Directory: abs, Name: workspaceName(abs)})
-	return nil
-}
+// renameWorkspace and the other HTTP handlers live in project.go now — the
+// workspace surface is exposed through the opencode-compatible /project
+// routes. This file keeps the persistence and info-building internals.

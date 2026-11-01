@@ -154,12 +154,14 @@ type LoadedSession struct {
 }
 
 func (m *Manager) LoadMessages(s *Session) ([]WithParts, error) {
-	return m.loadMessages(s, false, 0)
+	msgs, _, err := m.loadMessages(s, false, 0, "")
+	return msgs, err
 }
 
 // LoadMessagesAll loads every stored message, including reverted ones.
 func (m *Manager) LoadMessagesAll(s *Session) ([]WithParts, error) {
-	return m.loadMessages(s, true, 0)
+	msgs, _, err := m.loadMessages(s, true, 0, "")
+	return msgs, err
 }
 
 // LoadMessagesTail loads the last visible display units, trimming whole
@@ -169,13 +171,24 @@ func (m *Manager) LoadMessagesAll(s *Session) ([]WithParts, error) {
 // window edge, so the result can exceed the limit by the oldest kept
 // message's units. limit <= 0 loads everything.
 func (m *Manager) LoadMessagesTail(s *Session, limit int) ([]WithParts, error) {
-	return m.loadMessages(s, false, limit)
+	msgs, _, err := m.loadMessages(s, false, limit, "")
+	return msgs, err
 }
 
-func (m *Manager) loadMessages(s *Session, includeReverted bool, limit int) ([]WithParts, error) {
+// LoadMessagesBefore loads up to limit display units strictly older than the
+// message with the given ID (exclusive) — one page of lazy-loaded history for
+// the web UI's scroll-to-top. It reports whether the page reaches the
+// beginning of the visible history, so the client knows when to stop asking.
+// An unknown before ID (never stored, reverted away, or purged) yields an
+// empty page marked complete: there is nothing visible older than it.
+func (m *Manager) LoadMessagesBefore(s *Session, before string, limit int) ([]WithParts, bool, error) {
+	return m.loadMessages(s, false, limit, before)
+}
+
+func (m *Manager) loadMessages(s *Session, includeReverted bool, limit int, before string) ([]WithParts, bool, error) {
 	ids, err := m.st.ListMessages(s.ProjectID, s.ID)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	// a revert hides everything from the reverted message onward; the files
 	// stay on disk until the revert is undone or a new prompt purges them.
@@ -189,12 +202,33 @@ func (m *Manager) loadMessages(s *Session, includeReverted bool, limit int) ([]W
 			}
 		}
 	}
-	// with a limit the walk starts at the newest message and moves back until
-	// the unit budget is spent, so only the returned window is ever decoded
+	// an exclusive upper bound: only messages strictly before this one are
+	// eligible. Unknown IDs end the walk immediately — the client stops
+	// paginating instead of retrying a cursor that can never resolve.
+	end := len(ids)
+	if before != "" {
+		end = -1
+		for j, id := range ids {
+			if id == before {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			return nil, true, nil
+		}
+	}
+	// with a limit the walk starts at the newest eligible message and moves
+	// back until the unit budget is spent, so only the returned window is
+	// ever decoded; complete reports whether that walk reached ids[0]
 	var out []WithParts
 	if limit > 0 {
 		units := 0
-		for i := len(ids) - 1; i >= 0 && units < limit; i-- {
+		// lowest index the walk examined; complete when it consumed the
+		// whole eligible range down to the very first visible message
+		reached := end
+		for i := end - 1; i >= 0 && units < limit; i-- {
+			reached = i
 			wp, ok := m.decodeMessage(s, ids[i])
 			if !ok {
 				continue
@@ -205,16 +239,16 @@ func (m *Manager) loadMessages(s *Session, includeReverted bool, limit int) ([]W
 		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 			out[i], out[j] = out[j], out[i]
 		}
-		return out, nil
+		return out, reached == 0, nil
 	}
-	for _, id := range ids {
+	for _, id := range ids[:end] {
 		wp, ok := m.decodeMessage(s, id)
 		if !ok {
 			continue
 		}
 		out = append(out, wp)
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // decodeMessage reads one stored message with its parts, sorted by part ID.

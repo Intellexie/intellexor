@@ -129,6 +129,102 @@ func TestLoadMessagesTail(t *testing.T) {
 	}
 }
 
+// Lazy history pagination: LoadMessagesBefore returns the page of display
+// units strictly older than the cursor (whole messages, never split), and
+// reports whether that page reached the beginning of the visible history.
+func TestLoadMessagesBefore(t *testing.T) {
+	m, s := newTailTestManager(t)
+
+	// units: msg_001=1, msg_002=3, msg_003=2, msg_004=1, msg_005=5 (12 total)
+	saveUserMsg(t, m, s, "msg_001")
+	saveAssistantMsg(t, m, s, "msg_002",
+		Part{ID: "prt_001", Type: "tool"},
+		Part{ID: "prt_002", Type: "tool"},
+		Part{ID: "prt_003", Type: "tool"},
+	)
+	saveAssistantMsg(t, m, s, "msg_003",
+		Part{ID: "prt_004", Type: "reasoning"},
+		Part{ID: "prt_005", Type: "text", Text: "done"},
+	)
+	saveUserMsg(t, m, s, "msg_004")
+	saveAssistantMsg(t, m, s, "msg_005",
+		Part{ID: "prt_006", Type: "tool"},
+		Part{ID: "prt_007", Type: "tool"},
+		Part{ID: "prt_008", Type: "tool"},
+		Part{ID: "prt_009", Type: "tool"},
+		Part{ID: "prt_010", Type: "tool"},
+	)
+
+	// page before msg_004 with budget 3: msg_003 (2 units) fits, msg_002 (3)
+	// crosses it and is kept whole — [msg_002 msg_003], not yet complete
+	got, complete, err := m.LoadMessagesBefore(s, "msg_004", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := msgIDs(got); len(ids) != 2 || ids[0] != "msg_002" || ids[1] != "msg_003" {
+		t.Fatalf("expected [msg_002 msg_003], got %v", ids)
+	}
+	if complete {
+		t.Fatal("page before msg_004 must not be complete (msg_001 remains)")
+	}
+
+	// continuing from msg_002: only msg_001 remains, and the page is complete
+	got, complete, err = m.LoadMessagesBefore(s, "msg_002", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := msgIDs(got); len(ids) != 1 || ids[0] != "msg_001" {
+		t.Fatalf("expected [msg_001], got %v", ids)
+	}
+	if !complete {
+		t.Fatal("page before msg_002 must be complete (nothing older)")
+	}
+
+	// the cursor itself is exclusive: paging before msg_005 never returns it
+	got, _, err = m.LoadMessagesBefore(s, "msg_005", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range msgIDs(got) {
+		if id == "msg_005" {
+			t.Fatal("cursor message must not appear in the page")
+		}
+	}
+
+	// an unknown cursor (reverted away, purged, or bogus) yields an empty
+	// page marked complete so the client stops paginating
+	got, complete, err = m.LoadMessagesBefore(s, "msg_nope", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 || !complete {
+		t.Fatalf("unknown cursor: expected empty complete page, got %v (complete=%v)", msgIDs(got), complete)
+	}
+
+	// the page is relative to visible messages: a revert hides the reverted
+	// message and everything after. A cursor inside the hidden range can
+	// never resolve — empty page, complete, so the client stops.
+	s.Revert = &RevertState{MessageID: "msg_003"}
+	got, complete, err = m.LoadMessagesBefore(s, "msg_004", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 || !complete {
+		t.Fatalf("hidden cursor: expected empty complete page, got %v (complete=%v)", msgIDs(got), complete)
+	}
+	// a visible cursor still pages the pre-revert history
+	got, complete, err = m.LoadMessagesBefore(s, "msg_002", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := msgIDs(got); len(ids) != 1 || ids[0] != "msg_001" {
+		t.Fatalf("expected [msg_001] (revert hides msg_003 onward), got %v", ids)
+	}
+	if !complete {
+		t.Fatal("page before msg_002 must be complete")
+	}
+}
+
 func TestDisplayUnits(t *testing.T) {
 	// a user prompt is one unit; a synthetic-only prompt renders nothing and is free
 	if n := displayUnits(WithParts{Info: UserMessage{Role: "user"}, Parts: []Part{{ID: "p1", Type: "text", Text: "hi"}}}); n != 1 {

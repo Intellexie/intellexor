@@ -83,17 +83,50 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 			}
 		}
 	}
-	if providerID == "" {
-		all, _ := provider.List(i.Directory)
-		providerID = pickDefault(all)
-		if providerID == "" {
-			return session.WithParts{}, errors.New("no providers available. Configure a provider in settings")
+	resolved, model, rerr := resolveProvider(i, providerID, modelID)
+	if rerr != nil {
+		// The run never started. prompt_async swallows the returned error, so
+		// without surfacing it on the wire the user would see nothing at all —
+		// no message, no error card, just the idle chime (exactly the "sent a
+		// chat and the orchestrator stayed silent" report). Persist the user
+		// turn plus an assistant message carrying the error: every open
+		// timeline (main and board chat) renders the error card via
+		// message.updated, and session.error dots the sidebar row.
+		userMsg := session.UserMessage{
+			ID:        in.MessageID,
+			SessionID: s.ID,
+			Role:      "user",
+			Time:      session.UserMsgTime{Created: util.Now()},
+			Agent:     agentName,
+			Format:    in.Format,
+			System:    in.System,
+			Tools:     in.Tools,
 		}
-	}
+		if userMsg.ID == "" {
+			userMsg.ID = util.ID("msg")
+		}
+		if err := i.Mgr.SaveMessage(s, userMsg); err != nil {
+			return session.WithParts{}, rerr
+		}
+		i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": userMsg})
+		saveUserParts(i, s, userMsg.ID, in)
 
-	resolved, model, err := provider.Resolve(i.Directory, providerID, modelID)
-	if err != nil {
-		return session.WithParts{}, err
+		asst := session.AssistantMessage{
+			ID:        util.ID("msg"),
+			SessionID: s.ID,
+			Role:      "assistant",
+			ParentID:  userMsg.ID,
+			Time:      session.MsgTime{Created: util.Now(), Completed: util.Now()},
+			Mode:      agent.Mode,
+			Agent:     agentName,
+			Path:      session.Path{Cwd: i.Directory, Root: i.Worktree},
+			Finish:    "error",
+			Error:     session.NewNamedError("ProviderError", map[string]any{"message": rerr.Error()}),
+		}
+		_ = i.Mgr.SaveMessage(s, asst)
+		i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": asst})
+		i.Hub.Publish("session.error", map[string]any{"sessionID": s.ID, "error": *asst.Error})
+		return session.WithParts{Info: asst}, rerr
 	}
 	resolved.Client()
 
@@ -122,46 +155,7 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 	}
 	i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": userMsg})
 
-	var userParts []session.Part
-	for _, raw := range in.Parts {
-		var pi partInput
-		if err := json.Unmarshal(raw, &pi); err != nil {
-			continue
-		}
-		p := session.Part{
-			ID: pi.ID, SessionID: s.ID, MessageID: userMsg.ID,
-		}
-		if p.ID == "" {
-			p.ID = util.ID("prt")
-		}
-		switch pi.Type {
-		case "file":
-			p.Type = "file"
-			p.Mime = pi.Mime
-			p.URL = pi.URL
-			p.Filename = pi.Filename
-		case "agent":
-			p.Type = "agent"
-			p.Name = pi.Name
-		case "subtask":
-			p.Type = "subtask"
-			p.Prompt = pi.Prompt
-			p.Description = pi.Description
-			p.Agent = pi.Agent
-		default:
-			p.Type = "text"
-			p.Text = pi.Text
-			if pi.Synthetic != nil {
-				p.Synthetic = *pi.Synthetic
-			}
-			if pi.Ignored != nil {
-				p.Ignored = *pi.Ignored
-			}
-		}
-		userParts = append(userParts, p)
-		_ = i.Mgr.SavePart(s, p)
-		i.Hub.Publish("message.part.updated", map[string]any{"sessionID": s.ID, "part": p, "time": util.Now()})
-	}
+	userParts := saveUserParts(i, s, userMsg.ID, in)
 
 	// first-message title generation
 	if firstUserMessage(i, s) {
@@ -278,6 +272,66 @@ func variantOf(v string, sm *session.ModelRef) string {
 		return sm.Variant
 	}
 	return ""
+}
+
+// resolveProvider picks and resolves the provider/model for a run: an explicit
+// selection wins, then the config default, then a deterministic fallback pick.
+// Returns a user-facing error when nothing usable is configured.
+func resolveProvider(i *Instance, providerID, modelID string) (*provider.Resolved, provider.Model, error) {
+	if providerID == "" {
+		all, _ := provider.List(i.Directory)
+		providerID = pickDefault(all)
+		if providerID == "" {
+			return nil, provider.Model{}, errors.New("no providers available. Configure a provider in settings")
+		}
+	}
+	return provider.Resolve(i.Directory, providerID, modelID)
+}
+
+// saveUserParts persists and publishes the prompt's parts under the given user
+// message (the failure path in runLoop shares the happy path's part handling).
+func saveUserParts(i *Instance, s *session.Session, msgID string, in PromptInput) []session.Part {
+	var parts []session.Part
+	for _, raw := range in.Parts {
+		var pi partInput
+		if err := json.Unmarshal(raw, &pi); err != nil {
+			continue
+		}
+		p := session.Part{
+			ID: pi.ID, SessionID: s.ID, MessageID: msgID,
+		}
+		if p.ID == "" {
+			p.ID = util.ID("prt")
+		}
+		switch pi.Type {
+		case "file":
+			p.Type = "file"
+			p.Mime = pi.Mime
+			p.URL = pi.URL
+			p.Filename = pi.Filename
+		case "agent":
+			p.Type = "agent"
+			p.Name = pi.Name
+		case "subtask":
+			p.Type = "subtask"
+			p.Prompt = pi.Prompt
+			p.Description = pi.Description
+			p.Agent = pi.Agent
+		default:
+			p.Type = "text"
+			p.Text = pi.Text
+			if pi.Synthetic != nil {
+				p.Synthetic = *pi.Synthetic
+			}
+			if pi.Ignored != nil {
+				p.Ignored = *pi.Ignored
+			}
+		}
+		parts = append(parts, p)
+		_ = i.Mgr.SavePart(s, p)
+		i.Hub.Publish("message.part.updated", map[string]any{"sessionID": s.ID, "part": p, "time": util.Now()})
+	}
+	return parts
 }
 
 // ---- helpers ----

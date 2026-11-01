@@ -219,10 +219,22 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) *apiErr
 	// optional ?limit=N returns only the last N display units — a user prompt,
 	// response text, thinking block or tool call each count as one, whole
 	// messages are kept (the web UI uses this to keep long sessions snappy);
-	// absent means everything
+	// absent means everything. ?before=<messageID> turns the limit into a
+	// lazy-history page: up to N display units strictly older than that
+	// message, for the UI's scroll-to-top loading. An empty response means
+	// the beginning of the visible history has been reached.
 	var msgs []session.WithParts
 	var err2 error
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := r.URL.Query().Get("before"); v != "" {
+		limit := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			limit, err2 = strconv.Atoi(v)
+			if err2 != nil || limit <= 0 {
+				return badRequest("invalid limit")
+			}
+		}
+		msgs, _, err2 = in.Mgr.LoadMessagesBefore(sess, v, limit)
+	} else if v := r.URL.Query().Get("limit"); v != "" {
 		limit, perr := strconv.Atoi(v)
 		if perr != nil || limit <= 0 {
 			return badRequest("invalid limit")

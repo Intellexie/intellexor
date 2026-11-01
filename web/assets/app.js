@@ -1238,7 +1238,9 @@ function openWorkspaceRenamePopover(x, y, dir) {
     if (!save) return;
     const v = input.value.trim();
     if (!v || v === workspaceDisplay(dir)) return;
-    post("/workspace/rename", { directory: dir, name: v })
+    const ws = S.workspaces.find((w) => w.directory === dir);
+    if (!ws || !ws.id) return;
+    patch("/project/" + ws.id, { name: v })
       .then(() => loadWorkspaces())
       .catch((err) => toast("Rename failed: " + (err && err.message ? err.message : err), true));
   };
@@ -1377,7 +1379,7 @@ function renderRailWorkspaces() {
 }
 
 async function loadWorkspaces() {
-  try { S.workspaces = await get("/workspace") || []; } catch { return; }
+  try { S.workspaces = await get("/project") || []; } catch { return; }
   renderRailWorkspaces();
   renderWorkspaceTabs();
   refreshWorkspaceChrome();
@@ -1545,7 +1547,7 @@ function openWorkspacePicker() {
     create.onclick = async () => {
       create.disabled = true;
       try {
-        const ws = await post("/workspace", { path: pathInput.value.trim() });
+        const ws = await post("/project", { path: pathInput.value.trim() });
         ov.remove();
         switchWorkspace(ws.directory);
       } catch (e) {
@@ -2405,13 +2407,15 @@ function countUnits(store, mid) {
 }
 
 // Keeps a live timeline bounded: as new messages and parts stream in, the
-// oldest whole messages are dropped once the window exceeds MESSAGE_WINDOW
-// units. The newest message is never dropped (a single message may alone
-// exceed the window), mirroring the server's whole-message trim.
+// oldest whole messages are dropped once the window exceeds the cap. The cap
+// starts at MESSAGE_WINDOW and grows by one page each time the user lazy-
+// loads older history (see loadOlderMessages), so scrolled-back history is
+// not dropped from under the reader while trimming still bounds the render.
 function trimWindow(store) {
+  const cap = store.windowCap || MESSAGE_WINDOW;
   let total = 0;
   for (const mid of store.order) total += countUnits(store, mid);
-  while (total > MESSAGE_WINDOW && store.order.length > 1) {
+  while (total > cap && store.order.length > 1) {
     const mid = store.order[0];
     total -= countUnits(store, mid);
     store.order.shift();
@@ -2449,7 +2453,73 @@ async function loadMessages(sid) {
   }
   // the server guarantees at least the window, in whole messages; enforce
   // the strict cap here so the display never exceeds it either
+  store.windowCap = MESSAGE_WINDOW;
+  store.historyDone = false;
+  store.loadingOlder = false;
   trimWindow(store);
+}
+
+// Lazy history: the tail window keeps long sessions fast, but the user must
+// still be able to scroll back to the very first message. When the timeline
+// is scrolled to its top, one older page (before= oldest loaded message) is
+// fetched and prepended; an empty page marks the beginning. The scroll
+// position is re-anchored so the prepended content does not shift the view.
+const HISTORY_PAGE = MESSAGE_WINDOW;
+
+function maybeLoadOlder(tl) {
+  if (!S.current || tl.scrollTop > 40) return;
+  loadOlderMessages(S.current);
+}
+
+async function loadOlderMessages(sid) {
+  const store = msgStore(sid);
+  if (store.historyDone || store.loadingOlder || !store.order.length) return;
+  if (sid !== S.current) return;
+  store.loadingOlder = true;
+  const tl = $("#timeline");
+  const oldH = tl ? tl.scrollHeight : 0;
+  let indicator = null;
+  if (tl) {
+    indicator = el("div", "history-loading", "Loading earlier messages…");
+    tl.appendChild(indicator);
+  }
+  try {
+    const before = store.order[0];
+    const msgs = await get(`/session/${sid}/message?limit=${HISTORY_PAGE}&before=${encodeURIComponent(before)}`);
+    // drop the indicator before measuring/rendering so it cannot skew the
+    // scroll-height delta
+    if (indicator && indicator.parentNode) indicator.remove();
+    indicator = null;
+    if (sid !== S.current || !msgs || !msgs.length) {
+      if (sid === S.current && msgs && !msgs.length) store.historyDone = true;
+      return;
+    }
+    for (const m of msgs) {
+      if (store.info[m.info.id]) continue; // already in the window
+      store.order.unshift(m.info.id);
+      store.info[m.info.id] = m.info;
+      store.parts[m.info.id] = {};
+      for (const part of m.parts || []) {
+        store.parts[m.info.id][part.id] = part;
+      }
+    }
+    store.windowCap = (store.windowCap || MESSAGE_WINDOW) + HISTORY_PAGE;
+    const stillTop = tl && tl.scrollTop < 40;
+    await renderTimeline();
+    // re-anchor: keep the previously-topmost message in view instead of
+    // letting the prepended page push the content down (or, if the user
+    // scrolled away meanwhile, keep their offset stable relative to content)
+    if (tl) {
+      const delta = tl.scrollHeight - oldH;
+      if (delta > 0) tl.scrollTop = stillTop ? delta : tl.scrollTop + delta;
+      updateJumpButton(tl);
+    }
+  } catch (e) {
+    // transient failure — the next scroll-to-top retries
+  } finally {
+    store.loadingOlder = false;
+    if (indicator && indicator.parentNode) indicator.remove();
+  }
 }
 
 /* ---------- main view ---------- */
@@ -2822,7 +2892,10 @@ function buildTimeline() {
     tl.scrollTop = tl.scrollHeight;
   };
   tl.appendChild(jb);
-  tl.onscroll = () => updateJumpButton(tl);
+  tl.onscroll = () => {
+    updateJumpButton(tl);
+    maybeLoadOlder(tl);
+  };
   return tl;
 }
 
@@ -2876,6 +2949,12 @@ async function renderTimeline() {
     };
     banner.appendChild(restore);
     inner.appendChild(banner);
+  }
+
+  // start-of-history marker: shown once lazy loading has reached the first
+  // message, so "nothing more above" reads as intentional, not broken
+  if (store.historyDone && store.order.length) {
+    inner.appendChild(el("div", "history-start", "Start of conversation"));
   }
 
   for (const mid of store.order) {

@@ -141,10 +141,12 @@ func (s *Server) Handler() http.Handler {
 	})
 	handle("POST /provider/{providerID}/oauth/callback", s.okTrue)
 
-	// workspaces (additional working directories with their own sessions/config)
-	handle("GET /workspace", s.listWorkspaces)
-	handle("POST /workspace", s.createWorkspace)
-	handle("POST /workspace/rename", s.renameWorkspace)
+	// projects (opencode-compatible view of workspaces; creation is explicit
+	// here where opencode resolves projects implicitly from the request dir)
+	handle("GET /project", s.listProjects)
+	handle("GET /project/current", s.currentProject)
+	handle("POST /project", s.createProject)
+	handle("PATCH /project/{projectID}", s.updateProject)
 
 	// misc
 	handle("GET /path", func(w http.ResponseWriter, r *http.Request) *apiError { pathHandler(s)(w, r); return nil })

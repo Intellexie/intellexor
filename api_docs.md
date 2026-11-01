@@ -16,7 +16,7 @@
 6. [HTTP API — Cron jobs](#6-http-api--cron-jobs)
 7. [HTTP API — Alarms (wake-ups)](#7-http-api--alarms-wake-ups)
 8. [HTTP API — Config, providers, auth](#8-http-api--config-providers-auth)
-9. [HTTP API — Workspaces](#9-http-api--workspaces)
+9. [HTTP API — Projects](#9-http-api--projects)
 10. [HTTP API — Misc (path, vcs, files, agents, commands)](#10-http-api--misc)
 11. [SSE event stream](#11-sse-event-stream) — full event catalog
 12. [ACP protocol](#12-acp-protocol) — JSON-RPC 2.0 over the same port
@@ -205,7 +205,7 @@ Common fields: `id`, `sessionID`, `messageID`, `type`.
 ### 2.4 Other shared types
 
 - `FileDiff`: `{ "file": string, "patch": string, "additions": int, "deletions": int, "status"?: string }`
-- `NamedError`: `{ "name": string, "data": map[string]any }` — e.g. `{"name":"APIError","data":{"message":"...","isRetryable":true,"statusCode":429}}`
+- `NamedError`: `{ "name": string, "data": map[string]any }` — e.g. `{"name":"APIError","data":{"message":"...","isRetryable":true,"statusCode":429}}`; `ProviderError` (`{"message"}`) when a prompt fails before it starts (no resolvable provider/model)
 - `PermissionRequest` (from `GET /permission`): `{ "id", "sessionID", "permission", "patterns": [string], "metadata": {}, "always": [string], "tool"?: {"messageID","callID"} }`
 
 ---
@@ -269,6 +269,7 @@ Body (all optional):
 ### 3.10 `GET /session/{sessionID}/message` — list messages
 
 Query: `?limit=N` (optional; counts display units — user prompt = 1, each assistant text/reasoning/tool part = 1; whole messages are never split so the result may exceed the limit). Invalid `limit` → 400.
+Query: `?before=<messageID>` (optional; lazy-history paging) — with `limit`, returns up to `limit` display units **strictly older** than that message (cursor is exclusive, result oldest-first). An **empty array means the beginning of the visible history has been reached** — stop paging. A cursor that does not resolve (never existed, reverted away, purged) also yields an empty array. `before` without `limit` returns everything older.
 **200**: array of `WithParts`. Reverted messages (from `revert.messageID` onward) are excluded.
 
 ### 3.11 `DELETE /session/{sessionID}/message/{messageID}`
@@ -587,17 +588,33 @@ All alarm mutations broadcast **`alarm.updated`** `{ "directory": "..." }` on ev
 
 ---
 
-## 9. HTTP API — Workspaces
+## 9. HTTP API — Projects (workspaces)
 
-Additional working directories with their own sessions/config.
+Working directories with their own sessions/config, exposed in **opencode's `Project` shape** so the same clients work against both servers. (opencode resolves projects implicitly from the request directory; Intellexor keeps creation explicit via `POST /project`.)
 
-- `GET /workspace` → **200** array of:
+- `GET /project` → **200** array of `Project.Info` (server default dir listed first even if unregistered):
   ```jsonc
-  { "directory": "/abs", "name": "...", "sessions": 0, "busy": false, "hasIdle": true, "lastActivity": 0 }
+  {
+    // opencode Project.Info fields:
+    "id": "<sha1 hex>",          // opencode's fallback id: sha1("directory:" + abs path)
+    "canonical": "/abs",         // the project root
+    "vcs": "git",                // present iff the dir is a git repo (worktrees included)
+    "name": "...",               // user-assigned name or basename(directory)
+    "time": { "created": 0, "updated": 0, "active": 0 },  // ms; created = registration time (0 for the default dir)
+    "sandboxes": [],
+    // Intellexor extensions (opencode clients ignore unknown fields):
+    "directory": "/abs", "sessions": 0, "busy": false, "hasIdle": true, "lastActivity": 0
+  }
   ```
-  (server default dir listed first even if unregistered; `name` = user name or `basename(directory)`.)
-- `POST /workspace` — body `{ "path": "/abs" }` → **200** the `workspaceInfo`. Seeds `<dir>/intellexor.json` stub if no config exists. 404 if the directory doesn't exist.
-- `POST /workspace/rename` — body `{ "directory": "/abs", "name": "..." }` → **200** `true` (empty name resets to basename).
+  The `?archived=true` query param is accepted (opencode compat) but ignored — Intellexor never archives.
+- `GET /project/current` → **200** opencode's `Project.Current` for the request's directory (default: server dir):
+  ```jsonc
+  { "id": "<sha1 hex>", "directory": "/abs", "canonical": "/abs" }
+  ```
+- `POST /project` — body `{ "path": "/abs" }` (`"directory"` accepted as an alias) → **200** the `Project.Info`. Validates the directory (404 if missing, 400 if it's a file), eagerly creates the instance, and seeds `<dir>/intellexor.json` stub if no config exists. Idempotent.
+- `PATCH /project/{projectID}` — opencode's `project.update`. Body `{ "name": "..." }` → **200** the updated `Project.Info`. Empty name resets to `basename(directory)`. `canonical`, `icon`, `commands` are accepted for shape compatibility but ignored. Unknown id → **404** `{ "name": "ProjectNotFoundError", "data": { "projectID": "...", "message": "..." } }`.
+
+**Switching projects:** there is deliberately **no switch endpoint** (matching opencode). A client switches by passing `?directory=<abs>` (or the `x-opencode-directory` header) on every directory-scoped request — including `GET /event?directory=` for SSE. Instances are created lazily on first request; `POST /project` eagerly pre-creates the instance (and seeds its config) so the first switch is instant. Session-scoped routes (`/session/{id}/...`) don't need `?directory=` — the directory is resolved from the session record.
 
 ---
 
@@ -650,7 +667,7 @@ First frame on connect: `server.connected` `{}`. Heartbeat every 10 s: `server.h
 | `session.deleted` | `{ "sessionID", "info": Session }` | |
 | `session.status` | `{ "sessionID", "status": {"type":"busy"} \| {"type":"retry","attempt","message","next"} \| {"type":"compact"} \| {"type":"idle"} }` | |
 | `session.idle` | `{ "sessionID" }` | a run finished |
-| `session.error` | `{ "sessionID", "error": NamedError }` | step failed (aborts do NOT emit this) |
+| `session.error` | `{ "sessionID", "error": NamedError }` | step failed, or the prompt never started (provider unresolvable — the user turn + an error assistant message are persisted first so clients can render the failure) (aborts do NOT emit this) |
 | `session.diff` | `{ "sessionID", "diff": [FileDiff] }` | cumulative per-session file changes |
 | `session.compacted` | `{ "sessionID" }` | compaction succeeded |
 | `message.updated` | `{ "sessionID", "info": UserMessage \| AssistantMessage }` | upsert by `info.id`; fires for user message saved, assistant created/finished/failed/aborted, compaction messages |
@@ -804,7 +821,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `GET /session/{id}/children` | subagent children |
 | `GET/DELETE /session/{id}/todo` | todo list |
 | `GET /session/{id}/diff` | cumulative file diffs |
-| `GET /session/{id}/message` | messages + parts (`?limit=`) |
+| `GET /session/{id}/message` | messages + parts (`?limit=`, `?limit=&before=` for lazy history) |
 | `POST /session/{id}/message` | blocking prompt |
 | `POST /session/{id}/prompt_async` | async prompt (204) |
 | `DELETE /session/{id}/message/{mid}[/part/{pid}]` | delete message / part |
@@ -827,7 +844,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `GET /config/providers`, `/config/files`, `/config/entries` | introspection |
 | `PUT/DELETE /config/provider/{pid}[/model/{mid}]`, `PUT/DELETE /config/agent/{aid}` | config editing (`?file=` on DELETE) |
 | `GET /provider`, `GET /provider/auth`, `PUT/DELETE /auth/{pid}` | providers & keys |
-| `GET/POST /workspace`, `POST /workspace/rename` | workspaces |
+| `GET/POST /project`, `GET /project/current`, `PATCH /project/{id}` | projects (workspaces) |
 | `GET /path`, `GET /vcs`, `/vcs/status`, `/vcs/diff`, `/vcs/diff/raw` | paths & git |
 | `GET /agent`, `GET /command`, `GET /mcp` | agents, commands, mcp |
 | `GET /file`, `GET /file/content` | file browser |
@@ -870,7 +887,7 @@ Required top-level structure (names are free; behavior is not):
 
 **Tab bars:**
 
-- **Workspace tabs** — one per open working directory; persisted client-side; switching workspaces must **not** reload the page (tear down directory-scoped state, refetch boot data, reconnect SSE with the new `?directory=`). Show an "unseen activity" dot per workspace (compare last-visited timestamp against `GET /workspace`'s `busy`/`lastActivity`).
+- **Workspace tabs** — one per open working directory; persisted client-side; switching workspaces must **not** reload the page (tear down directory-scoped state, refetch boot data, reconnect SSE with the new `?directory=`). Show an "unseen activity" dot per workspace (compare last-visited timestamp against `GET /project`'s `busy`/`lastActivity`).
 - **Session tabs** — Board (fixed first), one tab per open session (persisted per workspace), "+" (new session), Cron (fixed last). Tab indicators: spinner (busy), yellow dot (pending permission), red dot (error), unseen dot, ⏰ (pending alarm). Middle-click closes; right-click renames. A "pending" tab may be created client-side before the session exists; the backing session is created via `POST /session` immediately or lazily on first send, then the placeholder id is swapped.
 
 **Responsive:** below 768px the sidebar and board panel become off-canvas drawers with a backdrop; the rail shrinks; the timeline/composer tighten. The app must be usable at phone widths.
@@ -906,6 +923,7 @@ The composer is the heart of the app. Requirements:
 ### 15.5 Chat view — timeline
 
 - **Load:** `GET /session/{id}/message?limit=100` — only the last ~100 *display units* are kept (a user prompt, response text block, thinking block, or tool call each count as one; synthetic/ignored parts are free). SSE events for messages older than the loaded window must be **ignored** to prevent out-of-order appends. Re-fetches must not clobber locally buffered streaming text (longer-text-wins).
+- **Lazy history:** scrolling to the top fetches older pages with `GET /session/{id}/message?limit=100&before=<oldestLoadedID>` and prepends them (re-anchor the scroll position to the previously-topmost message). An empty page = start of conversation; show a "Start of conversation" divider and stop fetching. The display cap grows by one page per fetch so streamed tail messages cannot evict loaded history.
 - **Render from events** (§11.3): `message.updated` (new message), `message.part.delta` (stream text — throttle re-renders to ~120ms), `message.part.updated` (authoritative parts; patch in place when possible), `message.removed`, `session.status`, `session.idle`, `session.error`.
 - **User messages:** plain-text bubble (escaped, *not* markdown), attachment chips (image thumbnails), hover-revealed meta (agent · model, time), **Copy** button, and **Revert** button → `POST /session/{id}/revert {messageID}` (puts the message text back into the composer and reloads). When `sess.revert` is set, show a **revert banner** with Restore → `POST /session/{id}/unrevert`.
 - **Assistant messages:** markdown rendering (GFM, `breaks: true`) **sanitized with DOMPurify**; fenced code blocks get a copy button; links open in new tabs (`rel="noopener"`). A **Fork** button → `POST /session/{id}/fork {messageID}` → navigate to the cloned session. On error, an error card. Completed messages show a meta line (agent · model · duration).
