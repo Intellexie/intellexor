@@ -627,8 +627,9 @@ Working directories with their own sessions/config, exposed in **opencode's `Pro
 - `GET /vcs/status` → `[ { "file": "/abs/path", "additions": 0, "deletions": 0, "status": "modified"|"added"|"deleted" } ]` (additions/deletions always 0)
 - `GET /vcs/diff?context=3&mode=branch` → `[ { "file", "patch", "additions", "deletions" } ]` (`mode=branch` diffs against `origin/HEAD`)
 - `GET /vcs/diff/raw` → raw `text/x-diff` body
-- `GET /agent` → `[ { "name", "description"?, "mode": "primary"|"subagent", "native": true, "hidden": false, "color"?, "permission": [] } ]`
-  Built-ins: `build` (default, `#034cff`), `plan` (read-only, `#a753ae`), `orchestrator` (board/cron coordination, `#0d9f6f`), `general` (subagent, `#2090f5`), `explore` (subagent, `#fcb239`).
+- `GET /agent` → `[ { "name", "description"?, "mode": "primary"|"subagent", "native": true|false, "hidden": false, "color"?, "model"?, "permission": [] } ]`
+  Built-ins (`native: true`): `build` (default, `#034cff`), `plan` (read-only, `#a753ae`), `orchestrator` (board/cron coordination, `#0d9f6f`), `general` (subagent, `#2090f5`), `explore` (subagent, `#fcb239`).
+  Agents from config files (`agent` section, global + project merged; `native: false`) are appended, sorted by name; a config entry with a built-in name overrides that agent's fields. `model` is the agent's `provider/model` override — a run with that agent uses it over the config default (explicit per-request/session selections still win). Requesting an unknown agent name errors (`unknown agent "x"`) instead of silently running as `build`.
 - `GET /command` → `[ { "name", "description", "source": "command", "template", "hints": [] } ]` — built-ins `init`, `review`, `compact` plus config-defined commands.
 - `GET /mcp` → `{}`; `GET /skill`, `GET /lsp`, `GET /formatter` → `[]` (stubs)
 - `GET /file?path=<dir>&dirs=1` → `[ { "name", "path", "absolute", "type": "file"|"directory", "ignored": false } ]` (`.git`/`node_modules` marked `ignored: true` but still listed)
@@ -914,7 +915,7 @@ The composer is the heart of the app. Requirements:
   - text starting with `/` matching a command from `GET /command` → `POST /session/{id}/command`;
   - otherwise → `POST /session/{id}/prompt_async` with `{agent, model?, parts}`.
 - **Slash-command menu:** typing `/` opens a filterable popover of `GET /command` results plus client-side UI commands (`/undo`, `/redo`, `/new`, `/models`); keyboard navigation (↑/↓/Enter/Tab/Escape); commands whose template contains `$ARGUMENTS`/`$1` keep the `/name ` prefix so arguments can be typed.
-- **Agent selector:** from `GET /agent` (build/plan/orchestrator/general/explore), persisted per workspace.
+- **Agent selector:** from `GET /agent` (built-ins plus config-defined agents), persisted per workspace; a persisted pick that no longer exists is toasted and reset to `build`.
 - **Model selector:** searchable popover over `GET /provider` (grouped by provider, sorted by `release_date` desc), persisted per workspace.
 - **Send/stop toggle:** while the session is busy the send button becomes **Stop** → `POST /session/{id}/abort`; **Escape also aborts**. After aborting, if the session is still busy ~1.5s later, toast "Abort requested — waiting for the running tool to exit…".
 - **Docks above the composer** (priority order: permissions > questions > todos; plus the mic dock when recording) — see §15.9.

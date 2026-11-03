@@ -93,6 +93,9 @@ func (s *Server) configEntries(w http.ResponseWriter, r *http.Request) *apiError
 	}
 	builtin := []map[string]any{}
 	for _, a := range in.Agents() {
+		if !a.Native {
+			continue // config-defined agents are already listed under "agents"
+		}
 		builtin = append(builtin, map[string]any{
 			"name": a.Name, "description": a.Description, "mode": a.Mode,
 			"color": a.Color, "hidden": a.Hidden,

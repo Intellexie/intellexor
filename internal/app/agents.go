@@ -1,9 +1,12 @@
 package app
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Intellexie/intellexor/internal/board"
+	"github.com/Intellexie/intellexor/internal/config"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
 )
@@ -15,6 +18,7 @@ type AgentDef struct {
 	Model       string // "provider/model" override
 	Prompt      string
 	Temperature *float64
+	TopP        *float64
 	Hidden      bool
 	Color       string
 	Permission  []session.PermissionRule
@@ -23,6 +27,12 @@ type AgentDef struct {
 	// offered anything else); empty means the default set. This is a hard
 	// restriction — unlike Permission rules, which are inert metadata.
 	Tools []string
+	// DenyTools removes tools from the default set without restricting the
+	// agent to an allowlist (config `tools: {bash: false}`). Only one of
+	// Tools/DenyTools is meaningful at a time.
+	DenyTools []string
+	// Native marks built-in agents; config-defined agents are false.
+	Native bool
 }
 
 // allowsTool reports whether the agent may use the named tool. Agents
@@ -46,6 +56,7 @@ func (i *Instance) Agents() []AgentDef {
 			Description: "The default agent. Executes tools based on configured permissions.",
 			Mode:        "primary",
 			Color:       "#034cff",
+			Native:      true,
 			Permission: []session.PermissionRule{
 				{Permission: "question", Pattern: "*", Action: "allow"},
 				{Permission: "plan_enter", Pattern: "*", Action: "allow"},
@@ -56,6 +67,7 @@ func (i *Instance) Agents() []AgentDef {
 			Description: "Plan mode. Disallows all edit tools.",
 			Mode:        "primary",
 			Color:       "#a753ae",
+			Native:      true,
 			Permission: []session.PermissionRule{
 				{Permission: "question", Pattern: "*", Action: "allow"},
 				{Permission: "plan_exit", Pattern: "*", Action: "allow"},
@@ -70,6 +82,7 @@ func (i *Instance) Agents() []AgentDef {
 			Description: "Orchestrator agent. Manages the kanban board, starts cards in fresh sessions and schedules cron jobs. Cannot read or edit files.",
 			Mode:        "primary",
 			Color:       "#0d9f6f",
+			Native:      true,
 			Tools:       []string{"board", "webfetch", "todowrite", "task", "cron", "schedule_wakeup"},
 			Prompt:      orchestratorPrompt,
 		},
@@ -78,6 +91,7 @@ func (i *Instance) Agents() []AgentDef {
 			Description: "General agent. Used to research complex questions, run multi-step tasks and parallelize work.",
 			Mode:        "subagent",
 			Color:       "#2090f5",
+			Native:      true,
 			Permission: []session.PermissionRule{
 				{Permission: "todowrite", Pattern: "*", Action: "deny"},
 			},
@@ -87,6 +101,7 @@ func (i *Instance) Agents() []AgentDef {
 			Description: "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",
 			Mode:        "subagent",
 			Color:       "#fcb239",
+			Native:      true,
 			Permission: []session.PermissionRule{
 				{Permission: "*", Pattern: "*", Action: "deny"},
 				{Permission: "grep", Pattern: "*", Action: "allow"},
@@ -97,17 +112,133 @@ func (i *Instance) Agents() []AgentDef {
 			},
 		},
 	}
+	// agents from config files (global + project, merged): a config entry
+	// with a built-in name overrides that agent's fields, anything else is
+	// a new agent. Sorted for a stable listing.
+	merged := config.Merge(i.Directory)
+	names := make([]string, 0, len(merged.Agent))
+	for name := range merged.Agent {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cfg := merged.Agent[name]
+		if idx := agentIndex(out, name); idx >= 0 {
+			applyAgentCfg(&out[idx], cfg)
+			continue
+		}
+		out = append(out, agentFromCfg(name, cfg))
+	}
 	return out
 }
 
-func (i *Instance) Agent(name string) AgentDef {
-	agents := i.Agents()
-	for _, a := range agents {
-		if a.Name == name {
-			return a
+func agentIndex(agents []AgentDef, name string) int {
+	for idx := range agents {
+		if agents[idx].Name == name {
+			return idx
 		}
 	}
-	return agents[0]
+	return -1
+}
+
+// agentFromCfg converts a config `agent` entry into a runtime AgentDef.
+func agentFromCfg(name string, cfg config.AgentCfg) AgentDef {
+	def := AgentDef{
+		Name:        name,
+		Description: cfg.Description,
+		Mode:        cfg.Mode,
+		Model:       cfg.Model,
+		Prompt:      cfg.Prompt,
+		Temperature: cfg.Temperature,
+		TopP:        cfg.TopP,
+		Color:       cfg.Color,
+	}
+	if def.Mode == "" {
+		def.Mode = "primary"
+	}
+	if cfg.Hidden != nil {
+		def.Hidden = *cfg.Hidden
+	}
+	if cfg.Steps != nil {
+		def.Steps = *cfg.Steps
+	}
+	def.Tools, def.DenyTools = toolsFromCfg(cfg.Tools)
+	if len(cfg.Permission) > 0 {
+		for _, r := range config.ParsePermission(cfg.Permission) {
+			def.Permission = append(def.Permission, session.PermissionRule(r))
+		}
+	}
+	return def
+}
+
+// applyAgentCfg overlays a config entry onto an existing (built-in) agent:
+// fields set in config win, the rest keep the built-in values.
+func applyAgentCfg(def *AgentDef, cfg config.AgentCfg) {
+	def.Native = false
+	if cfg.Description != "" {
+		def.Description = cfg.Description
+	}
+	if cfg.Mode != "" {
+		def.Mode = cfg.Mode
+	}
+	if cfg.Model != "" {
+		def.Model = cfg.Model
+	}
+	if cfg.Prompt != "" {
+		def.Prompt = cfg.Prompt
+	}
+	if cfg.Temperature != nil {
+		def.Temperature = cfg.Temperature
+	}
+	if cfg.TopP != nil {
+		def.TopP = cfg.TopP
+	}
+	if cfg.Color != "" {
+		def.Color = cfg.Color
+	}
+	if cfg.Hidden != nil {
+		def.Hidden = *cfg.Hidden
+	}
+	if cfg.Steps != nil {
+		def.Steps = *cfg.Steps
+	}
+	if len(cfg.Tools) > 0 {
+		def.Tools, def.DenyTools = toolsFromCfg(cfg.Tools)
+	}
+	if len(cfg.Permission) > 0 {
+		def.Permission = nil
+		for _, r := range config.ParsePermission(cfg.Permission) {
+			def.Permission = append(def.Permission, session.PermissionRule(r))
+		}
+	}
+}
+
+// toolsFromCfg converts opencode's `tools` map into the runtime allow/deny
+// lists: explicitly enabled tools form the allowlist ("exactly these"),
+// explicitly disabled ones the denylist (removed from the default set).
+func toolsFromCfg(m map[string]bool) (allow, deny []string) {
+	for name, on := range m {
+		if on {
+			allow = append(allow, name)
+		} else {
+			deny = append(deny, name)
+		}
+	}
+	sort.Strings(allow)
+	sort.Strings(deny)
+	return allow, deny
+}
+
+// Agent resolves an agent by name, including config-defined ones. Unknown
+// names are an error — callers surface them instead of silently running as
+// a different agent.
+func (i *Instance) Agent(name string) (AgentDef, error) {
+	for _, a := range i.Agents() {
+		if a.Name == name {
+			return a, nil
+		}
+	}
+	return AgentDef{}, fmt.Errorf("unknown agent %q", name)
 }
 
 // baseRules: Intellexor grants everything by default — no permission prompts.

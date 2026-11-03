@@ -56,8 +56,7 @@ func (p *processor) publishPart(part session.Part) {
 // this in one place lets the compaction request mirror a step request
 // token-for-token, which is what makes vLLM's prefix cache cover the
 // replayed history (see compactLocked).
-func (i *Instance) stepRequest(s *session.Session, agentName string, model provider.Model, extraSystem string) provider.Request {
-	agent := i.Agent(agentName)
+func (i *Instance) stepRequest(s *session.Session, agent AgentDef, model provider.Model, extraSystem string) provider.Request {
 	system := systemPrompt(i)
 	if agent.Prompt != "" {
 		system = agent.Prompt
@@ -68,7 +67,7 @@ func (i *Instance) stepRequest(s *session.Session, agentName string, model provi
 	if u := instructionText(i.Directory); u != "" {
 		system += "\n\n" + u
 	}
-	if bc := boardContext(i, s, agentName); bc != "" {
+	if bc := boardContext(i, s, agent.Name); bc != "" {
 		system += "\n\n" + bc
 	}
 
@@ -95,6 +94,12 @@ func (i *Instance) stepRequest(s *session.Session, agentName string, model provi
 	if model.Temperature && agent.Temperature != nil {
 		req.Temperature = agent.Temperature
 	}
+	if model.Temperature && agent.TopP != nil {
+		if req.Extra == nil {
+			req.Extra = map[string]any{}
+		}
+		req.Extra["top_p"] = *agent.TopP
+	}
 	return req
 }
 
@@ -109,7 +114,7 @@ func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, mo
 		ID: util.ID("prt"), SessionID: p.s.ID, MessageID: p.msg.ID, Type: "step-start",
 	})
 
-	req := i.stepRequest(p.s, agentName, model, extraSystem)
+	req := i.stepRequest(p.s, agent, model, extraSystem)
 	req.Messages = BuildHistory(i, p.s)
 
 	ch, err := client.Stream(ctx, req, func(attempt int, serr *provider.StreamError, next time.Time) {

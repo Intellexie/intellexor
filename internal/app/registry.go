@@ -111,6 +111,17 @@ func activeToolNames(dir string, agent AgentDef) []string {
 		}
 		names = append(names, n)
 	}
+	// config agents can disable individual tools without an allowlist
+	// (`tools: {bash: false}`) — drop them from the default set
+	for _, d := range agent.DenyTools {
+		filtered := names[:0]
+		for _, n := range names {
+			if n != d {
+				filtered = append(filtered, n)
+			}
+		}
+		names = filtered
+	}
 	return names
 }
 
@@ -158,7 +169,12 @@ func instructionText(dir string) string {
 // ---- subagents ----
 
 func (i *Instance) runSubagent(parentCtx context.Context, parent *session.Session, in tool.SubagentInput) (string, string, error) {
-	agent := i.Agent(in.SubagentType)
+	agent, aerr := i.Agent(in.SubagentType)
+	if aerr != nil {
+		// surface unknown subagent types to the model instead of silently
+		// running as a different agent
+		return "", "", aerr
+	}
 	depth := parentDepth(i, parent)
 	merged := config.Merge(i.Directory)
 	maxDepth := 100

@@ -1,12 +1,20 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
 )
 
@@ -18,7 +26,10 @@ func TestOrchestratorToolRestriction(t *testing.T) {
 	store.ResetDataDirForTest()
 
 	i := New(t.TempDir())
-	orch := i.Agent("orchestrator")
+	orch, err := i.Agent("orchestrator")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if orch.Name != "orchestrator" || orch.Mode != "primary" {
 		t.Fatalf("unexpected agent: %+v", orch)
 	}
@@ -31,7 +42,11 @@ func TestOrchestratorToolRestriction(t *testing.T) {
 
 	// agents without a Tools list keep the full default set — including the
 	// build tools, but not the orchestrator-only cron tool
-	build := activeToolNames(i.Directory, i.Agent("build"))
+	buildDef, err := i.Agent("build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := activeToolNames(i.Directory, buildDef)
 	for _, n := range []string{"bash", "read", "edit", "write", "task", "webfetch", "todowrite", "question", "board"} {
 		if !slices.Contains(build, n) {
 			t.Fatalf("default tool set missing %q: %v", n, build)
@@ -85,5 +100,116 @@ func TestBoardContextByAgent(t *testing.T) {
 	bc = boardContext(i, s, "build")
 	if !strings.Contains(bc, "implement it end to end") {
 		t.Fatalf("build board context missing implementation guidance:\n%s", bc)
+	}
+}
+
+// A config-defined agent is converted into a runtime AgentDef: it resolves
+// by name, and a run uses its prompt and model override (not the config
+// default model). Unknown agent names error instead of falling back to
+// another agent.
+func TestConfigAgentWiring(t *testing.T) {
+	os.Setenv("INTELLEXOR_DATA", t.TempDir())
+	store.ResetDataDirForTest()
+
+	var mu sync.Mutex
+	var lastBody []byte
+	h := func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("title generator")) {
+			respondEmptyStop(w)
+			return
+		}
+		mu.Lock()
+		lastBody = body
+		mu.Unlock()
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": "ok"}, "finish_reason": "stop"}}}
+		b, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}
+	srv := httptest.NewServer(http.HandlerFunc(h))
+	t.Cleanup(srv.Close)
+
+	work := t.TempDir()
+	cfg := fmt.Sprintf(`{
+		"model": "test/a",
+		"provider": {"test": {"name": "test",
+			"options": {"baseURL": %q, "apiKey": "k"},
+			"models": {"a": {"name": "a", "tool_call": true, "limit": {"context": 100000, "output": 4096}},
+				"b": {"name": "b", "tool_call": true, "limit": {"context": 100000, "output": 4096}}}}},
+		"agent": {"reviewer": {"description": "Reviews code", "mode": "primary",
+			"model": "test/b", "prompt": "You are a reviewer agent.",
+			"temperature": 0.3, "tools": {"bash": false}}}
+	}`, srv.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(work, "intellexor.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	i := New(work)
+
+	rev, err := i.Agent("reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev.Native {
+		t.Fatal("config agent must not be marked native")
+	}
+	if rev.Model != "test/b" || rev.Prompt != "You are a reviewer agent." || rev.Mode != "primary" {
+		t.Fatalf("unexpected agent def: %+v", rev)
+	}
+	if rev.Temperature == nil || *rev.Temperature != 0.3 {
+		t.Fatalf("temperature not converted: %+v", rev)
+	}
+	if !slices.Contains(rev.DenyTools, "bash") {
+		t.Fatalf("tools deny list not converted: %+v", rev)
+	}
+
+	// unknown agents error instead of silently becoming build
+	if _, err := i.Agent("nope"); err == nil {
+		t.Fatal("unknown agent must error")
+	}
+
+	s := &session.Session{ProjectID: store.ProjectID(work), Directory: work, Title: "cfg agent"}
+	if err := i.Mgr.Create(s); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"type": "text", "text": "hi"})
+	if _, err := i.Prompt(s, PromptInput{Agent: "reviewer", Parts: []json.RawMessage{raw}}); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var req struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(lastBody, &req); err != nil {
+		t.Fatalf("request body is not JSON: %v: %s", err, lastBody)
+	}
+	if req.Model != "b" {
+		t.Fatalf("run did not use the agent's model override: got %q", req.Model)
+	}
+	if len(req.Messages) == 0 || req.Messages[0].Role != "system" {
+		t.Fatalf("no system message in request: %s", lastBody)
+	}
+	if sys, ok := req.Messages[0].Content.(string); !ok || !strings.Contains(sys, "You are a reviewer agent.") {
+		t.Fatalf("run did not use the agent's prompt: %v", req.Messages[0].Content)
+	}
+	for _, tool := range req.Tools {
+		if tool.Function.Name == "bash" {
+			t.Fatalf("denied tool offered to the model: %s", lastBody)
+		}
 	}
 }

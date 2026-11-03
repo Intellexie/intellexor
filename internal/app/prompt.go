@@ -73,9 +73,16 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 	if agentName == "" {
 		agentName = "build"
 	}
-	agent := i.Agent(agentName)
+	agent, agentErr := i.Agent(agentName)
 
 	providerID, modelID := resolveModelSel(in.Model, s.Model)
+	if providerID == "" && agent.Model != "" {
+		// the agent's own model override (config `agent.X.model`) wins over
+		// the config default but not over an explicit selection
+		if p, mo, ok := strings.Cut(agent.Model, "/"); ok {
+			providerID, modelID = p, mo
+		}
+	}
 	if providerID == "" {
 		if m := config.Merge(i.Directory).Model; m != "" {
 			if p, mo, ok := strings.Cut(m, "/"); ok {
@@ -84,6 +91,12 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		}
 	}
 	resolved, model, rerr := resolveProvider(i, providerID, modelID)
+	if agentErr != nil {
+		// an unknown agent name must not silently run as another agent —
+		// surface it through the same error-card path as provider failures
+		agent = AgentDef{Name: agentName, Mode: "primary"}
+		rerr = agentErr
+	}
 	if rerr != nil {
 		// The run never started. prompt_async swallows the returned error, so
 		// without surfacing it on the wire the user would see nothing at all —

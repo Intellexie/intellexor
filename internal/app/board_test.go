@@ -220,7 +220,11 @@ func TestAgentMovesCardToDoneEndToEnd(t *testing.T) {
 // The board tool must be offered to the model (registry defs include it).
 func TestBoardToolIsAdvertised(t *testing.T) {
 	i, _ := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defs := registryFor(i).Defs(activeToolNames(i.Directory, i.Agent("build")))
+	build, err := i.Agent("build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs := registryFor(i).Defs(activeToolNames(i.Directory, build))
 	found := false
 	for _, d := range defs {
 		if d.Name == "board" {

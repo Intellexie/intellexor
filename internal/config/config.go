@@ -349,9 +349,24 @@ func configDirOf() string {
 	return filepath.Join(base, "intellexor")
 }
 
+// globalCandidatesOverride, when non-nil, replaces the discovered global
+// candidate paths. Tests set it (SetGlobalCandidatesForTest) so the machine's
+// own config files cannot leak into test runs.
+var globalCandidatesOverride []string
+
+// SetGlobalCandidatesForTest overrides the global config candidate paths.
+// Pass nil to restore the discovered defaults.
+func SetGlobalCandidatesForTest(paths []string) {
+	globalCandidatesOverride = paths
+	InvalidateGlobal()
+}
+
 // globalCandidatePaths returns the global config file paths in merge order
 // (later candidates override earlier ones).
 func globalCandidatePaths() []string {
+	if globalCandidatesOverride != nil {
+		return globalCandidatesOverride
+	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{}
 	if home != "" {

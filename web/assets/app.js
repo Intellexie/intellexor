@@ -98,6 +98,7 @@ const S = {
   permissions: [],
   questions: [],
   providers: { all: [], default: {}, connected: [] },
+  agents: [], // GET /agent — built-in + config-defined agents for the picker
   current: null, // session id
   view: "sessions", // "sessions" | "board" (the kanban first tab)
   msgs: new Map(), // sid -> {order:[ids], info:{id->info}, parts:{id->part}}
@@ -1480,6 +1481,7 @@ async function switchWorkspace(dir) {
   try { S.permissions = await get("/permission") || []; } catch {}
   try { S.questions = await get("/question") || []; } catch {}
   await refreshProviders();
+  await loadAgents();
   loadCommands();
   loadCron().catch(() => {});
   if (S.boardPanelOpen) loadBoard().catch(() => {});
@@ -5729,7 +5731,40 @@ function renderAttachChips(row) {
 
 /* ---------- agent / model selectors ---------- */
 
-const AGENT_LIST = ["build", "plan", "orchestrator", "general", "explore"];
+// The agent list comes from GET /agent (built-ins plus config-defined
+// agents) and is refreshed per workspace. Hidden agents are excluded from
+// the picker. If the fetch failed, fall back to the default agent so the
+// composer still works.
+function agentList() {
+  const all = S.agents.length ? S.agents : [{ name: "build", color: "#034cff", native: true }];
+  const visible = all.filter((a) => !a.hidden);
+  return visible.length ? visible : [{ name: "build", color: "#034cff", native: true }];
+}
+
+function agentNames() {
+  return agentList().map((a) => a.name);
+}
+
+function agentColor(name) {
+  const a = S.agents.find((x) => x.name === name);
+  return (a && a.color) || "#999";
+}
+
+// Fetch the workspace's agents. A persisted pick that no longer exists is
+// surfaced (toast) and reset to the default instead of silently kept.
+async function loadAgents() {
+  try {
+    S.agents = (await get("/agent")) || [];
+  } catch {
+    return;
+  }
+  const names = agentNames();
+  if (S.agent && !names.includes(S.agent)) {
+    toast(`Unknown agent "${S.agent}" — switched to build`, true);
+    setAgent("build");
+  }
+  if (!S.agent && names.length) setAgent(names.includes("build") ? "build" : names[0]);
+}
 
 function setAgent(a) {
   S.agent = a;
@@ -5738,27 +5773,28 @@ function setAgent(a) {
 }
 
 function cycleAgent(dir) {
-  let i = AGENT_LIST.indexOf(S.agent);
+  const names = agentNames();
+  let i = names.indexOf(S.agent);
   if (i < 0) i = 0;
-  setAgent(AGENT_LIST[(i + dir + AGENT_LIST.length) % AGENT_LIST.length]);
+  setAgent(names[(i + dir + names.length) % names.length]);
 }
 
 function buildAgentSelect() {
   const btn = el("button", "c-select");
-  const colors = { build: "#034cff", plan: "#a753ae", orchestrator: "#0d9f6f", general: "#2090f5", explore: "#fcb239" };
   btn.title = "Switch agent (Tab in composer)";
   btn.innerHTML =
-    `<span class="agent-dot" style="background:${colors[S.agent] || "#999"}"></span>
+    `<span class="agent-dot" style="background:${agentColor(S.agent)}"></span>
      <span class="name">${esc(cap(S.agent))}</span>${ICONS.chev}`;
   btn.onclick = (e) => {
     e.stopPropagation();
     const pop = el("div", "popover");
-    for (const a of AGENT_LIST) {
-      const item = el("button", "p-item" + (S.agent === a ? " on" : ""));
-      item.innerHTML = `<span class="agent-dot" style="background:${colors[a]}"></span><span>${cap(a)}</span>`;
+    for (const a of agentList()) {
+      const item = el("button", "p-item" + (S.agent === a.name ? " on" : ""));
+      item.title = a.description || "";
+      item.innerHTML = `<span class="agent-dot" style="background:${a.color || "#999"}"></span><span>${cap(a.name)}</span>`;
       item.onclick = () => {
         closePopovers();
-        setAgent(a);
+        setAgent(a.name);
       };
       pop.appendChild(item);
     }
@@ -7046,6 +7082,7 @@ async function boot() {
   } catch {}
 
   await refreshProviders();
+  await loadAgents();
   loadCommands();
 
   if (window.IntellexorMic) {
