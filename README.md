@@ -38,6 +38,66 @@ Highlights:
   approval. `permission.*` config keys and the `/permission` endpoints exist
   for compatibility but have no effect.
 
+## Why Intellexor?
+
+Most agent harnesses are Node.js servers: hundreds of MB of RSS before the
+first prompt, a `node_modules` tree, and a runtime you have to keep alive.
+Intellexor is a **single static Go binary** — the agent loop, tools, storage,
+web UI and speech-to-text engine are all compiled in. It idles at a few tens
+of MB of RAM and starts in milliseconds, so it is comfortable to leave
+running permanently on a laptop, a VPS, a Raspberry Pi or in a tiny
+container — which matters, because its best features (cron jobs, scheduled
+cards, wake-up alarms) only pay off when the server is *always on*.
+
+- **One binary, zero dependencies.** No Node, no Python, no database. Copy
+  the binary to a machine and run it.
+- **One port serves everything.** Web UI, HTTP API and ACP JSON-RPC are
+  multiplexed on the same socket — no reverse proxy juggling.
+- **Headless by argument, not by build.** The same binary opens a desktop
+  window on your workstation or runs as a plain server with `--headless` —
+  e.g. in Docker on a build box — and you drive it from any browser on the
+  network. Your agent sessions live on the server, so you can close the
+  laptop and check on them from your phone's browser later.
+- **Always-on autonomy.** Cron jobs, card schedules and wake-up alarms are
+  persisted server-side and survive restarts — the agent keeps working (or
+  wakes up to work) whether or not a browser is connected.
+
+## When would I use what?
+
+The features below are independent but compose. Typical shapes:
+
+- **"Run this 40-minute training job and tell me when it's done."**
+  Ask the agent to launch the job in the background and schedule a wake-up
+  (see [Alarms](#alarms)). It ends its turn immediately instead of burning
+  tokens polling, and the alarm brings it back to check the result —
+  parse the metrics, fix a failure, or report success.
+
+- **"Wait for the CI pipeline, then merge."** Same pattern: the agent
+  triggers the pipeline, schedules a wake-up for the expected duration,
+  and when woken checks the status and proceeds (or reschedules if the
+  pipeline is still running).
+
+- **"Implement, then test, then write the docs."** Put three cards on the
+  kanban board and **link** them in a chain (see [Kanban board](#kanban-board)).
+  When the implementation card is marked done, the test card starts itself
+  in a fresh session, then the docs card. You review the result of each
+  stage while the chain keeps moving.
+
+- **"Start the load test at 2 AM."** Create the card now, **schedule** it
+  (`in: "1d"` or a `startAt` timestamp), and go home. The scheduler starts
+  it exactly like the Start button — a fresh session with the card's task.
+
+- **"Keep an eye on new issues and prepare fixes."** A **cron job** (see
+  [Cron jobs](#cron-jobs)) runs a triage prompt every morning: it reads the
+  issue tracker, writes one kanban card per actionable issue. The cards sit
+  in `open` for a developer to review, tweak and start — the agent never
+  ships anything on its own, it just keeps the backlog ready.
+
+- **"Coordinate all of the above."** The **orchestrator** agent lives in the
+  chat beside the board: it starts cards, chains them, schedules jobs and
+  wake-ups, and is pinged when each ticket finishes so it can kick off the
+  next one.
+
 ## Build & run
 
 ```sh
@@ -121,6 +181,13 @@ microphone access.
 
 ## Kanban board
 
+The board is where you *delegate* instead of chatting. Instead of one long
+conversation, you break work into cards; each card that gets started runs in
+its own fresh agent session, so tasks stay isolated, reviewable and
+parallelizable. Use it when you have several independent tasks (or a
+multi-stage pipeline) and want the agent to chew through them while you
+review results as they land.
+
 The board is the first tab in the web UI: three columns (`open`,
 `inprogress`, `done`) of cards stored per project in a single JSON file —
 it survives restarts and is shared by every client connected to the same
@@ -145,18 +212,37 @@ already working on it).
 
 - **Links (chains):** `link` points a card at a *target* card; when the
   source card is moved to done, the target starts automatically in a fresh
-  session (only cards still waiting in `open` can be targeted). This lets
-  agents chain work: finish card 1 → card 2 starts by itself.
+  session (only cards still waiting in `open` can be targeted). This is the
+  multi-stage pattern: *implement → write tests → update docs*, or
+  *migrate schema → backfill data → verify counts*. Each stage is its own
+  session with a clean context, and you can inspect (or abort) any stage
+  while the rest of the chain keeps moving. Cards waiting on a link show
+  what unblocks them, so the board reads like a pipeline.
 - **Schedules:** `schedule` sets a timed start on a card — pass `in`
   (`"30m"`, `"2h"`, `"1d"`) or `startAt` (unix milliseconds) and a
   background scheduler starts the card then, exactly like the Start
-  button. Only open cards can be scheduled; `startAt 0` clears the
-  schedule.
+  button. Use it for off-hours work: queue the risky migration now,
+  schedule it for 2 AM, review the diff in the morning. Only open cards
+  can be scheduled; `startAt 0` clears the schedule.
+
+The two compose: a scheduled card can itself be the head of a chain, so
+"tonight at 2 AM: deploy, then run the smoke tests, then post the results"
+is one scheduled card plus two links.
 
 The whole board can be exported/imported as JSON (`GET /board/export`,
 `POST /board/import?mode=replace|merge`).
 
 ## Cron jobs
+
+Cron jobs turn the agent into a **scheduled worker**: a prompt that runs on
+a schedule whether or not you remember to ask. Use them for recurring
+chores that don't need a human in the loop to *start* — triaging new
+issues, checking for failing CI runs or stale dependency alerts, sweeping
+TODOs, generating a daily changelog draft. A common setup is a triage job
+that inspects the issue tracker each morning and **creates kanban cards**
+for what it finds: the cards land in `open` for a developer to review,
+adjust and start — the agent prepares the backlog, the human decides what
+ships.
 
 A cron job pairs a prompt with a schedule; every run starts a **fresh
 agent session** prompted with the job's prompt (each run has no memory of
@@ -178,6 +264,15 @@ manage jobs itself via the `cron` tool (including `preview`, which
 validates a spec and returns its next fire time).
 
 ## Alarms
+
+Alarms solve the problem every agent harness has with **long-running work**:
+the job takes 40 minutes, but blocking on `sleep` or polling in a loop
+wastes tokens and holds the session hostage. Instead, the agent launches
+the work in the background, schedules a wake-up for when it should be
+finished, and ends its turn — the session goes idle (freeing you to use it
+or close the browser), and at wake-up time the system injects a message
+that brings the agent back to check the result: read the training metrics,
+inspect the pipeline status, or reschedule if the job needs more time.
 
 The `schedule_wakeup` tool schedules a **one-shot wake-up for the agent's
 own session**: at the given timestamp (unix seconds, or a relative `in`
