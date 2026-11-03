@@ -110,6 +110,7 @@ const S = {
   agent: wsGet("agent") || "build",
   scheme: localStorage.getItem("intellexor.scheme") || "system",
   bg: localStorage.getItem("intellexor.bg") !== "0", // animated background on/off (global pref)
+  layout: localStorage.getItem("intellexor.layout") || "tabs", // "tabs" (default) | "sidebar" — sidebar-first chrome
   unseen: new Set(),
   errored: new Set(),
   scrollStick: true,
@@ -138,6 +139,21 @@ function applyScheme() {
 function applyBackground() {
   document.body.classList.toggle("bg-off", !S.bg);
   if (window.IntellexorBG) IntellexorBG.setActive(S.bg);
+}
+
+// Layout preference (Settings → General → Layout). The default "tabs" keeps
+// the classic chrome: workspace tabs above session tabs in the main area and
+// workspace icons in the rail. "sidebar" is the sidebar-first variant: the
+// workspace switcher and the Board/Cron entries move into the left sidebar,
+// session tabs are removed entirely and the header carries title, status and
+// actions on a single row — the conversation area gains the two tab bars.
+function sidebarFirst() { return S.layout === "sidebar"; }
+
+// Reflect the layout onto #app (CSS hides the rail workspace icons and can
+// restyle the sidebar); called at boot and when the setting changes.
+function applyLayout() {
+  const app = $("#app");
+  if (app) app.classList.toggle("layout-sidebar", sidebarFirst());
 }
 
 /* ============================== utils ============================== */
@@ -489,6 +505,7 @@ function handleEvent(ev) {
       get("/session/status").then((st) => {
         S.statuses = st || {};
         renderSidebar();
+        updateHeaderStatus(S.sessions.find((s) => s.id === S.current));
         renderComposer();
         renderTimeline();
         renderBoard();
@@ -510,6 +527,7 @@ function handleEvent(ev) {
         S.errored.delete(p.sessionID); // fresh activity clears a stale error flag
       }
       updateSidebarRow(p.sessionID);
+      if (p.sessionID === S.current) updateHeaderStatus(S.sessions.find((s) => s.id === p.sessionID));
       updateComposerChrome();
       // the timeline itself only changes for the current session (thinking
       // indicator) or a task child (row spinner) — both patched in place
@@ -540,6 +558,7 @@ function handleEvent(ev) {
       deltaPaintedLen.clear();
       deltaPaintedLenBoard.clear();
       updateSidebarRow(p.sessionID);
+      if (p.sessionID === S.current) updateHeaderStatus(S.sessions.find((s) => s.id === p.sessionID));
       updateComposerChrome();
       if (p.sessionID === S.current) {
         // one full rebuild per run end is fine: it moves the agent · model
@@ -571,6 +590,7 @@ function handleEvent(ev) {
     case "session.error": {
       if (p.sessionID) S.errored.add(p.sessionID);
       updateSidebarRow(p.sessionID); // error dot on the row
+      if (p.sessionID === S.current) updateHeaderStatus(S.sessions.find((s) => s.id === p.sessionID));
       updateBoardSpinners();
       updateBoardPanelSpinners();
       updateTab();
@@ -1213,6 +1233,7 @@ function closeWorkspaceTab(dir) {
     return; // switchWorkspace reloads the page
   }
   renderWorkspaceTabs();
+  renderSidebarWorkspaces();
 }
 
 // Rename a workspace (same interaction as renaming a session tab: a small
@@ -1384,6 +1405,7 @@ async function loadWorkspaces() {
   try { S.workspaces = await get("/project") || []; } catch { return; }
   renderRailWorkspaces();
   renderWorkspaceTabs();
+  renderSidebarWorkspaces();
   refreshWorkspaceChrome();
 }
 
@@ -1499,6 +1521,7 @@ async function switchWorkspace(dir) {
   markWorkspaceVisited(S.dir || DIR);
   loadWorkspaces(); // refresh unseen dots (the old ws was just visited)
   renderWorkspaceTabs();
+  renderSidebarWorkspaces();
   connectSSE(); // reconnect the per-directory stream (web mode)
 
   await route(); // renders sidebar + main from the fresh state
@@ -2187,8 +2210,74 @@ async function openLinkCardModal(sess) {
   await reload();
 }
 
+/* ---------- sidebar-first layout: workspaces + views in the sidebar ---------- */
+
+// Sidebar-first workspace switcher: consolidates the workspace tab bar and
+// the rail workspace icons into the sidebar. Lists the open workspaces
+// (wsOpenList semantics: switching adds, closing never removes the last one)
+// plus any known-but-unopened workspaces so nothing becomes unreachable.
+// Click switches (switchWorkspace), right-click renames or closes — the same
+// interactions the workspace tabs had.
+function renderSidebarWorkspaces() {
+  const box = $("#sidebar-workspaces");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!sidebarFirst()) return;
+  box.appendChild(el("div", "session-group", "Workspaces"));
+  const open = wsOpenList();
+  const extra = S.workspaces.map((w) => w.directory).filter((d) => !open.includes(d));
+  for (const dir of open.concat(extra)) {
+    const row = el("div", "session-row ws-row" + (dir === currentDir() ? " active" : ""));
+    row.appendChild(el("span", "ws-icon", ICONS.folder));
+    row.appendChild(el("span", "title", esc(workspaceDisplay(dir))));
+    const ws = S.workspaces.find((w) => w.directory === dir);
+    if (ws && workspaceUnseen(ws)) {
+      const dot = el("span", "dot dot-unseen");
+      dot.title = "Finished session since you were last here";
+      row.appendChild(dot);
+    }
+    row.title = dir + " — click to switch, right-click to rename or close";
+    row.onclick = () => switchWorkspace(dir);
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      const items = [{ label: "Rename", icon: ICONS.edit, action: () => openWorkspaceRenamePopover(e.clientX, e.clientY, dir) }];
+      if (open.length > 1 || dir !== currentDir()) {
+        items.push({ label: "Close", icon: ICONS.close, action: () => closeWorkspaceTab(dir) });
+      }
+      openContextMenu(e.clientX, e.clientY, items);
+    };
+    box.appendChild(row);
+  }
+  const plus = el("button", "session-row ws-row ws-add");
+  plus.appendChild(el("span", "ws-icon", ICONS.plus));
+  plus.appendChild(el("span", "title", "New workspace"));
+  plus.title = "Open workspace";
+  plus.onclick = () => openWorkspacePicker();
+  box.appendChild(plus);
+}
+
+// Sidebar-first Board / Cron entries: the two fixed tabs of the classic tab
+// bar become sidebar rows (active state follows S.view via renderSidebar).
+function renderSidebarViews() {
+  const box = $("#sidebar-views");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!sidebarFirst()) return;
+  const mk = (label, icon, view, hash) => {
+    const row = el("div", "session-row side-view" + (S.view === view ? " active" : ""));
+    row.appendChild(el("span", "ws-icon", icon));
+    row.appendChild(el("span", "title", label));
+    row.onclick = () => navigate(hash);
+    box.appendChild(row);
+  };
+  mk("Board", ICONS.board, "board", "/board");
+  mk("Cron jobs", ICONS.clock, "cron", "/cron");
+}
+
 function renderSidebar() {
   const list = $("#session-list");
+  renderSidebarWorkspaces();
+  renderSidebarViews();
   list.innerHTML = "";
   // The workspace mirrors the tab bar: real sessions come from the server
   // session store, and pending tabs (sessions not created yet, e.g. when the
@@ -2536,9 +2625,14 @@ function renderMain() {
   let selS = 0, selE = 0;
   if (oldTa) { try { selS = oldTa.selectionStart; selE = oldTa.selectionEnd; } catch {} }
   main.innerHTML = "";
-  main.appendChild(buildWorkspaceBar());
-  main.appendChild(buildTabBar());
-  renderTabs();
+  // Sidebar-first layout drops both tab bars (workspaces live in the
+  // sidebar, sessions in the sidebar list) — the conversation area starts
+  // right at the header.
+  if (!sidebarFirst()) {
+    main.appendChild(buildWorkspaceBar());
+    main.appendChild(buildTabBar());
+    renderTabs();
+  }
   // the animated background is global: bg.js applies it at the root level and
   // starts it on load, so it is visible on every view. Here we only pick the
   // strength — full on the landing (new session) view, dimmed behind the
@@ -2643,6 +2737,8 @@ function buildHeader(sess) {
       }
     };
     header.appendChild(t);
+    const status = sidebarFirst() ? buildHeaderStatus(sess) : null;
+    if (status) header.appendChild(status);
     if (S.alarms[sess.id]) {
       const clock = el("span", "alarm-indicator", "⏰");
       clock.title = alarmTitle(sess.id);
@@ -2772,12 +2868,40 @@ function updateHeaderSession(sess) {
   } else if (!S.alarms[sess.id] && clock) {
     clock.remove();
   }
+  updateHeaderStatus(sess);
   const actions = header.querySelector(".header-actions");
   if (actions) actions.replaceWith(buildHeaderActions(sess));
   const circle = header.querySelector(".ctx-circle");
   const fresh = buildContextCircle(sess);
   if (circle) circle.replaceWith(fresh);
   else header.appendChild(fresh);
+}
+
+// Sidebar-first header status chip: sits between the title and the actions
+// on the single header row — spinner while the agent works, a dot when a
+// permission is pending or the last run errored. Returns null when there is
+// nothing to show (the classic tabs layout keeps the header status-free).
+function buildHeaderStatus(sess) {
+  if (!sess || isPendingTab(sess.id)) return null;
+  const st = S.statuses[sess.id];
+  if (st && st.type === "retry") return el("span", "header-status st-warn", '<span class="dot dot-permission"></span>Retrying');
+  if (st && st.type === "compact") return el("span", "header-status", ICONS.spinner + "Compacting");
+  if (st && st.type !== "idle") return el("span", "header-status", ICONS.spinner + "Working");
+  if (S.permissions.some((p) => p.sessionID === sess.id)) return el("span", "header-status st-warn", '<span class="dot dot-permission"></span>Permission needed');
+  if (S.errored.has(sess.id)) return el("span", "header-status st-err", '<span class="dot dot-error"></span>Error');
+  return null;
+}
+
+// Patch the status chip in place (session.status / session.idle /
+// session.error fire per lifecycle change; a full buildHeader would churn
+// the row). No-op when the header isn't built or the layout keeps it hidden.
+function updateHeaderStatus(sess) {
+  const header = $("#chat-header");
+  if (!header) return;
+  const old = header.querySelector(".header-status");
+  const fresh = sidebarFirst() ? buildHeaderStatus(sess) : null;
+  if (old) old.remove();
+  if (fresh) header.insertBefore(fresh, header.querySelector(".spacer"));
 }
 
 function buildContextCircle(sess) {
@@ -6454,6 +6578,25 @@ function renderSettingsGeneral(content) {
   bgRow.appendChild(bgSeg);
   content.appendChild(bgRow);
 
+  const layoutRow = el("div", "m-row");
+  layoutRow.appendChild(el("div", "", '<div class="m-label">Layout</div><div class="m-sub">Sidebar-first: workspaces and Board/Cron in the sidebar, no tab bars</div>'));
+  const laySeg = el("div", "seg");
+  for (const opt of ["tabs", "sidebar"]) {
+    const label = opt === "tabs" ? "Tabs (default)" : "Sidebar-first";
+    const b = el("button", S.layout === opt ? "on" : "", label);
+    b.onclick = () => {
+      S.layout = opt;
+      localStorage.setItem("intellexor.layout", opt);
+      applyLayout();
+      renderSidebar();
+      renderMain();
+      for (const x of laySeg.querySelectorAll("button")) x.classList.toggle("on", x === b);
+    };
+    laySeg.appendChild(b);
+  }
+  layoutRow.appendChild(laySeg);
+  content.appendChild(layoutRow);
+
   content.appendChild(el("h3", "set-h", "About"));
   const about = el("div", "m-row");
   about.appendChild(el("div", "m-label", "Version"));
@@ -7227,6 +7370,7 @@ async function loadSession(sid) {
 async function boot() {
   applyScheme();
   applyBackground();
+  applyLayout();
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyScheme);
 
   try {
