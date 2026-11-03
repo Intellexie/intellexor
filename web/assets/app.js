@@ -5553,6 +5553,21 @@ function buildComposerRegion(region) {
 
   actions.appendChild(buildAgentSelect());
   actions.appendChild(buildModelButton());
+
+  // branch label lives inside the composer row (was a hint-row below it)
+  const vcs = S.vcs;
+  const branch = el("span", "c-branch");
+  branch.title = vcs.branch ? "Git branch" : "Not a Git repository";
+  branch.innerHTML = vcs.branch
+    ? `${ICONS.branch}<span class="name">${esc(vcs.branch)}</span>`
+    : "No Git";
+  actions.appendChild(branch);
+
+  const sp = el("span");
+  sp.style.flex = "1";
+  actions.appendChild(sp);
+
+  const busy = isBusy();
   if (window.IntellexorMic) {
     const micBtn = el("button", "c-btn mic-btn" + (IntellexorMic.state() === "recording" ? " recording" : ""), ICONS.mic);
     micBtn.id = "mic-btn";
@@ -5560,12 +5575,6 @@ function buildComposerRegion(region) {
     micBtn.onclick = () => IntellexorMic.toggle();
     actions.appendChild(micBtn);
   }
-
-  const sp = el("span");
-  sp.style.flex = "1";
-  actions.appendChild(sp);
-
-  const busy = isBusy();
   const send = el("button", "c-btn " + (busy ? "stop" : "send"), busy ? ICONS.stop : ICONS.up);
   send.id = "send-btn";
   send.title = busy ? "Stop" : "Send";
@@ -5574,12 +5583,6 @@ function buildComposerRegion(region) {
   comp.appendChild(actions);
 
   inner.appendChild(comp);
-  const hint = el("div", "hint-row");
-  const vcs = S.vcs;
-  hint.innerHTML = vcs.branch
-    ? `${ICONS.branch} <span style="margin-left:4px">${esc(vcs.branch)}</span>`
-    : "No Git";
-  inner.appendChild(hint);
 
   setTimeout(() => { autosize(ta); if (!S.current || isPendingTab(S.current)) ta.focus(); }, 0);
 }

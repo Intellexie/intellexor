@@ -404,7 +404,9 @@ position it is about to restore. */
 .attach-chip { display:inline-flex; align-items:center; gap:6px; background:var(--layer-2); border-radius:var(--radius-md); padding:3px 8px; font-size:12px; margin:0 0 6px 6px; }
 .attach-chip img { width:28px; height:28px; object-fit:cover; border-radius:4px; }
 .attach-row { display:flex; flex-wrap:wrap; padding:6px 6px 0; gap:6px; }
-.hint-row { display:flex; justify-content:center; margin-top:6px; font-size:12px; color:var(--text-faint); }
+.c-branch { display:flex; align-items:center; gap:5px; height:28px; padding:0 8px; border-radius:var(--radius-md); color:var(--text-faint); font-size:12px; max-width:200px; }
+.c-branch .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.c-branch svg { flex:0 0 12px; }
 
 /* docks */
 .dock { max-width:800px; margin:0 auto 8px; border:1px solid var(--border-base); border-radius:var(--radius-xl2); background:var(--bg-base); padding:12px 14px; }
