@@ -155,7 +155,11 @@ All types live in `internal/session/types.go` unless noted.
   "cost": 0.0,
   "tokens": { /* same Tokens shape */ },
   "structured": <raw>,      // optional
-  "variant": "...",         // optional
+  "variant": "...",         // optional — per-message thinking-effort level the reply was
+                            // generated with (minimal|low|medium|high aliases). Sent to the
+                            // provider as reasoning_effort (OpenAI), budget_tokens
+                            // (Anthropic, fraction of max_tokens) or thinkingBudget
+                            // (Gemini); only for reasoning-capable models
   "finish": "..."           // optional: "stop", "tool-calls", "error", ...
 }
 ```
@@ -290,7 +294,12 @@ Body (`PromptInput`):
   "noReply": false,
   "tools": { "bash": true },         // per-prompt tool overrides
   "system": "...",
-  "variant": "...",
+  "variant": "...",                  // optional thinking-effort level for this message:
+                                     // minimal|low|medium|high (aliases: min/none/off/0,
+                                     // 1, default/normal/2, max/ultra/3; unknown/empty =
+                                     // medium). Falls back to the session model's variant.
+                                     // Only applied to reasoning-capable models; stamped on
+                                     // the user and assistant messages
   "parts": [ { "type": "text", "text": "..." } ]   // REQUIRED, non-empty
 }
 ```

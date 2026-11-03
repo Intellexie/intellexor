@@ -148,6 +148,10 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		i.purgeReverted(s)
 	}
 
+	// per-message thinking-effort level: an explicit prompt-input variant
+	// wins, else the session's persisted model variant ("" = provider default)
+	variant := variantOf(in.Variant, s.Model)
+
 	// user message
 	userMsg := session.UserMessage{
 		ID:        in.MessageID,
@@ -155,7 +159,7 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		Role:      "user",
 		Time:      session.UserMsgTime{Created: util.Now()},
 		Agent:     agentName,
-		Model:     session.UserModel{ProviderID: resolved.ID, ModelID: model.ID},
+		Model:     session.UserModel{ProviderID: resolved.ID, ModelID: model.ID, Variant: variant},
 		Format:    in.Format,
 		System:    in.System,
 		Tools:     in.Tools,
@@ -215,13 +219,13 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 				Mode:       agent.Mode,
 				Agent:      agentName,
 				Path:       session.Path{Cwd: i.Directory, Root: i.Worktree},
-				Variant:    variantOf(in.Variant, s.Model),
+				Variant:    variant,
 			}
 			_ = i.Mgr.SaveMessage(s, asst)
 			i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": asst})
 
 			p = newProcessor(i, s, &asst)
-			p.runStep(ctx, resolved, model, agentName, agent, in.System)
+			p.runStep(ctx, resolved, model, agentName, agent, in.System, variant)
 
 			if !p.failed || p.aborted || !p.retryable || attempt >= maxStepRetries {
 				break

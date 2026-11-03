@@ -6,6 +6,22 @@ import (
 	"strings"
 )
 
+// geminiBudget maps the canonical effort level (Request.Effort) to a Gemini
+// thinkingBudget in tokens. The range stays inside what both 2.5 Flash
+// (0..24576) and 2.5 Pro (128..32768) accept; "minimal" keeps a small budget
+// rather than 0, which Flash treats as "disable thinking" and Pro rejects.
+func geminiBudget(effort string) int {
+	switch effort {
+	case "minimal":
+		return 512
+	case "low":
+		return 2048
+	case "high":
+		return 24576
+	}
+	return 8192 // "medium" and anything unrecognized
+}
+
 func (c *Client) streamGemini(ctx context.Context, req Request) (<-chan StreamEvent, error) {
 	type part struct {
 		Text       string `json:"text,omitempty"`
@@ -97,7 +113,7 @@ func (c *Client) streamGemini(ctx context.Context, req Request) (<-chan StreamEv
 		gen["temperature"] = *req.Temperature
 	}
 	if req.Reasoning {
-		gen["thinkingConfig"] = map[string]any{"thinkingBudget": 4096}
+		gen["thinkingConfig"] = map[string]any{"thinkingBudget": geminiBudget(req.Effort)}
 	}
 	if len(gen) > 0 {
 		body["generationConfig"] = gen

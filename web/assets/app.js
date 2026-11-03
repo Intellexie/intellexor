@@ -106,6 +106,7 @@ const S = {
   children: {},
   busy: new Set(),
   model: JSON.parse(wsGet("model") || "null"), // {providerID, modelID}
+  effort: wsGet("effort") || "", // per-message thinking-effort variant ("", minimal, low, medium, high)
   agent: wsGet("agent") || "build",
   scheme: localStorage.getItem("intellexor.scheme") || "system",
   bg: localStorage.getItem("intellexor.bg") !== "0", // animated background on/off (global pref)
@@ -3101,7 +3102,7 @@ function currentRunLabel(store) {
     const info = store.info[store.order[i]];
     if (info && info.role === "assistant") {
       if (!(info.time && info.time.completed)) {
-        return [info.agent, info.modelID].filter(Boolean).join(" · ");
+        return [info.agent, modelLabel(info)].filter(Boolean).join(" · ");
       }
       break;
     }
@@ -3114,6 +3115,14 @@ function currentRunLabel(store) {
 function thinkMeta(text) {
   if (!text) return null;
   return el("span", "think-meta", esc(text));
+}
+
+// "model (variant)" for meta lines — the variant is the per-message thinking
+// effort the reply was generated with (assistant messages) or requested with
+// (user messages).
+function modelLabel(info) {
+  const base = info.modelID || (info.model && info.model.modelID) || "";
+  return info.variant ? `${base} (${info.variant})` : base;
 }
 
 // sid: the session the message belongs to. Defaults to S.current (the main
@@ -3143,7 +3152,7 @@ function renderUserMessage(info, parts, sid) {
     wrap.appendChild(el("div", "bubble", esc(text)));
   }
   const meta = el("div", "meta");
-  meta.appendChild(el("span", "", `${esc(info.agent || "")}${info.model ? " · " + esc(info.model.modelID || "") : ""}`));
+  meta.appendChild(el("span", "", `${esc(info.agent || "")}${info.model ? " · " + esc(modelLabel(info)) : ""}`));
   meta.appendChild(el("span", "", fmtTime(info.time.created)));
   const revert = el("button", "msg-revert", ICONS.revert);
   revert.title = "Revert to here — removes this message and everything after it, restoring file changes";
@@ -3198,7 +3207,7 @@ function renderAssistantMessage(info, parts, sid) {
   const meta = el("div", "assistant-meta");
   const dur = info.time.completed && info.time.created
     ? durationText(info.time.created, info.time.completed) : "";
-  meta.appendChild(el("span", "", [info.agent, info.modelID, dur].filter(Boolean).join(" · ")));
+  meta.appendChild(el("span", "", [info.agent, modelLabel(info), dur].filter(Boolean).join(" · ")));
   const fork = el("button", "msg-fork", ICONS.fork);
   fork.title = "Fork from here — clones the session up to this message into a new session";
   fork.onclick = async (e) => {
@@ -3275,7 +3284,7 @@ function renderPart(p, info) {
       // (right-aligned) instead of in a meta line under the message — the
       // part is open (no end time) and the message not completed yet
       if (!(info.time && info.time.completed) && !(p.time && p.time.end)) {
-        const m = thinkMeta([info.agent, info.modelID].filter(Boolean).join(" · "));
+        const m = thinkMeta([info.agent, modelLabel(info)].filter(Boolean).join(" · "));
         if (m) row.appendChild(m);
       }
       const body = el("div", "reasoning-body");
@@ -4396,6 +4405,7 @@ async function startCard(c) {
     await post(`/session/${sess.id}/prompt_async`, {
       agent: S.agent,
       model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
+      variant: S.effort || undefined,
       parts,
     });
     await refreshSession(sess.id).catch(() => {});
@@ -5553,6 +5563,8 @@ function buildComposerRegion(region) {
 
   actions.appendChild(buildAgentSelect());
   actions.appendChild(buildModelButton());
+  const cm = composerModel();
+  if (cm && cm.reasoning) actions.appendChild(buildEffortButton());
 
   // branch label lives inside the composer row (was a hint-row below it)
   const vcs = S.vcs;
@@ -5659,6 +5671,7 @@ async function doSend() {
       await post(`/session/${sid}/prompt_async`, {
         agent: S.agent,
         model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
+        variant: S.effort || undefined,
         parts,
       });
     }
@@ -5862,6 +5875,54 @@ function openModelPicker(anchor) {
   render();
   openPopover(anchor, pop);
   setTimeout(() => search.focus(), 0);
+}
+
+/* ---------- thinking-effort picker ---------- */
+
+// The composer's selected model (not the session's persisted one): the same
+// catalog the model picker browses, resolved for the current selection.
+function composerModel() {
+  if (!S.model) return null;
+  const p = S.providers.all.find((x) => x.id === S.model.providerID);
+  return (p && p.models && p.models[S.model.modelID]) || null;
+}
+
+// "" is the provider default (medium) — not sent on the wire at all.
+const EFFORT_LEVELS = [
+  ["", "Default"],
+  ["minimal", "Minimal"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+];
+
+// Thinking-effort picker, next to the model picker: sets the per-message
+// variant sent with the next prompt (PromptInput.variant), which the server
+// translates into reasoning_effort (OpenAI), budget_tokens (Anthropic) or
+// thinkingBudget (Gemini). Only rendered for models with the reasoning
+// capability — for everything else the field would be ignored anyway.
+function buildEffortButton() {
+  const btn = el("button", "c-select");
+  const cur = EFFORT_LEVELS.find((e) => e[0] === (S.effort || "")) || EFFORT_LEVELS[0];
+  btn.title = "Thinking effort — how hard the model reasons on the next message";
+  btn.innerHTML = `<span class="name">Thinking: ${esc(cur[1])}</span>${ICONS.chev}`;
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const pop = el("div", "popover");
+    for (const [val, label] of EFFORT_LEVELS) {
+      const item = el("button", "p-item" + ((S.effort || "") === val ? " on" : ""));
+      item.innerHTML = `<span>${label}</span>`;
+      item.onclick = () => {
+        S.effort = val;
+        wsSet("effort", val);
+        closePopovers();
+        renderComposerRegion();
+      };
+      pop.appendChild(item);
+    }
+    openPopover(btn, pop);
+  };
+  return btn;
 }
 
 /* ---------- docks ---------- */

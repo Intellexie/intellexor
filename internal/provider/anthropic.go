@@ -6,6 +6,32 @@ import (
 	"strings"
 )
 
+// anthropicBudget maps the canonical effort level (Request.Effort) to a
+// thinking budget in tokens, as a fraction of the request's max_tokens
+// (minimal is the API floor of 1024). The result is clamped into
+// [1024, maxTokens) as the Messages API requires budget_tokens < max_tokens.
+func anthropicBudget(effort string, maxTokens int) int {
+	var frac float64
+	switch effort {
+	case "minimal":
+		return 1024
+	case "low":
+		frac = 0.25
+	case "high":
+		frac = 0.8
+	default: // "medium" and anything unrecognized
+		frac = 0.5
+	}
+	b := int(float64(maxTokens) * frac)
+	if b < 1024 {
+		b = 1024
+	}
+	if b >= maxTokens {
+		b = maxTokens - 1
+	}
+	return b
+}
+
 func (c *Client) anthropicHeaders() map[string]string {
 	h := map[string]string{
 		"x-api-key":         c.Resolved.APIKey,
@@ -112,7 +138,7 @@ func (c *Client) streamAnthropic(ctx context.Context, req Request) (<-chan Strea
 		body["temperature"] = 0
 	}
 	if req.Reasoning {
-		budget := maxInt(req.MaxTokens/2, 1024)
+		budget := anthropicBudget(req.Effort, maxInt(req.MaxTokens, 8192))
 		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 		delete(body, "temperature")
 	}

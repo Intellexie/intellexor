@@ -41,6 +41,17 @@ func (c *Client) openaiHeaders() map[string]string {
 	return h
 }
 
+// openaiEffort maps the canonical effort level (Request.Effort) to OpenAI's
+// reasoning_effort values. OpenAI's own scale is minimal/low/medium/high, so
+// the canonical levels pass through; anything else ("" included) is medium.
+func openaiEffort(effort string) string {
+	switch effort {
+	case "minimal", "low", "high":
+		return effort
+	}
+	return "medium"
+}
+
 func (c *Client) streamOpenAI(ctx context.Context, req Request) (<-chan StreamEvent, error) {
 	var messages []oaiMsg
 	if req.System != "" {
@@ -130,7 +141,7 @@ func (c *Client) streamOpenAI(ctx context.Context, req Request) (<-chan StreamEv
 		body["temperature"] = 0
 	}
 	if req.Reasoning {
-		body["reasoning_effort"] = "medium"
+		body["reasoning_effort"] = openaiEffort(req.Effort)
 	}
 	for k, v := range req.Extra {
 		body[k] = v

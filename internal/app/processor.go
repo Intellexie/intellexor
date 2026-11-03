@@ -52,11 +52,13 @@ func (p *processor) publishPart(part session.Part) {
 
 // stepRequest builds the provider request base exactly as runStep sends it:
 // system prompt (agent override + extra system + instructions + board
-// context), the agent's tool definitions, and the model's options. Keeping
-// this in one place lets the compaction request mirror a step request
-// token-for-token, which is what makes vLLM's prefix cache cover the
-// replayed history (see compactLocked).
-func (i *Instance) stepRequest(s *session.Session, agent AgentDef, model provider.Model, extraSystem string) provider.Request {
+// context), the agent's tool definitions, the model's options, and the
+// per-message thinking-effort level (variant). Keeping this in one place lets
+// the compaction request mirror a step request token-for-token, which is what
+// makes vLLM's prefix cache cover the replayed history (see compactLocked).
+// variant is the message variant ("minimal"/"low"/"medium"/"high" aliases);
+// pass "" for the provider default.
+func (i *Instance) stepRequest(s *session.Session, agent AgentDef, model provider.Model, extraSystem string, variant string) provider.Request {
 	system := systemPrompt(i)
 	if agent.Prompt != "" {
 		system = agent.Prompt
@@ -81,6 +83,7 @@ func (i *Instance) stepRequest(s *session.Session, agent AgentDef, model provide
 	}
 	if model.Reasoning {
 		req.Reasoning = true
+		req.Effort = provider.EffortFromVariant(variant)
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = 8192
@@ -103,7 +106,7 @@ func (i *Instance) stepRequest(s *session.Session, agent AgentDef, model provide
 	return req
 }
 
-func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, model provider.Model, agentName string, agent AgentDef, extraSystem string) {
+func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, model provider.Model, agentName string, agent AgentDef, extraSystem string, variant string) {
 	p.ruleset = agent.Permission
 	p.model = model
 	i := p.i
@@ -114,7 +117,7 @@ func (p *processor) runStep(ctx context.Context, resolved *provider.Resolved, mo
 		ID: util.ID("prt"), SessionID: p.s.ID, MessageID: p.msg.ID, Type: "step-start",
 	})
 
-	req := i.stepRequest(p.s, agent, model, extraSystem)
+	req := i.stepRequest(p.s, agent, model, extraSystem, variant)
 	req.Messages = BuildHistory(i, p.s)
 
 	ch, err := client.Stream(ctx, req, func(attempt int, serr *provider.StreamError, next time.Time) {

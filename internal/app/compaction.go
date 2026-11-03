@@ -306,7 +306,7 @@ func (i *Instance) compactLocked(ctx context.Context, s *session.Session, resolv
 		// prompt and tools so the prefix up to the trailing ask is
 		// token-identical to the previous step — vLLM's prefix cache then
 		// serves the replayed history instead of re-prefilling it
-		req = i.stepRequest(s, agent, model, "")
+		req = i.stepRequest(s, agent, model, "", "")
 	} else {
 		// dedicated compaction model: its prefix cache is cold regardless,
 		// so use the purpose-built summarize prompt without tools

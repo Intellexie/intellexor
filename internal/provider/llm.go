@@ -42,14 +42,40 @@ type Usage struct {
 }
 
 type Request struct {
-	Model       string
-	System      string
-	Messages    []Msg
-	Tools       []ToolDef
-	MaxTokens   int
+	Model     string
+	System    string
+	Messages  []Msg
+	Tools     []ToolDef
+	MaxTokens int
+	// Temperature is nil when unset (providers then apply their own default).
 	Temperature *float64
-	Reasoning   bool           // ask for thinking/reasoning effort
-	Extra       map[string]any // merged into the request body (model.options, e.g. thinking_token_budget)
+	// Reasoning asks the provider for thinking/reasoning output (model-level
+	// capability flag). Effort is the per-message thinking-effort level —
+	// canonical values "minimal" | "low" | "medium" | "high", normalized by
+	// EffortFromVariant; "" means the provider default (medium).
+	Reasoning bool
+	Effort    string
+	// Extra is merged into the request body (model.options, e.g.
+	// thinking_token_budget). Only the OpenAI builder merges it.
+	Extra map[string]any
+}
+
+// EffortFromVariant normalizes a per-message variant string into a canonical
+// reasoning-effort level. Recognized aliases (case-insensitive): minimal/min/
+// none/off/0, low/1, medium/default/normal/2, high/max/ultra/3. Anything else
+// — including an empty variant — maps to "medium", the level every provider
+// used before variants were wired through.
+func EffortFromVariant(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "minimal", "min", "none", "off", "0":
+		return "minimal"
+	case "low", "1":
+		return "low"
+	case "high", "max", "maximum", "ultra", "3":
+		return "high"
+	}
+	// "", "medium", "default", "normal", "2" and anything unrecognized
+	return "medium"
 }
 
 type StreamError struct {
