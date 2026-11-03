@@ -88,10 +88,14 @@ type CommandCfg struct {
 }
 
 type AgentCfg struct {
-	Description string          `json:"description,omitempty"`
-	Model       string          `json:"model,omitempty"`
-	Prompt      string          `json:"prompt,omitempty"`
-	Mode        string          `json:"mode,omitempty"`
+	Description string `json:"description,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Prompt      string `json:"prompt,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	// Order positions the agent in listings (GET /agent, the composer
+	// dropdown and Tab cycling). Lower runs first; agents without an order
+	// sort after the built-ins (which use 0,10,20,…).
+	Order       *int            `json:"order,omitempty"`
 	Temperature *float64        `json:"temperature,omitempty"`
 	TopP        *float64        `json:"top_p,omitempty"`
 	Permission  map[string]any  `json:"permission,omitempty"`

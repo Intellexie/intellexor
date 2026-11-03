@@ -92,13 +92,19 @@ func (s *Server) configEntries(w http.ResponseWriter, r *http.Request) *apiError
 		}
 	}
 	builtin := []map[string]any{}
+	merged := config.Merge(in.Directory)
 	for _, a := range in.Agents() {
-		if !a.Native {
+		// built-ins overridden by a config entry keep their place here (with
+		// overridden=true) so the UI can offer "remove override"; the entry
+		// itself is listed under "agents" as well
+		_, overridden := merged.Agent[a.Name]
+		if !a.Native && !overridden {
 			continue // config-defined agents are already listed under "agents"
 		}
 		builtin = append(builtin, map[string]any{
 			"name": a.Name, "description": a.Description, "mode": a.Mode,
-			"color": a.Color, "hidden": a.Hidden,
+			"color": a.Color, "hidden": a.Hidden, "order": a.Order,
+			"overridden": overridden,
 		})
 	}
 	writeJSON(w, 200, map[string]any{
@@ -331,4 +337,76 @@ func (s *Server) putConfigAgent(w http.ResponseWriter, r *http.Request) *apiErro
 
 func (s *Server) deleteConfigAgent(w http.ResponseWriter, r *http.Request) *apiError {
 	return s.deleteConfigEntry(w, r, "agent", "agentID")
+}
+
+// postConfigAgentOrder persists a new agent ordering: body is
+// { "file": "<config path>", "agents": ["name", ...] } in the desired
+// sequence. Each agent gets order = index*10, written into the config file
+// that already defines it (so overrides in other files keep their fields) or,
+// for agents without a config entry (pure built-ins), as a minimal
+// { "order": n } entry into the requested file. Unknown agent names are
+// rejected so a stale client cannot create bogus entries.
+func (s *Server) postConfigAgentOrder(w http.ResponseWriter, r *http.Request) *apiError {
+	in := s.Instance(directoryOf(r))
+	var body struct {
+		File   string   `json:"file"`
+		Agents []string `json:"agents"`
+	}
+	if e := decodeBody(r, &body); e != nil {
+		return e
+	}
+	if body.File == "" {
+		return badRequest("file is required")
+	}
+	if len(body.Agents) == 0 {
+		return badRequest("agents is required")
+	}
+	if !knownConfigFile(in.Directory, in.Worktree, body.File) {
+		return badRequest(fmt.Sprintf("%q is not a known config file for this project", body.File))
+	}
+	known := map[string]bool{}
+	for _, a := range in.Agents() {
+		known[a.Name] = true
+	}
+	// which config file currently defines each agent (merge precedence: the
+	// last file that has an entry wins, matching config.Merge)
+	defines := map[string]string{}
+	for _, t := range configTargets(in.Directory, in.Worktree) {
+		if !t.Exists {
+			continue
+		}
+		m, ok := readConfigDoc(t.Path)["agent"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for id, v := range m {
+			if _, ok := v.(map[string]any); ok {
+				defines[id] = t.Path
+			}
+		}
+	}
+	for i, name := range body.Agents {
+		if !known[name] {
+			return badRequest(fmt.Sprintf("unknown agent %q", name))
+		}
+		entryFile := body.File
+		if f := defines[name]; f != "" {
+			entryFile = f
+		}
+		// merge into the existing raw entry so opencode-only fields survive
+		var entry map[string]any
+		if m, ok := readConfigDoc(entryFile)["agent"].(map[string]any); ok {
+			entry, _ = m[name].(map[string]any)
+		}
+		if entry == nil {
+			entry = map[string]any{}
+		}
+		entry["order"] = i * 10
+		if err := writeConfigPath(entryFile, []string{"agent", name}, entry); err != nil {
+			return badRequest(err.Error())
+		}
+	}
+	config.InvalidateGlobal()
+	writeTrue(w)
+	return nil
 }

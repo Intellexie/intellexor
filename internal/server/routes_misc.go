@@ -30,6 +30,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) *apiError {
 		Hidden      bool             `json:"hidden"`
 		Color       string           `json:"color,omitempty"`
 		Model       string           `json:"model,omitempty"`
+		Order       int              `json:"order"`
 		Permission  []map[string]any `json:"permission"`
 	}
 	var out []agentOut
@@ -38,7 +39,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) *apiError {
 		for _, p := range a.Permission {
 			perms = append(perms, map[string]any{"permission": p.Permission, "pattern": p.Pattern, "action": p.Action})
 		}
-		out = append(out, agentOut{Name: a.Name, Description: a.Description, Mode: a.Mode, Native: a.Native, Hidden: a.Hidden, Color: a.Color, Model: a.Model, Permission: perms})
+		out = append(out, agentOut{Name: a.Name, Description: a.Description, Mode: a.Mode, Native: a.Native, Hidden: a.Hidden, Color: a.Color, Model: a.Model, Order: a.Order, Permission: perms})
 	}
 	writeJSON(w, 200, out)
 	return nil

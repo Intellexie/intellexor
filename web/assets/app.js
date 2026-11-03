@@ -6861,84 +6861,179 @@ function renderSettingsAgents(content, show) {
   head.appendChild(addBtn);
   content.appendChild(head);
 
+  // Reorder target: config entries are written back to the file that defines
+  // them, but pure built-in agents have no entry yet — their order (and
+  // hide/unhide) entries go into this file.
+  const orderFileSel = el("select", "m-select");
+  content.appendChild(setField("Save order to", orderFileSel,
+    "Config file receiving order entries for built-in agents when you reorder."));
+  fillConfigFileSelect(orderFileSel).catch(() => {});
+
   const list = el("div", "set-list", '<div class="set-empty">Loading…</div>');
   content.appendChild(list);
 
+  // One unified list in effective order (GET /agent is sorted by the agents'
+  // order): built-ins (optionally overridden from config) plus config-defined
+  // agents. `entries` holds the raw per-file config objects, `builtinSet`
+  // every built-in name — including overridden ones.
+  let agents = [];
+  let entries = {};
+  let builtinSet = new Set();
+
   const load = async () => {
-    let data;
+    let data, all;
     try {
-      data = await fetchConfigEntries();
+      [data, all] = await Promise.all([fetchConfigEntries(), get("/agent")]);
     } catch (e) {
       list.innerHTML = "";
       list.appendChild(el("div", "set-empty", "Failed to load config: " + esc(e.message || String(e))));
       return;
     }
+    agents = all || [];
+    entries = data.agents || {};
+    builtinSet = new Set((data.builtin || []).map((b) => b.name));
+    render();
+  };
+
+  const render = () => {
     list.innerHTML = "";
-    const defModel = data.default_model || "";
-    for (const b of data.builtin || []) {
+    if (!agents.length) {
+      list.appendChild(el("div", "set-empty", "No agents."));
+      return;
+    }
+    agents.forEach((a, i) => {
+      const e = entries[a.name];
+      const entry = (e && e.config) || null;
+      const entryFile = e && e.file;
+      const isBuiltin = builtinSet.has(a.name);
       const item = el("div", "set-item");
       const top = el("div", "si-head");
       const dot = el("span", "agent-dot");
-      dot.style.background = b.color || "#999";
-      top.append(dot, el("div", "si-name", esc(b.name)), el("span", "si-badge", esc(b.mode || "agent")));
+      dot.style.background = a.color || "#999";
+      top.append(dot, el("div", "si-name", esc(a.name)));
+      top.appendChild(el("span", "si-badge", esc(a.mode || "agent")));
+      if (isBuiltin) top.appendChild(el("span", "si-badge", entry ? "built-in override" : "built-in"));
+      if (a.hidden) top.appendChild(el("span", "si-badge", "hidden"));
       top.appendChild(el("span", "si-spacer"));
-      top.appendChild(el("span", "si-model", "model: " + esc(defModel || "auto")));
-      item.appendChild(top);
-      if (b.description) item.appendChild(el("div", "si-desc", esc(b.description)));
-      item.appendChild(el("div", "si-file", "built-in"));
-      list.appendChild(item);
-    }
-    const agents = data.agents || {};
-    for (const id of Object.keys(agents).sort()) {
-      const e = agents[id];
-      const cfg = e.config || {};
-      const item = el("div", "set-item");
-      const top = el("div", "si-head");
-      top.appendChild(el("div", "si-name", esc(id)));
-      if (cfg.mode) top.appendChild(el("span", "si-badge", esc(cfg.mode)));
-      top.appendChild(el("span", "si-spacer"));
-      top.appendChild(el("span", "si-model", "model: " + esc(cfg.model || defModel || "auto")));
+      top.appendChild(el("span", "si-model", "model: " + esc((entry && entry.model) || a.model || "auto")));
+
+      const up = el("button", "icon-btn", "↑");
+      up.title = "Move up (composer dropdown and Tab order)";
+      up.disabled = i === 0;
+      up.onclick = () => move(i, -1);
+      const down = el("button", "icon-btn", "↓");
+      down.title = "Move down (composer dropdown and Tab order)";
+      down.disabled = i === agents.length - 1;
+      down.onclick = () => move(i, 1);
+
+      const editBtn = el("button", "btn secondary si-btn", "Edit");
+      editBtn.onclick = () => openAgentForm(load, { name: a.name, entry, file: entryFile, builtin: isBuiltin, def: a });
+
       const rm = el("button", "icon-btn", ICONS.trash);
-      rm.title = "Remove agent";
-      rm.onclick = async () => {
-        if (!(await confirmModal("Remove agent", `Remove "${id}" from ${e.file}?`, "Remove"))) return;
-        try {
-          await del(`/config/agent/${encodeURIComponent(id)}?file=${encodeURIComponent(e.file)}`);
-          toast("Agent removed");
-          load();
-        } catch (err) {
-          toast(err.message || String(err), true);
-        }
-      };
-      top.appendChild(rm);
+      if (entry) {
+        rm.title = isBuiltin ? "Remove override (restore the built-in agent)" : "Remove agent";
+        rm.onclick = async () => {
+          const msg = isBuiltin
+            ? `Remove the override for "${a.name}" from ${entryFile}? The built-in agent is restored.`
+            : `Remove "${a.name}" from ${entryFile}?`;
+          if (!(await confirmModal(isBuiltin ? "Remove override" : "Remove agent", msg, isBuiltin ? "Remove override" : "Remove"))) return;
+          try {
+            await del(`/config/agent/${encodeURIComponent(a.name)}?file=${encodeURIComponent(entryFile)}`);
+            toast(isBuiltin ? "Override removed — built-in agent restored" : "Agent removed");
+            loadAgents();
+            load();
+          } catch (err) {
+            toast(err.message || String(err), true);
+          }
+        };
+      } else {
+        // pure built-in: no entry to delete — "remove" hides it from the
+        // picker (and unhides it again)
+        const hiding = !a.hidden;
+        rm.title = hiding ? "Hide from the agent picker" : "Unhide (show in the agent picker)";
+        rm.onclick = async () => {
+          if (!orderFileSel.value) { toast("No config file available", true); return; }
+          const msg = hiding
+            ? `Hide "${a.name}" from the agent picker (written to ${orderFileSel.value})?`
+            : `Show "${a.name}" in the agent picker again (written to ${orderFileSel.value})?`;
+          if (!(await confirmModal(hiding ? "Hide agent" : "Unhide agent", msg, hiding ? "Hide" : "Unhide"))) return;
+          try {
+            await api("PUT", "/config/agent/" + encodeURIComponent(a.name), { file: orderFileSel.value, entry: { hidden: hiding } });
+            toast(hiding ? "Agent hidden" : "Agent unhidden");
+            loadAgents();
+            load();
+          } catch (err) {
+            toast(err.message || String(err), true);
+          }
+        };
+      }
+      top.append(up, down, editBtn, rm);
       item.appendChild(top);
-      if (cfg.description) item.appendChild(el("div", "si-desc", esc(cfg.description)));
-      const tools = cfg.tools && typeof cfg.tools === "object" ? Object.keys(cfg.tools).filter((t) => cfg.tools[t]) : null;
-      item.appendChild(el("div", "si-sub", "tools: " + (tools && tools.length ? esc(tools.join(", ")) : "all")));
-      const file = el("div", "si-file", esc(e.file));
-      file.title = e.file;
+      if (a.description) item.appendChild(el("div", "si-desc", esc(a.description)));
+      if (entry) {
+        const tools = entry.tools && typeof entry.tools === "object" ? Object.keys(entry.tools).filter((t) => entry.tools[t]) : null;
+        item.appendChild(el("div", "si-sub", "tools: " + (tools && tools.length ? esc(tools.join(", ")) : "all")));
+      }
+      const file = el("div", "si-file", entry ? esc(entryFile) : "built-in");
+      if (entryFile) file.title = entryFile;
       item.appendChild(file);
       list.appendChild(item);
-    }
+    });
   };
+
+  const move = async (i, dir) => {
+    const j = i + dir;
+    if (j < 0 || j >= agents.length) return;
+    if (!orderFileSel.value) { toast("No config file available", true); return; }
+    const names = agents.map((a) => a.name);
+    [names[i], names[j]] = [names[j], names[i]];
+    [agents[i], agents[j]] = [agents[j], agents[i]]; // optimistic re-render
+    render();
+    try {
+      await post("/config/agent-order", { file: orderFileSel.value, agents: names });
+      toast("Agent order saved");
+      loadAgents(); // refresh the composer dropdown + Tab order
+    } catch (e) {
+      toast(e.message || String(e), true);
+    }
+    load();
+  };
+
   load();
   addBtn.onclick = () => openAgentForm(load);
 }
 
-function openAgentForm(onSaved) {
-  openModal("Add agent", (modal, ov) => {
+// Add/edit an agent. `existing` is {name, entry, file, builtin, def} when
+// editing: entry is the raw config object (null for a pure built-in without
+// an override), file the config file defining it, def the effective GET /agent
+// record. The entry is edited in place so opencode-only fields survive; for a
+// pure built-in a new override entry is written to the chosen config file.
+// An empty prompt on a built-in means "keep the built-in prompt".
+function openAgentForm(onSaved, existing) {
+  const editing = !!(existing && existing.name);
+  const isBuiltin = !!(editing && existing.builtin);
+  const base = editing && existing.entry ? JSON.parse(JSON.stringify(existing.entry)) : {};
+  const def = editing && existing.def ? existing.def : {};
+  openModal(editing ? (isBuiltin ? "Edit built-in agent" : "Edit agent") : "Add agent", (modal, ov) => {
     const nameIn = el("input");
     nameIn.type = "text";
     nameIn.placeholder = "Agent name, e.g. reviewer";
+    nameIn.value = editing ? existing.name : "";
+    if (editing) nameIn.disabled = true;
     const descIn = el("input");
     descIn.type = "text";
     descIn.placeholder = "What the agent is for (optional)";
+    descIn.value = base.description || def.description || "";
     const modelIn = el("input");
     modelIn.type = "text";
     modelIn.placeholder = "provider/model (optional — uses the default model)";
+    modelIn.value = base.model || "";
     const promptTa = el("textarea", "m-textarea");
     promptTa.rows = 4;
-    promptTa.placeholder = "System prompt for the agent…";
+    promptTa.placeholder = isBuiltin
+      ? "System prompt override… (empty keeps the built-in prompt)"
+      : "System prompt for the agent…";
+    promptTa.value = base.prompt || "";
     const modeSel = el("select", "m-select");
     for (const [v, label] of [["subagent", "Subagent (spawned via task)"], ["primary", "Primary (selectable in the composer)"], ["all", "All"]]) {
       const o = el("option");
@@ -6946,43 +7041,77 @@ function openAgentForm(onSaved) {
       o.textContent = label;
       modeSel.appendChild(o);
     }
+    modeSel.value = base.mode || def.mode || "subagent";
+    const hiddenCb = el("input");
+    hiddenCb.type = "checkbox";
+    hiddenCb.checked = base.hidden != null ? !!base.hidden : !!def.hidden;
+    const hiddenWrap = el("label", "m-check");
+    hiddenWrap.append(hiddenCb, el("span", "", "Hidden (exclude from the agent picker)"));
+
+    // Tool groups: all checked means "no restriction" (nothing is written).
+    // If the entry has a tools map it is prefilled and written back on save.
+    const hasToolsMap = !!(base.tools && typeof base.tools === "object");
     const checks = [];
     const toolsBox = el("div", "set-checks");
     for (const g of SETTINGS_TOOL_GROUPS) {
       const lab = el("label", "set-check");
       const cb = el("input");
       cb.type = "checkbox";
-      cb.checked = true;
+      cb.checked = hasToolsMap
+        ? g.tools.every((t) => base.tools[t] !== false)
+        : true;
       lab.append(cb, el("span", "", g.label));
       toolsBox.appendChild(lab);
       checks.push({ group: g, cb });
     }
+
     const fileSel = el("select", "m-select");
-    fillConfigFileSelect(fileSel).catch(() => {});
+    if (editing && existing.file) {
+      // edits go back to the file the agent is defined in
+      fileSel.disabled = true;
+      const o = el("option");
+      o.value = existing.file;
+      o.textContent = existing.file;
+      fileSel.appendChild(o);
+    } else {
+      fillConfigFileSelect(fileSel).catch(() => {});
+    }
 
     const err = el("div", "set-form-err");
-    const save = el("button", "btn primary", "Save agent");
+    const save = el("button", "btn primary", editing ? "Save changes" : "Save agent");
     const cancel = el("button", "btn ghost", "Cancel");
     cancel.onclick = () => ov.remove();
     const commit = async () => {
-      const name = nameIn.value.trim();
+      const name = editing ? existing.name : nameIn.value.trim();
       if (!name) { err.textContent = "Agent name is required."; nameIn.focus(); return; }
       if (!fileSel.value) { err.textContent = "No config file available."; return; }
-      const entry = { mode: modeSel.value, tools: {} };
+      const entry = base; // edited in place: unknown fields survive
       const desc = descIn.value.trim();
-      if (desc) entry.description = desc;
+      if (desc) entry.description = desc; else delete entry.description;
       const model = modelIn.value.trim();
-      if (model) entry.model = model;
+      if (model) entry.model = model; else delete entry.model;
       const prompt = promptTa.value.trim();
-      if (prompt) entry.prompt = prompt;
-      for (const { group, cb } of checks) {
-        for (const t of group.tools) entry.tools[t] = cb.checked;
+      if (prompt) entry.prompt = prompt; else delete entry.prompt;
+      entry.mode = modeSel.value;
+      if (hiddenCb.checked) entry.hidden = true; else delete entry.hidden;
+      // only write a tools map when the entry had one or something is
+      // unchecked — all-checked means the default (unrestricted) set, which
+      // must not clobber a built-in's own tool restriction
+      const anyUnchecked = checks.some(({ cb }) => !cb.checked);
+      if (hasToolsMap || anyUnchecked) {
+        entry.tools = {};
+        for (const { group, cb } of checks) {
+          for (const t of group.tools) entry.tools[t] = cb.checked;
+        }
+      } else {
+        delete entry.tools;
       }
       save.disabled = true;
       try {
         await api("PUT", "/config/agent/" + encodeURIComponent(name), { file: fileSel.value, entry });
         ov.remove();
         toast("Agent " + name + " saved");
+        loadAgents();
         if (onSaved) onSaved();
       } catch (e) {
         save.disabled = false;
@@ -6997,14 +7126,15 @@ function openAgentForm(onSaved) {
       setField("Model", modelIn),
       setField("Mode", modeSel),
       setField("System prompt", promptTa),
-      setField("Tools", toolsBox),
-      setField("Config file", fileSel, "Which config file to save this agent into."),
+      hiddenWrap,
+      setField("Tools", toolsBox, hasToolsMap || checks.some(({ cb }) => !cb.checked) ? undefined : "All groups checked — the agent keeps its default tools."),
+      setField("Config file", fileSel, editing && existing.file ? undefined : "Which config file to save this agent into."),
       err
     );
     const actions = el("div", "m-actions");
     actions.append(cancel, save);
     modal.appendChild(actions);
-    setTimeout(() => nameIn.focus(), 0);
+    setTimeout(() => (editing ? descIn : nameIn).focus(), 0);
   });
 }
 

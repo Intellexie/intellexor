@@ -33,6 +33,10 @@ type AgentDef struct {
 	DenyTools []string
 	// Native marks built-in agents; config-defined agents are false.
 	Native bool
+	// Order positions the agent in listings (GET /agent, the composer
+	// dropdown, Tab cycling). Built-ins use 0,10,20,…; config agents default
+	// to 1000 (after the built-ins) unless config sets an explicit order.
+	Order int
 }
 
 // allowsTool reports whether the agent may use the named tool. Agents
@@ -57,6 +61,7 @@ func (i *Instance) Agents() []AgentDef {
 			Mode:        "primary",
 			Color:       "#034cff",
 			Native:      true,
+			Order:       0,
 			Permission: []session.PermissionRule{
 				{Permission: "question", Pattern: "*", Action: "allow"},
 				{Permission: "plan_enter", Pattern: "*", Action: "allow"},
@@ -68,6 +73,7 @@ func (i *Instance) Agents() []AgentDef {
 			Mode:        "primary",
 			Color:       "#a753ae",
 			Native:      true,
+			Order:       10,
 			Permission: []session.PermissionRule{
 				{Permission: "question", Pattern: "*", Action: "allow"},
 				{Permission: "plan_exit", Pattern: "*", Action: "allow"},
@@ -83,6 +89,7 @@ func (i *Instance) Agents() []AgentDef {
 			Mode:        "primary",
 			Color:       "#0d9f6f",
 			Native:      true,
+			Order:       20,
 			Tools:       []string{"board", "webfetch", "todowrite", "task", "cron", "schedule_wakeup"},
 			Prompt:      orchestratorPrompt,
 		},
@@ -92,6 +99,7 @@ func (i *Instance) Agents() []AgentDef {
 			Mode:        "subagent",
 			Color:       "#2090f5",
 			Native:      true,
+			Order:       30,
 			Permission: []session.PermissionRule{
 				{Permission: "todowrite", Pattern: "*", Action: "deny"},
 			},
@@ -102,6 +110,7 @@ func (i *Instance) Agents() []AgentDef {
 			Mode:        "subagent",
 			Color:       "#fcb239",
 			Native:      true,
+			Order:       40,
 			Permission: []session.PermissionRule{
 				{Permission: "*", Pattern: "*", Action: "deny"},
 				{Permission: "grep", Pattern: "*", Action: "allow"},
@@ -114,7 +123,8 @@ func (i *Instance) Agents() []AgentDef {
 	}
 	// agents from config files (global + project, merged): a config entry
 	// with a built-in name overrides that agent's fields, anything else is
-	// a new agent. Sorted for a stable listing.
+	// a new agent. Sorted by order (stable, so ties keep insertion order:
+	// built-ins in their declared sequence, config agents by name).
 	merged := config.Merge(i.Directory)
 	names := make([]string, 0, len(merged.Agent))
 	for name := range merged.Agent {
@@ -129,6 +139,7 @@ func (i *Instance) Agents() []AgentDef {
 		}
 		out = append(out, agentFromCfg(name, cfg))
 	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Order < out[b].Order })
 	return out
 }
 
@@ -155,6 +166,11 @@ func agentFromCfg(name string, cfg config.AgentCfg) AgentDef {
 	}
 	if def.Mode == "" {
 		def.Mode = "primary"
+	}
+	if cfg.Order != nil {
+		def.Order = *cfg.Order
+	} else {
+		def.Order = 1000 // after the built-ins
 	}
 	if cfg.Hidden != nil {
 		def.Hidden = *cfg.Hidden
@@ -195,6 +211,9 @@ func applyAgentCfg(def *AgentDef, cfg config.AgentCfg) {
 	}
 	if cfg.Color != "" {
 		def.Color = cfg.Color
+	}
+	if cfg.Order != nil {
+		def.Order = *cfg.Order
 	}
 	if cfg.Hidden != nil {
 		def.Hidden = *cfg.Hidden

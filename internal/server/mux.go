@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	handle("DELETE /config/provider/{providerID}/model/{modelID}", s.deleteConfigProviderModel)
 	handle("PUT /config/agent/{agentID}", s.putConfigAgent)
 	handle("DELETE /config/agent/{agentID}", s.deleteConfigAgent)
+	handle("POST /config/agent-order", s.postConfigAgentOrder)
 	handle("POST /provider/{providerID}/oauth/authorize", func(w http.ResponseWriter, r *http.Request) *apiError {
 		writeJSON(w, 200, nil)
 		return nil

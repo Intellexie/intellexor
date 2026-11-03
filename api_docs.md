@@ -569,11 +569,12 @@ All alarm mutations broadcast **`alarm.updated`** `{ "directory": "..." }` on ev
 
 - `GET /config/providers` → `{ "providers": [ { "id", "name", "env": [], "npm"?, "api"?, "models": {Model} } ], "default": { "<providerID>": "<modelID>" } }`
 - `GET /config/files` → `{ "files": [ { "path", "scope": "global"|"project", "exists": true } ] }` — merge-precedence order; the last project entry is the create-if-missing target.
-- `GET /config/entries` → `{ "providers": {id: {file, config}}, "agents": {id: {file, config}}, "builtin": [ {name, description, mode, color, hidden} ], "default_model": "..." }` — raw per-file entries.
+- `GET /config/entries` → `{ "providers": {id: {file, config}}, "agents": {id: {file, config}}, "builtin": [ {name, description, mode, color, hidden, order, overridden} ], "default_model": "..." }` — raw per-file entries. `builtin` lists every built-in agent (with its effective fields); `overridden: true` marks built-ins that have a config entry (the entry itself also appears under `agents`).
 - `PUT /config/provider/{providerID}` — body `{ "file": "<config path>", "entry": {...} }`. `entry.npm` must be empty (auto-set to `"@ai-sdk/openai-compatible"`) or exactly that. **200** `true`.
 - `DELETE /config/provider/{providerID}?file=<path>` → `true`.
 - `PUT|DELETE /config/provider/{providerID}/model/{modelID}` — same `{file, entry}` body / `?file=` query. **200** `true`.
-- `PUT|DELETE /config/agent/{agentID}` — same shapes; writes the `agent` section. **200** `true`.
+- `PUT|DELETE /config/agent/{agentID}` — same shapes; writes the `agent` section. **200** `true`. Writing an entry for a built-in name creates an override (fields set in the entry win, the rest keep built-in values); `DELETE` on it removes the override.
+- `POST /config/agent-order` — body `{ "file": "<config path>", "agents": ["name", ...] }` — persists the agent sequence (drives `GET /agent` order, the composer dropdown and Tab cycling). Each agent gets `order = index*10`, written into the config file that already defines it (preserving its other fields) or, for agents without a config entry (pure built-ins), as a minimal `{ "order": n }` entry into `file`. Unknown agent names → **400**. **200** `true`.
 
 ### 8.3 Providers & auth
 
@@ -636,9 +637,9 @@ Working directories with their own sessions/config, exposed in **opencode's `Pro
 - `GET /vcs/status` → `[ { "file": "/abs/path", "additions": 0, "deletions": 0, "status": "modified"|"added"|"deleted" } ]` (additions/deletions always 0)
 - `GET /vcs/diff?context=3&mode=branch` → `[ { "file", "patch", "additions", "deletions" } ]` (`mode=branch` diffs against `origin/HEAD`)
 - `GET /vcs/diff/raw` → raw `text/x-diff` body
-- `GET /agent` → `[ { "name", "description"?, "mode": "primary"|"subagent", "native": true|false, "hidden": false, "color"?, "model"?, "permission": [] } ]`
+- `GET /agent` → `[ { "name", "description"?, "mode": "primary"|"subagent", "native": true|false, "hidden": false, "color"?, "model"?, "order": 0, "permission": [] } ]`
   Built-ins (`native: true`): `build` (default, `#034cff`), `plan` (read-only, `#a753ae`), `orchestrator` (board/cron coordination, `#0d9f6f`), `general` (subagent, `#2090f5`), `explore` (subagent, `#fcb239`).
-  Agents from config files (`agent` section, global + project merged; `native: false`) are appended, sorted by name; a config entry with a built-in name overrides that agent's fields. `model` is the agent's `provider/model` override — a run with that agent uses it over the config default (explicit per-request/session selections still win). Requesting an unknown agent name errors (`unknown agent "x"`) instead of silently running as `build`.
+  The list is sorted by `order` (built-ins 0/10/20/30/40; config agents default to 1000). A config `agent` entry with a built-in name overrides that agent's fields — including `order`, so built-ins can be repositioned or resequenced from config. Config-defined agents (`native: false`) without an explicit `order` come after the built-ins (ties keep name order). `model` is the agent's `provider/model` override — a run with that agent uses it over the config default (explicit per-request/session selections still win). Requesting an unknown agent name errors (`unknown agent "x"`) instead of silently running as `build`.
 - `GET /command` → `[ { "name", "description", "source": "command", "template", "hints": [] } ]` — built-ins `init`, `review`, `compact` plus config-defined commands.
 - `GET /mcp` → `{}`; `GET /skill`, `GET /lsp`, `GET /formatter` → `[]` (stubs)
 - `GET /file?path=<dir>&dirs=1` → `[ { "name", "path", "absolute", "type": "file"|"directory", "ignored": false } ]` (`.git`/`node_modules` marked `ignored: true` but still listed)
@@ -852,7 +853,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `GET /alarm`, `POST /alarm`, `GET /alarm/session/{sid}`, `POST /alarm/session/{sid}/clear-finished`, `POST /alarm/{id}/trigger`, `DELETE /alarm/{id}` | wake-ups |
 | `GET/PATCH /config`, `GET /global/config`, `PATCH /global/config` | config |
 | `GET /config/providers`, `/config/files`, `/config/entries` | introspection |
-| `PUT/DELETE /config/provider/{pid}[/model/{mid}]`, `PUT/DELETE /config/agent/{aid}` | config editing (`?file=` on DELETE) |
+| `PUT/DELETE /config/provider/{pid}[/model/{mid}]`, `PUT/DELETE /config/agent/{aid}`, `POST /config/agent-order` | config editing (`?file=` on DELETE) |
 | `GET /provider`, `GET /provider/auth`, `PUT/DELETE /auth/{pid}` | providers & keys |
 | `GET/POST /project`, `GET /project/current`, `PATCH /project/{id}` | projects (workspaces) |
 | `GET /path`, `GET /vcs`, `/vcs/status`, `/vcs/diff`, `/vcs/diff/raw` | paths & git |
@@ -997,7 +998,7 @@ Two-pane modal (side nav: **General / Providers / Agents**; Models reached per-p
 - **General:** color scheme segmented control (system/light/dark); animated-background on/off; server version from `GET /global/health`.
 - **Providers:** list from `GET /config/entries` (name, model count, type badge, file path). Add/Edit form: ID, type (`@ai-sdk/openai-compatible`), display name, endpoint URL (`options.baseURL`), API key (`options.apiKey`), target config file (`GET /config/files`; default to the closest existing project file). Save: `PUT /config/provider/{id} {file, entry}` (whole-entry replace; preserve unknown fields). Remove: `DELETE /config/provider/{id}?file=…` with confirm.
 - **Models:** per-provider list with capability badges (tools/reasoning/attachments/temperature) and limits. Add/Edit: model ID, name, capability checkboxes, context/output limits → `PUT /config/provider/{id}/model/{mid} {file, entry}`; `DELETE …?file=…`.
-- **Agents:** built-in agents (read-only, from `GET /agent`'s `data.builtin`) plus configured agents. Add/Edit: name, description, model (`provider/model`), mode (subagent/primary/all), system prompt, tool-group checkboxes, config file → `PUT /config/agent/{name} {file, entry}`; `DELETE /config/agent/{id}?file=…`.
+- **Agents:** one unified list in effective order (from `GET /agent`, which is sorted by `order`), covering built-ins (badged `built-in`, or `built-in override` when a config entry exists), config-defined agents and hidden ones. Reorder with ↑/↓ buttons → `POST /config/agent-order {file, agents: [names…]}` (a config-file select picks where pure built-ins get their `{order}` entries); the composer dropdown and Tab cycle follow the same order. Edit (including built-ins): name (fixed), description, model (`provider/model`), mode (subagent/primary/all), system prompt (empty on a built-in keeps the built-in prompt), hidden checkbox, tool-group checkboxes (all checked = no restriction, nothing written) → `PUT /config/agent/{name} {file, entry}` (entry edited in place; unknown fields preserved; a built-in without an entry writes a new override to the chosen file). Remove: config agents `DELETE /config/agent/{id}?file=…`; overridden built-ins the same (restores the built-in); pure built-ins are hidden/unhidden via `PUT /config/agent/{name} {file, entry: {hidden: true|false}}`. After any write, re-fetch `GET /agent`.
 - After any config write, re-fetch `GET /provider` (and auto-pick a default model if none is selected).
 
 ### 15.11 Extras
