@@ -146,6 +146,9 @@ func (i *Instance) SetStatus(sessionID string, st StatusInfo) {
 	if st["type"] == "idle" {
 		i.Hub.Publish("session.idle", map[string]any{"sessionID": sessionID})
 	}
+	// keep the session's board card in sync (live status, review stage) —
+	// a no-op for sessions without a linked card
+	onSessionStatus(i, sessionID, st)
 }
 
 // statusBusy reports whether the session currently holds a non-idle status.

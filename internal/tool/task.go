@@ -56,6 +56,7 @@ func (TaskTool) Schema() map[string]any {
 			"prompt":        map[string]any{"type": "string", "description": "The task for the agent to perform"},
 			"subagent_type": map[string]any{"type": "string", "description": "The type of specialized agent to use for this task"},
 			"task_id":       map[string]any{"type": "string", "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"},
+			"isolation":     map[string]any{"type": "string", "enum": []any{"worktree"}, "description": "Set to \"worktree\" to run this subagent in an isolated git worktree on its own branch (itx/<session id>) instead of the shared directory — use this when the subagent will edit code while other agents may work in parallel. Its branch can later be merged via the board card's merge flow."},
 		},
 		"required": []any{"description", "prompt", "subagent_type"},
 	}
@@ -67,10 +68,14 @@ func (t TaskTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		Prompt       string `json:"prompt"`
 		SubagentType string `json:"subagent_type"`
 		TaskID       string `json:"task_id"`
+		Isolation    string `json:"isolation"`
 	}
 	_ = json.Unmarshal(args, &p)
 	if p.Prompt == "" || p.SubagentType == "" {
 		return Result{}, errors.New("prompt and subagent_type are required")
+	}
+	if p.Isolation != "" && p.Isolation != "worktree" {
+		return Result{}, errors.New("isolation must be \"worktree\" or empty")
 	}
 	if c.Subagent == nil {
 		return Result{}, errors.New("task tool unavailable")
@@ -85,6 +90,7 @@ func (t TaskTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		Prompt:        p.Prompt,
 		SubagentType:  p.SubagentType,
 		TaskID:        p.TaskID,
+		Isolation:     p.Isolation,
 		ParentSession: c.SessionID,
 		OnChild: func(id string) {
 			if c.Meta != nil {

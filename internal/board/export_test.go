@@ -27,15 +27,15 @@ func roundTripBoard(t *testing.T, p *ExportPayload) *ExportPayload {
 // columns, a done-link, a session link, a watcher and a schedule.
 func buildExportBoard(t *testing.T, projectID string) {
 	t.Helper()
-	first, err := Add(projectID, "First", nil)
+	first, err := Add(projectID, "First", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Add(projectID, "Second", nil)
+	second, err := Add(projectID, "Second", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := Add(projectID, "Third", nil)
+	third, err := Add(projectID, "Third", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestBoardImportReplace(t *testing.T) {
 	}
 
 	dst := store.ProjectID(t.TempDir()) // second project in the same data dir
-	if _, err := Add(dst, "Existing", nil); err != nil {
+	if _, err := Add(dst, "Existing", AddOpts{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -160,7 +160,7 @@ func TestBoardImportMerge(t *testing.T) {
 	}
 
 	dst := store.ProjectID(t.TempDir()) // second project in the same data dir
-	existing, err := Add(dst, "Existing", nil)
+	existing, err := Add(dst, "Existing", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestBoardImportValidation(t *testing.T) {
 	store.ResetDataDirForTest()
 	projectID := setup(t)
 
-	if _, err := Add(projectID, "Keep", nil); err != nil {
+	if _, err := Add(projectID, "Keep", AddOpts{}); err != nil {
 		t.Fatal(err)
 	}
 

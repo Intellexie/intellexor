@@ -29,7 +29,7 @@ func TestConfigAgentOrder(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	cfgPath := filepath.Join(dir, "intellexor.json")
-	order := []string{"reviewer", "build", "plan", "orchestrator", "general", "explore"}
+	order := []string{"reviewer", "build", "plan", "review", "orchestrator", "general", "explore"}
 	b, _ := json.Marshal(map[string]any{"file": cfgPath, "agents": order})
 	code, body := doReq(t, "POST", ts.URL+"/config/agent-order", string(b))
 	if code != 200 {

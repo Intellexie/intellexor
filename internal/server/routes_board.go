@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 
+	"github.com/Intellexie/intellexor/internal/app"
 	"github.com/Intellexie/intellexor/internal/board"
 	"github.com/Intellexie/intellexor/internal/store"
 )
@@ -35,7 +36,13 @@ func (s *Server) createBoardCard(w http.ResponseWriter, r *http.Request) *apiErr
 	var body struct {
 		Title       string             `json:"title"`
 		Column      string             `json:"column"`
+		Isolate     bool               `json:"isolate"`
 		Attachments []board.Attachment `json:"attachments"`
+		Agent       string             `json:"agent"`
+		Model       string             `json:"model"`
+		Description string             `json:"description"`
+		Criteria    string             `json:"criteria"`
+		BlockedBy   []string           `json:"blockedBy"`
 	}
 	if e := decodeBody(r, &body); e != nil {
 		return e
@@ -45,7 +52,18 @@ func (s *Server) createBoardCard(w http.ResponseWriter, r *http.Request) *apiErr
 	if body.Column != "" && body.Column != "open" {
 		return badRequest("Cards can only be added to the open column")
 	}
-	card, err := board.Add(s.boardProjectID(r), body.Title, body.Attachments)
+	card, err := board.Add(s.boardProjectID(r), body.Title, board.AddOpts{
+		Attachments: body.Attachments,
+		Isolate:     body.Isolate,
+		Agent:       body.Agent,
+		Model:       body.Model,
+		Description: body.Description,
+		Criteria:    body.Criteria,
+		BlockedBy:   body.BlockedBy,
+	})
+	if err == board.ErrBadLink {
+		return badRequest("blockedBy references a card that does not exist")
+	}
 	if err != nil {
 		return badRequest(err.Error())
 	}
@@ -56,12 +74,19 @@ func (s *Server) createBoardCard(w http.ResponseWriter, r *http.Request) *apiErr
 
 func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiError {
 	var body struct {
-		Title     *string `json:"title"`
-		Column    *string `json:"column"`
-		Before    *string `json:"before"`
-		SessionID *string `json:"sessionID"`
-		Link      *string `json:"link"`
-		StartAt   *int64  `json:"startAt"`
+		Title       *string             `json:"title"`
+		Column      *string             `json:"column"`
+		Before      *string             `json:"before"`
+		SessionID   *string             `json:"sessionID"`
+		Link        *string             `json:"link"` // deprecated: use blockedBy
+		BlockedBy   []string            `json:"blockedBy"`
+		StartAt     *int64              `json:"startAt"`
+		Isolate     *bool               `json:"isolate"`
+		Agent       *string             `json:"agent"`
+		Model       *string             `json:"model"`
+		Description *string             `json:"description"`
+		Criteria    *string             `json:"criteria"`
+		Attachments *[]board.Attachment `json:"attachments"`
 	}
 	if e := decodeBody(r, &body); e != nil {
 		return e
@@ -100,6 +125,63 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 		writeJSON(w, 200, card)
 		return nil
 	}
+	// isolation is its own mutation too: toggle the card's worktree flag
+	// (only cards still waiting in open can change it)
+	if body.Isolate != nil {
+		card, err := board.SetIsolate(s.boardProjectID(r), r.PathValue("cardID"), *body.Isolate)
+		if err == board.ErrNotFound {
+			return notFound("Card not found: " + r.PathValue("cardID"))
+		}
+		if err == board.ErrNotOpen {
+			return badRequest("Only cards still waiting in the open column can change worktree isolation")
+		}
+		if err != nil {
+			return badRequest(err.Error())
+		}
+		s.publishBoardUpdate(r)
+		writeJSON(w, 200, card)
+		return nil
+	}
+	// the richer card fields (agent/model/description/criteria/attachments)
+	// and the dependency list are plain edits under one lock
+	if body.Agent != nil || body.Model != nil || body.Description != nil || body.Criteria != nil || body.BlockedBy != nil || body.Attachments != nil {
+		card, err := board.Edit(s.boardProjectID(r), r.PathValue("cardID"), func(c *board.Card) error {
+			if body.Agent != nil {
+				c.Agent = *body.Agent
+			}
+			if body.Model != nil {
+				c.Model = *body.Model
+			}
+			if body.Description != nil {
+				c.Description = *body.Description
+			}
+			if body.Criteria != nil {
+				c.Criteria = *body.Criteria
+			}
+			if body.Attachments != nil {
+				c.Attachments = *body.Attachments
+			}
+			return nil
+		})
+		if err == board.ErrNotFound {
+			return notFound("Card not found: " + r.PathValue("cardID"))
+		}
+		if err != nil {
+			return badRequest(err.Error())
+		}
+		if body.BlockedBy != nil {
+			card, err = board.SetBlockedBy(s.boardProjectID(r), r.PathValue("cardID"), body.BlockedBy)
+			if err == board.ErrNotFound || err == board.ErrBadLink {
+				return badRequest("blockedBy references a card that does not exist")
+			}
+			if err != nil {
+				return badRequest(err.Error())
+			}
+		}
+		s.publishBoardUpdate(r)
+		writeJSON(w, 200, card)
+		return nil
+	}
 	card, err := board.Update(s.boardProjectID(r), r.PathValue("cardID"), body.Title, body.Column, body.Before, body.SessionID)
 	if err == board.ErrNotFound {
 		return notFound("Card not found: " + r.PathValue("cardID"))
@@ -110,9 +192,58 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 	if err != nil {
 		return badRequest(err.Error())
 	}
+	// the web UI's Start flow links a freshly created session to the card:
+	// when the card wants worktree isolation, the session moves into a new
+	// worktree now (before its first prompt)
+	if body.SessionID != nil && *body.SessionID != "" {
+		s.Instance(directoryOf(r)).EnsureCardWorktree(s.boardProjectID(r), r.PathValue("cardID"), *body.SessionID)
+	}
 	s.publishBoardUpdate(r)
 	writeJSON(w, 200, card)
 	return nil
+}
+
+// mergeBoardCard merges the card's worktree branch into the repository and
+// cleans the worktree up (directory + branch). The card must have been
+// started with worktree isolation and not merged yet.
+func (s *Server) mergeBoardCard(w http.ResponseWriter, r *http.Request) *apiError {
+	in := s.Instance(directoryOf(r))
+	card, err := app.MergeCard(in, s.boardProjectID(r), r.PathValue("cardID"))
+	if err == board.ErrNotFound {
+		return notFound("Card not found: " + r.PathValue("cardID"))
+	}
+	if err != nil {
+		return badRequest(err.Error())
+	}
+	s.publishBoardUpdate(r)
+	writeJSON(w, 200, card)
+	return nil
+}
+
+// resolveBoardReview approves (approve=true) or rejects a card waiting in
+// review: approve moves it to done (merging an isolated worktree first),
+// reject sends it back to inprogress and prompts its session with the
+// findings.
+func (s *Server) resolveBoardReview(approve bool) func(http.ResponseWriter, *http.Request) *apiError {
+	return func(w http.ResponseWriter, r *http.Request) *apiError {
+		in := s.Instance(directoryOf(r))
+		var card board.Card
+		var err error
+		if approve {
+			card, err = app.ApproveCard(in, s.boardProjectID(r), r.PathValue("cardID"))
+		} else {
+			card, err = app.RejectCard(in, s.boardProjectID(r), r.PathValue("cardID"))
+		}
+		if err == board.ErrNotFound {
+			return notFound("Card not found: " + r.PathValue("cardID"))
+		}
+		if err != nil {
+			return badRequest(err.Error())
+		}
+		s.publishBoardUpdate(r)
+		writeJSON(w, 200, card)
+		return nil
+	}
 }
 
 func (s *Server) deleteBoardCard(w http.ResponseWriter, r *http.Request) *apiError {

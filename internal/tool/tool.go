@@ -32,8 +32,11 @@ type SubagentInput struct {
 	SubagentType  string
 	TaskID        string
 	ParentSession string
-	Directory     string
-	Model         *session.ModelRef
+	// Isolation optionally runs the subagent in an isolated git worktree on
+	// its own branch ("worktree"); empty runs it in the parent's directory.
+	Isolation string
+	Directory string
+	Model     *session.ModelRef
 	// OnChild is invoked as soon as the subagent session is created, so the
 	// tool part can expose metadata.sessionId while still running.
 	OnChild func(childID string)

@@ -11,7 +11,7 @@ import (
 func TestSetSchedule(t *testing.T) {
 	projectID := setup(t)
 
-	card, err := Add(projectID, "Scheduled task", nil)
+	card, err := Add(projectID, "Scheduled task", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestSetSchedule(t *testing.T) {
 func TestMoveOutOfOpenClearsSchedule(t *testing.T) {
 	projectID := setup(t)
 
-	card, err := Add(projectID, "Will be dragged away", nil)
+	card, err := Add(projectID, "Will be dragged away", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}

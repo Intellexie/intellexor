@@ -9,6 +9,7 @@ import (
 	"github.com/Intellexie/intellexor/internal/permission"
 	"github.com/Intellexie/intellexor/internal/provider"
 	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 	"github.com/Intellexie/intellexor/internal/tool"
 	"github.com/Intellexie/intellexor/internal/util"
 )
@@ -43,6 +44,15 @@ func newProcessor(i *Instance, s *session.Session, m *session.AssistantMessage) 
 		text: map[string]*strings.Builder{}, textPart: map[string]*session.Part{},
 		reasoning: map[string]*strings.Builder{}, reasonPart: map[string]*session.Part{},
 	}
+}
+
+// sessionRoot is the root relative paths resolve against: the session's
+// worktree when it runs isolated, else its git root.
+func sessionRoot(s *session.Session) string {
+	if s.Worktree != nil && s.Worktree.Path != "" {
+		return s.Worktree.Path
+	}
+	return store.GitRoot(s.Directory)
 }
 
 func (p *processor) publishPart(part session.Part) {
@@ -275,8 +285,11 @@ func (p *processor) runTool(ctx context.Context, ev provider.StreamEvent, agentN
 		SessionID: p.s.ID,
 		MessageID: p.msg.ID,
 		CallID:    callID,
-		Directory: i.Directory,
-		Worktree:  i.Worktree,
+		// tools follow the session's directory, not the instance's: an
+		// isolated session (git worktree) is prompted through the parent
+		// instance but must read, edit and run commands in its worktree
+		Directory: p.s.Directory,
+		Worktree:  sessionRoot(p.s),
 		Agent:     agentName,
 		Timezone:  p.s.Timezone,
 		Meta: func(title string, metadata map[string]any) {
@@ -305,7 +318,7 @@ func (p *processor) runTool(ctx context.Context, ev provider.StreamEvent, agentN
 		})
 	}
 	tctx.Subagent = func(in tool.SubagentInput) (string, string, error) {
-		return i.runSubagent(ctx, p.s, in)
+		return i.runSubagent(ctx, p.s, agentName, in)
 	}
 	tctx.Backup = func(path string) error {
 		return i.Mgr.BackupFile(p.s, p.msg.ID, path)
@@ -440,6 +453,8 @@ func (p *processor) finishStep(ev provider.StreamEvent) {
 	// clients rebuild the context-usage circle from session.updated; without
 	// this the circle stays at 0% until a full page reload
 	i.Hub.Publish("session.updated", map[string]any{"sessionID": p.s.ID, "info": *p.s})
+	// the card's tokens/cost snapshot rides along (no-op without a card)
+	refreshCardRuntime(i, p.s.ID)
 
 	if len(p.fileDiffs) > 0 {
 		p.flushDiffs()

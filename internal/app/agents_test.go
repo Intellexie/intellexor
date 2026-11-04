@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/tool"
 )
 
 // The orchestrator is a primary agent restricted to coordination tools: the
@@ -57,6 +59,62 @@ func TestOrchestratorToolRestriction(t *testing.T) {
 	}
 	if slices.Contains(build, "apply_patch") {
 		t.Fatalf("apply_patch is gpt-model-only: %v", build)
+	}
+}
+
+// Explore agents are read-only researchers: they must never spawn further
+// subagents. The task tool is hard-removed from their tool set (the
+// Permission rules are inert), and runSubagent refuses the spawn even if the
+// model emits a task call that was never offered to it.
+func TestExploreCannotSpawnSubagents(t *testing.T) {
+	os.Setenv("INTELLEXOR_DATA", t.TempDir())
+	store.ResetDataDirForTest()
+
+	i := New(t.TempDir())
+	explore, err := i.Agent("explore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(explore.DenyTools, "task") {
+		t.Fatalf("explore must deny the task tool: %+v", explore)
+	}
+	if explore.allowsTool("task") {
+		t.Fatal("explore.allowsTool(task) must be false")
+	}
+
+	got := activeToolNames(i.Directory, explore)
+	if slices.Contains(got, "task") {
+		t.Fatalf("task tool offered to the explore agent: %v", got)
+	}
+	// the rest of the default set stays intact
+	for _, n := range []string{"bash", "read", "glob", "grep", "webfetch"} {
+		if !slices.Contains(got, n) {
+			t.Fatalf("explore lost %q from its tool set: %v", n, got)
+		}
+	}
+
+	// backstop: runSubagent refuses an explore parent outright, creating no
+	// child session
+	parent := &session.Session{ProjectID: store.ProjectID(i.Directory), Directory: i.Directory, Agent: "explore"}
+	_, childID, err := i.runSubagent(context.Background(), parent, "explore", tool.SubagentInput{
+		Description:  "nested",
+		Prompt:       "spawn something",
+		SubagentType: "explore",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot spawn subagents") {
+		t.Fatalf("explore parent must not spawn subagents, got err=%v childID=%q", err, childID)
+	}
+	if childID != "" {
+		t.Fatalf("no child session must be created, got %q", childID)
+	}
+
+	// agents with the default tool set are unaffected
+	build, err := i.Agent("build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !build.allowsTool("task") {
+		t.Fatal("build must keep the task tool")
 	}
 }
 

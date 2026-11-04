@@ -39,7 +39,7 @@ func textSSE(text string) http.HandlerFunc {
 func TestBoardToolWatchUnwatch(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	projectID := store.ProjectID(i.Directory)
-	dep, err := board.Add(projectID, "Dependency", nil)
+	dep, err := board.Add(projectID, "Dependency", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestBoardToolWatchUnwatch(t *testing.T) {
 func TestWatchedCardNotifiesWatcherOnDone(t *testing.T) {
 	i, s := setupAbortTest(t, textSSE("Noted — the dependency is done."))
 	projectID := store.ProjectID(i.Directory)
-	card, err := board.Add(projectID, "Dependency", nil)
+	card, err := board.Add(projectID, "Dependency", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestWatchedCardNotifiesWatcherOnDone(t *testing.T) {
 func TestUnwatchedCardDoesNotNotify(t *testing.T) {
 	i, s := setupAbortTest(t, textSSE("unused"))
 	projectID := store.ProjectID(i.Directory)
-	card, err := board.Add(projectID, "Nobody watches me", nil)
+	card, err := board.Add(projectID, "Nobody watches me", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestUnwatchedCardDoesNotNotify(t *testing.T) {
 func TestBoardToolStartsCard(t *testing.T) {
 	i, s := setupAbortTest(t, textSSE("Working on it."))
 	projectID := store.ProjectID(i.Directory)
-	card, err := board.Add(projectID, "Implement the parser", nil)
+	card, err := board.Add(projectID, "Implement the parser", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,11 +272,11 @@ func TestOrchestratorStartedCardIsWatchedAndPinged(t *testing.T) {
 	if err := i.Mgr.Create(orch); err != nil {
 		t.Fatal(err)
 	}
-	card, err := board.Add(projectID, "Implement the parser", nil)
+	card, err := board.Add(projectID, "Implement the parser", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := board.Add(projectID, "Started by a plain agent", nil)
+	plain, err := board.Add(projectID, "Started by a plain agent", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,11 +20,11 @@ import (
 func TestBoardCardIDsAreNumeric(t *testing.T) {
 	i, _ := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	projectID := store.ProjectID(i.Directory)
-	first, err := board.Add(projectID, "First", nil)
+	first, err := board.Add(projectID, "First", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := board.Add(projectID, "Second", nil)
+	second, err := board.Add(projectID, "Second", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestBoardCardIDsAreNumeric(t *testing.T) {
 	if err := board.Delete(projectID, second.ID); err != nil {
 		t.Fatal(err)
 	}
-	third, err := board.Add(projectID, "Third", nil)
+	third, err := board.Add(projectID, "Third", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestBoardLegacyIDsMigrateToNumeric(t *testing.T) {
 	}
 
 	// the renumber is persisted: a fresh Add continues after the migrated IDs
-	next, err := board.Add(projectID, "New", nil)
+	next, err := board.Add(projectID, "New", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestBoardLegacyIDsMigrateToNumeric(t *testing.T) {
 func TestSetLinkValidation(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	projectID := store.ProjectID(i.Directory)
-	open, err := board.Add(projectID, "Open target", nil)
+	open, err := board.Add(projectID, "Open target", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestLinkedCardAutoStartsOnDone(t *testing.T) {
 	i, s := setupAbortTest(t, textSSE("Following up."))
 	projectID := store.ProjectID(i.Directory)
 	source := linkCard(t, i, s, "Source task", "inprogress")
-	target, err := board.Add(projectID, "Follow-up task", nil)
+	target, err := board.Add(projectID, "Follow-up task", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,9 @@ func TestLinkedCardAutoStartsOnDone(t *testing.T) {
 			if c.ID != target.ID {
 				continue
 			}
-			if c.Column != "inprogress" || c.SessionID == "" {
+			// the turn may already be over: an idle card has moved on to
+			// review — both columns prove the card was started
+			if (c.Column != "inprogress" && c.Column != "review") || c.SessionID == "" {
 				return false
 			}
 			child, err = i.Mgr.Find(c.SessionID)
@@ -184,6 +186,9 @@ func TestLinkedCardAutoStartsOnDone(t *testing.T) {
 	if !watcherReplied(i, child, "Following up.") {
 		t.Fatal("auto-started session never ran the model on the card's task")
 	}
+	// and the post-idle board writes (review move, status sync) must have
+	// landed before cleanup
+	waitCardSettled(t, i, projectID, target.ID)
 }
 
 // The auto-start must be broadcast like every other board mutation
@@ -193,7 +198,7 @@ func TestLinkedCardAutoStartBroadcastsBoardUpdate(t *testing.T) {
 	i, s := setupAbortTest(t, textSSE("Following up."))
 	projectID := store.ProjectID(i.Directory)
 	source := linkCard(t, i, s, "Source task", "inprogress")
-	target, err := board.Add(projectID, "Follow-up task", nil)
+	target, err := board.Add(projectID, "Follow-up task", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +242,7 @@ func TestLinkedCardAutoStartBroadcastsBoardUpdate(t *testing.T) {
 			if !watcherReplied(i, child, "Following up.") {
 				t.Fatal("auto-started session never ran the model on the card's task")
 			}
+			waitCardSettled(t, i, projectID, target.ID)
 			return
 		case <-deadline:
 			t.Fatal("no board.updated event published for the auto-started card")
@@ -250,7 +256,7 @@ func TestLinkedCardSkippedWhenAlreadyStarted(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	projectID := store.ProjectID(i.Directory)
 	source := linkCard(t, i, s, "Source", "inprogress")
-	target, err := board.Add(projectID, "Target", nil)
+	target, err := board.Add(projectID, "Target", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +287,7 @@ func TestDeleteClearsInboundLinks(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	projectID := store.ProjectID(i.Directory)
 	source := linkCard(t, i, s, "Source", "inprogress")
-	target, err := board.Add(projectID, "Target", nil)
+	target, err := board.Add(projectID, "Target", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +312,7 @@ func TestBoardToolLinkAction(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	projectID := store.ProjectID(i.Directory)
 	source := linkCard(t, i, s, "Source", "inprogress")
-	target, err := board.Add(projectID, "Target", nil)
+	target, err := board.Add(projectID, "Target", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,8 +40,14 @@ type AgentDef struct {
 }
 
 // allowsTool reports whether the agent may use the named tool. Agents
-// without a Tools list can use everything.
+// without a Tools list can use everything except explicitly denied tools
+// (DenyTools); agents with a Tools list get exactly that list.
 func (a AgentDef) allowsTool(name string) bool {
+	for _, d := range a.DenyTools {
+		if d == name {
+			return false
+		}
+	}
 	if len(a.Tools) == 0 {
 		return true
 	}
@@ -94,6 +100,21 @@ func (i *Instance) Agents() []AgentDef {
 			Prompt:      orchestratorPrompt,
 		},
 		{
+			Name:        "review",
+			Description: "Review agent. Inspects a card's changes when it moves to the review column and reports findings. Read-only: it cannot edit files.",
+			Mode:        "primary",
+			Color:       "#b7791f",
+			Native:      true,
+			Order:       15,
+			DenyTools:   []string{"task"},
+			Permission: []session.PermissionRule{
+				{Permission: "edit", Pattern: "*", Action: "deny"},
+				{Permission: "write", Pattern: "*", Action: "deny"},
+				{Permission: "apply_patch", Pattern: "*", Action: "deny"},
+			},
+			Prompt: reviewPrompt,
+		},
+		{
 			Name:        "general",
 			Description: "General agent. Used to research complex questions, run multi-step tasks and parallelize work.",
 			Mode:        "subagent",
@@ -111,6 +132,10 @@ func (i *Instance) Agents() []AgentDef {
 			Color:       "#fcb239",
 			Native:      true,
 			Order:       40,
+			// Explore agents must never spawn further subagents: the task
+			// tool is hard-removed from their tool set (the Permission rules
+			// below are inert metadata — DenyTools is the real enforcement).
+			DenyTools: []string{"task"},
 			Permission: []session.PermissionRule{
 				{Permission: "*", Pattern: "*", Action: "deny"},
 				{Permission: "grep", Pattern: "*", Action: "allow"},
@@ -277,6 +302,20 @@ func baseRules() []session.PermissionRule {
 
 var activeTools = []string{"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "question", "apply_patch", "board"}
 
+// reviewPrompt fully replaces the base system prompt for the review agent:
+// it inspects a card's changes and reports findings, it does not fix them.
+const reviewPrompt = `You are Intellexor's Review agent. A kanban card has just moved to the review column and you inspect its changes — you do not implement or fix anything yourself.
+
+# Your task
+The user's message describes the card: its title, description, acceptance criteria and the diff of its changes. Verify the work against the acceptance criteria:
+- Read the changed code in the repository (you have read, glob, grep and bash — but no edit/write tools: never modify files).
+- Check the diff for correctness, missed edge cases, broken tests and violations of the codebase's conventions.
+- Run the project's build/tests when that is cheap and safe (read-only commands only).
+- Judge against the acceptance criteria, not your own taste.
+
+# Your report
+End with a section titled exactly "## Findings" — a short, concrete list. Each finding: file/line where possible, what is wrong, and what should change. If the work satisfies the criteria and you found nothing worth changing, write "No findings — the work satisfies the acceptance criteria." Your findings are attached to the card verbatim: the card's owner sees them on reject, and the user sees them when approving. Be concise and direct.`
+
 // orchestratorPrompt fully replaces the base system prompt for the
 // orchestrator agent: it coordinates work instead of doing it.
 const orchestratorPrompt = `You are Intellexor's Orchestrator, a coordination agent. You do not write code yourself — you manage the flow of work: you curate the project's kanban board, trigger the starting of cards in fresh agent sessions, and manage cron jobs.
@@ -376,6 +415,20 @@ func boardContext(i *Instance, s *session.Session, agentName string) string {
 	}
 	return `# Kanban board
 You are working on the kanban card "` + title + `" (id: ` + card.ID + `, column: ` + card.Column + `).
-` + how + `
+` + cardDetails(card) + how + `
 When you have finished the task, move the card to the done column with the board tool: {"action": "move", "column": "done"} — the card is resolved from this session automatically, or pass its ID explicitly.`
+}
+
+// cardDetails renders the card's optional description and acceptance
+// criteria into the system prompt, so the agent works against the full
+// spec — not just the title.
+func cardDetails(card board.Card) string {
+	var b strings.Builder
+	if d := strings.TrimSpace(card.Description); d != "" {
+		b.WriteString("Description: " + d + "\n")
+	}
+	if c := strings.TrimSpace(card.Criteria); c != "" {
+		b.WriteString("Acceptance criteria:\n" + c + "\n")
+	}
+	return b.String()
 }

@@ -21,11 +21,11 @@ func setup(t *testing.T) string {
 func TestAddOnlyCreatesInOpen(t *testing.T) {
 	projectID := setup(t)
 
-	first, err := Add(projectID, "First", nil)
+	first, err := Add(projectID, "First", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Add(projectID, "Second", nil)
+	second, err := Add(projectID, "Second", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestAddPersistsAttachments(t *testing.T) {
 		{Type: "file", MIME: "image/png", URL: "data:image/png;base64,AAAA", Filename: "shot.png"},
 		{Type: "file", MIME: "text/plain", URL: "data:text/plain;base64,aGk=", Filename: "notes.txt"},
 	}
-	card, err := Add(projectID, "With attachments", atts)
+	card, err := Add(projectID, "With attachments", AddOpts{Attachments: atts})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestAddPersistsAttachments(t *testing.T) {
 func TestUpdateRejectsSessionLinkOnNonOpenOrOwnedCard(t *testing.T) {
 	projectID := setup(t)
 
-	card, err := Add(projectID, "Guarded", nil)
+	card, err := Add(projectID, "Guarded", AddOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,5 +112,71 @@ func TestUpdateRejectsSessionLinkOnNonOpenOrOwnedCard(t *testing.T) {
 	// and now B can take it
 	if _, err := Update(projectID, card.ID, nil, &col, nil, &sessB); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Moving a card from inprogress back to open is the "stop" flow: the stale
+// session link is cleared (so a fresh Start can link a new session) and
+// OnStopped fires with the released session ID so the app layer can abort
+// the agent. Moving to done keeps the link (View still works there).
+func TestStopReturnsCardToOpenAndFiresOnStopped(t *testing.T) {
+	projectID := setup(t)
+
+	card, err := Add(projectID, "Stoppable", AddOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	col := "inprogress"
+	sess := "sess-a"
+	if _, err := Update(projectID, card.ID, nil, &col, nil, &sess); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := ""
+	prev := OnStopped
+	OnStopped = func(pid, sid string) {
+		if pid != projectID {
+			t.Errorf("OnStopped projectID = %q, want %q", pid, projectID)
+		}
+		stopped = sid
+	}
+	defer func() { OnStopped = prev }()
+
+	// drag back to open: no explicit sessionID — the server clears it
+	open := "open"
+	updated, err := Update(projectID, card.ID, nil, &open, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.SessionID != "" {
+		t.Fatalf("session link survived the stop: %q", updated.SessionID)
+	}
+	if stopped != sess {
+		t.Fatalf("OnStopped sessionID = %q, want %q", stopped, sess)
+	}
+
+	// the card is waiting and unowned again: a fresh session can take it
+	sessB := "sess-b"
+	if _, err := Update(projectID, card.ID, nil, &col, nil, &sessB); err != nil {
+		t.Fatalf("re-starting a stopped card: %v", err)
+	}
+
+	// moving to done does NOT clear the link or fire OnStopped
+	stopped = ""
+	done := "done"
+	if _, err := Update(projectID, card.ID, nil, &done, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	cards, err := Get(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cards {
+		if c.ID == card.ID && c.SessionID != sessB {
+			t.Fatalf("moving to done cleared the session link: %+v", c)
+		}
+	}
+	if stopped != "" {
+		t.Fatalf("OnStopped fired for a move to done (session %q)", stopped)
 	}
 }

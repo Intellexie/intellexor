@@ -12,8 +12,10 @@ import (
 
 	"github.com/Intellexie/intellexor/internal/config"
 
+	"github.com/Intellexie/intellexor/internal/board"
 	"github.com/Intellexie/intellexor/internal/provider"
 	"github.com/Intellexie/intellexor/internal/session"
+	"github.com/Intellexie/intellexor/internal/store"
 	"github.com/Intellexie/intellexor/internal/util"
 )
 
@@ -139,6 +141,11 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		_ = i.Mgr.SaveMessage(s, asst)
 		i.Hub.Publish("message.updated", map[string]any{"sessionID": s.ID, "info": asst})
 		i.Hub.Publish("session.error", map[string]any{"sessionID": s.ID, "error": *asst.Error})
+		// a card's session that never got started leaves the card blocked,
+		// not silently in-progress with a dead session
+		if card, ok, _ := board.ForSession(store.ProjectID(i.Directory), s.ID); ok && card.ID != "" {
+			markCardBlocked(i, s.ID, rerr.Error())
+		}
 		return session.WithParts{Info: asst}, rerr
 	}
 	resolved.Client()
@@ -186,6 +193,16 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 	if agent.Steps > 0 {
 		maxSteps = agent.Steps
 	}
+	// Board cards get a tighter retry budget than interactive sessions: one
+	// retry on a retryable provider error (429/5xx, mid-stream reset), then
+	// the card is marked blocked with the error instead of silently dying —
+	// nobody is watching a card's stream to hit resend.
+	maxRetries := maxStepRetries
+	cardIsLinked := false
+	if card, ok, _ := board.ForSession(store.ProjectID(i.Directory), s.ID); ok && card.ID != "" {
+		maxRetries = 1
+		cardIsLinked = true
+	}
 
 	for step := 0; step < maxSteps; step++ {
 		if ctx.Err() != nil {
@@ -227,7 +244,7 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 			p = newProcessor(i, s, &asst)
 			p.runStep(ctx, resolved, model, agentName, agent, in.System, variant)
 
-			if !p.failed || p.aborted || !p.retryable || attempt >= maxStepRetries {
+			if !p.failed || p.aborted || !p.retryable || attempt >= maxRetries {
 				break
 			}
 
@@ -261,6 +278,19 @@ func (i *Instance) runLoop(ctx context.Context, s *session.Session, in PromptInp
 		stepTools = p.toolsCalled
 
 		finishStep(i, s, &asst, p)
+
+		// the card's failure handling: a provider error that survived the
+		// retry marks the card blocked with the error (no model fallback —
+		// the card runs the model it is configured with, period)
+		if p.failed && !p.aborted && cardIsLinked {
+			errMsg := "provider error"
+			if p.msg.Error != nil {
+				if m, ok := p.msg.Error.Data["message"].(string); ok && m != "" {
+					errMsg = m
+				}
+			}
+			markCardBlocked(i, s.ID, errMsg)
+		}
 
 		if p.failed || stepTools == 0 {
 			break

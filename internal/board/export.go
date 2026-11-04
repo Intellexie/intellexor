@@ -87,6 +87,9 @@ func Import(projectID string, p *ExportPayload, mode string) (int, error) {
 		}
 		c.SessionID = ""
 		c.Watchers = nil
+		c.ReviewSessionID = "" // a session ref of the exporting project
+		c.Status = ""          // runtime state never survives an import
+		c.StatusText = ""
 		if c.Column != "open" {
 			c.StartAt = 0 // schedules only make sense for waiting cards
 		}
@@ -104,13 +107,24 @@ func Import(projectID string, p *ExportPayload, mode string) (int, error) {
 		n++
 	}
 	for i := range cards {
-		if cards[i].Link == "" {
-			continue
+		remap := func(field string) string {
+			if field == "" {
+				return ""
+			}
+			if mapped, ok := idMap[field]; ok {
+				return mapped
+			}
+			return "" // the target did not make it into the board
 		}
-		if mapped, ok := idMap[cards[i].Link]; ok {
-			cards[i].Link = mapped
-		} else {
-			cards[i].Link = "" // the target did not make it into the board
+		cards[i].Link = remap(cards[i].Link)
+		if len(cards[i].BlockedBy) > 0 {
+			var out []string
+			for _, b := range cards[i].BlockedBy {
+				if m := remap(b); m != "" {
+					out = append(out, m)
+				}
+			}
+			cards[i].BlockedBy = out
 		}
 	}
 	renumber(cards)

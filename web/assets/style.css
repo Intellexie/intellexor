@@ -421,6 +421,8 @@ position it is about to restore. */
 .agent-dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; }
 .attach-chip { display:inline-flex; align-items:center; gap:6px; background:var(--layer-2); border-radius:var(--radius-md); padding:3px 8px; font-size:12px; margin:0 0 6px 6px; }
 .attach-chip img { width:28px; height:28px; object-fit:cover; border-radius:4px; }
+.attach-chip.clickable { cursor:pointer; transition:background .15s ease; }
+.attach-chip.clickable:hover { background:var(--layer-3); }
 .attach-row { display:flex; flex-wrap:wrap; padding:6px 6px 0; gap:6px; }
 .c-branch { display:flex; align-items:center; gap:5px; height:28px; padding:0 8px; border-radius:var(--radius-md); color:var(--text-faint); font-size:12px; max-width:200px; }
 .c-branch .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -499,6 +501,11 @@ position it is about to restore. */
 .modal .m-select:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
 .modal .m-select option { background:var(--bg-base); color:var(--text-base); }
 .modal .m-actions { display:flex; justify-content:flex-end; gap:8px; padding-top:14px; }
+/* attachment popup body (openAttachmentModal) */
+.att-view { min-height:40px; }
+.att-view .att-img { display:block; max-width:100%; max-height:60vh; margin:0 auto; border-radius:var(--radius-md); }
+.att-view .att-pre { white-space:pre-wrap; word-break:break-word; font-family:var(--font-mono); font-size:12.5px; line-height:1.6; background:var(--code-bg); border:1px solid var(--border-weak); border-radius:var(--radius-md); padding:10px 12px; margin:0; }
+.att-view .att-binary { color:var(--text-muted); font-size:13px; padding:8px 0; }
 /* settings model form: capability checkboxes in a 2-col grid */
 .modal .m-checks { display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; padding:8px 0; }
 .modal label.m-check { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--text-base); cursor:pointer; }
@@ -729,6 +736,38 @@ position it is about to restore. */
 .kanban-add-row { display:flex; align-items:flex-start; gap:6px; }
 .kanban-add-attach { flex:none; align-self:stretch; width:30px; display:flex; align-items:center; justify-content:center; border:1px dashed var(--border-base); border-radius:var(--radius-md); color:var(--text-faint); background:transparent; transition:border-color .15s ease, color .15s ease, background-color .15s ease; }
 .kanban-add-attach:hover { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, transparent); }
+.kanban-add-iso.active { border-style:solid; border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent); }
+.kanban-card-worktree { display:inline-flex; align-items:center; gap:5px; width:fit-content; margin-top:8px; font-size:11px; font-weight:500; line-height:1.4; color:var(--text-muted); background:var(--layer-1); border:1px solid var(--border-base); border-radius:999px; padding:1px 8px; max-width:100%; overflow:hidden; }
+.kanban-card-worktree span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* live card status: running (spinner + elapsed), waiting for input, blocked
+   (provider failure) — plus the tokens/cost snapshot of the linked session */
+.kanban-card-status { display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11px; font-weight:500; line-height:1.4; color:var(--text-muted); }
+.kanban-card-status .spinner { display:inline-flex; width:12px; height:12px; }
+.kanban-card-status .spinner svg { width:12px; height:12px; animation:spin 1s linear infinite; }
+.kanban-card-status.status-waiting { color:var(--warn-fg); }
+.kanban-card-status.status-blocked, .kanban-card-status.status-error { color:var(--err-fg); }
+.kanban-card-usage { margin-left:auto; font-size:10.5px; color:var(--text-faint); white-space:nowrap; }
+/* dependency blockers: an open card waiting for its blockers to finish */
+.kanban-card-blocked { display:flex; align-items:center; gap:5px; margin-top:8px; font-size:11px; font-weight:500; line-height:1.4; color:var(--text-faint); background:var(--layer-1); border:1px dashed var(--border-base); border-radius:999px; padding:1px 8px; width:fit-content; max-width:100%; }
+/* the agent/model a card runs with */
+.kanban-card-agent { margin-top:8px; font-size:10.5px; font-family:var(--font-mono); color:var(--text-faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* description / acceptance criteria / review findings on the card */
+.kanban-card-desc, .kanban-card-criteria, .kanban-card-findings { margin-top:8px; font-size:11.5px; line-height:1.45; color:var(--text-muted); white-space:pre-wrap; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.kanban-card-criteria { color:var(--text-muted); }
+.kanban-card-criteria::first-line { font-weight:600; }
+.kanban-card-findings { background:color-mix(in srgb, var(--warn-fg) 7%, transparent); border:1px solid color-mix(in srgb, var(--warn-fg) 25%, transparent); border-radius:var(--radius-md); padding:6px 8px; }
+.kanban-card-btn.kanban-approve { color:var(--ok-fg); border-color:color-mix(in srgb, var(--ok-fg) 40%, transparent); }
+.kanban-card-btn.kanban-reject { color:var(--err-fg); border-color:color-mix(in srgb, var(--err-fg) 40%, transparent); }
+/* two-column field row in modals (agent + model) */
+.m-field-row { display:flex; gap:10px; }
+.m-field-row .m-field { flex:1; min-width:0; }
+/* the composer's agent/model c-select buttons, in card modals: same look,
+   stretched to the field like the other form controls */
+.modal .m-field .c-select { width:100%; max-width:none; border:1px solid var(--border-base); background:var(--bg-base); color:var(--text-base); transition:border-color .15s ease, box-shadow .15s ease; }
+.modal .m-field .c-select:hover { border-color:var(--text-faint); }
+.modal .m-field .c-select .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.modal .m-diff { max-height:60vh; overflow:auto; font-family:var(--font-mono); font-size:12px; line-height:1.5; white-space:pre; background:var(--code-bg); border:1px solid var(--border-base); border-radius:var(--radius-md); padding:10px; }
 .kanban-add-input { flex:1; width:100%; border:1px dashed var(--border-base); background:transparent; border-radius:var(--radius-md); padding:7px 10px; font-size:12.5px; line-height:1.45; outline:none; color:var(--text-muted); resize:none; overflow:hidden; min-height:32px; transition:border-color .15s ease, background-color .15s ease, color .15s ease, box-shadow .15s ease; }
 .kanban-add-input::placeholder { color:var(--text-faint); }
 .kanban-add-input:hover { border-color:var(--text-faint); }

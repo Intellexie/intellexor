@@ -92,7 +92,16 @@ func ProjectID(dir string) string {
 func GitRoot(dir string) string {
 	cur := dir
 	for {
-		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+		if fi, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			if !fi.IsDir() {
+				// A linked git worktree carries a .git *file* pointing at
+				// <repo>/.git/worktrees/<name> — resolve it to the main
+				// repository so worktree sessions keep the parent's project
+				// ID (and its board, config and session storage).
+				if root := repoOfGitFile(cur); root != "" {
+					return root
+				}
+			}
 			return cur
 		}
 		parent := filepath.Dir(cur)
@@ -101,6 +110,33 @@ func GitRoot(dir string) string {
 		}
 		cur = parent
 	}
+}
+
+// repoOfGitFile parses a worktree's .git file ("gitdir: <path>") and walks
+// to the repository root it belongs to, via the commondir pointer git
+// writes next to the worktree's gitdir. Empty when the file is not a
+// gitdir pointer.
+func repoOfGitFile(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, ".git"))
+	if err != nil || !strings.HasPrefix(string(b), "gitdir:") {
+		return ""
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(dir, gitdir)
+	}
+	// gitdir/commindir holds the relative path to the shared .git directory
+	if cb, err := os.ReadFile(filepath.Join(gitdir, "commondir")); err == nil {
+		common := strings.TrimSpace(string(cb))
+		if common != "" {
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(gitdir, common)
+			}
+			return filepath.Dir(filepath.Clean(common))
+		}
+	}
+	// fallback for the standard layout <repo>/.git/worktrees/<name>
+	return filepath.Dir(filepath.Dir(filepath.Clean(gitdir)))
 }
 
 func (s *Store) path(parts ...string) string {

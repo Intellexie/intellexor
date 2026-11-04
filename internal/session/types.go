@@ -87,6 +87,20 @@ type Session struct {
 	Permission []PermissionRule `json:"permission,omitempty"`
 	Summary    *SessionSummary  `json:"summary,omitempty"`
 	Revert     *RevertState     `json:"revert,omitempty"`
+	// Worktree describes the isolated git worktree the session runs in,
+	// when isolation was requested (card isolate flag, task isolation
+	// argument or the config default). Nil means the session works in
+	// Directory directly.
+	Worktree *WorktreeInfo `json:"worktree,omitempty"`
+}
+
+// WorktreeInfo is the git worktree a session was isolated into: the branch
+// checked out in it (itx/<name>), its path inside the repository and the
+// base ref it was branched from.
+type WorktreeInfo struct {
+	Branch string `json:"branch"`
+	Path   string `json:"path"`
+	Base   string `json:"base,omitempty"`
 }
 
 type RevertState struct {

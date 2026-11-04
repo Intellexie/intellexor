@@ -129,7 +129,10 @@ func (m *Manager) List(dir string, scopeProject bool, projectID string) []*Sessi
 			if err := store.ReadJSON(filepath.Join(root, p.Name(), s.Name(), "info.json"), &sess); err != nil {
 				continue
 			}
-			if !scopeProject && sess.Directory != dir {
+			// directory scope matches by git root, not exact path: sessions
+			// running in an isolated worktree of this repository belong to
+			// the same project and stay visible in its list
+			if !scopeProject && store.GitRoot(sess.Directory) != store.GitRoot(dir) {
 				continue
 			}
 			cp := sess

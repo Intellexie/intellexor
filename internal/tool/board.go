@@ -25,29 +25,40 @@ type BoardTool struct {
 	// button flow: link the card, move it to inprogress, prompt it with the
 	// card's title) and returns the new session ID.
 	StartCard func(projectID, cardID string) (string, error)
+	// MergeCard merges a card's worktree branch into the repository and
+	// cleans the worktree up (isolation flow).
+	MergeCard func(projectID, cardID string) (board.Card, error)
+	// ResolveReview approves (approve=true) or rejects a card waiting in
+	// review: approve moves it to done (merging its worktree when
+	// isolated), reject returns it to inprogress and prompts its session
+	// with the findings.
+	ResolveReview func(projectID, cardID string, approve bool) (board.Card, error)
 }
 
 func (BoardTool) Name() string { return "board" }
 
 func (BoardTool) Description() string {
-	return `Work with the project kanban board (columns: open, inprogress, done).
+	return `Work with the project kanban board (columns: open, inprogress, review, done).
 
 ## When to use
 - When you finish working on the card linked to this session, move it to the done column (action "move", column "done") — the card is resolved automatically, no ID needed.
-- Use action "list" to see all cards with their IDs, titles, columns and watchers.
+- Use action "list" to see all cards with their IDs, titles, columns, status and watchers.
 - Use action "add" to create a follow-up card for work that is out of scope for the current task.
 - Use action "watch" when your work depends on another card: you receive a message on behalf of the user as soon as that card is marked done.
-- Use action "link" to chain a follow-up card to this one: when this card is moved to done, the target card starts automatically in a fresh session (only cards still in the open column can be targeted).
+- Use action "link" to chain a follow-up card to this one: when this card is moved to done, the target card starts automatically in a fresh session (only cards still in the open column can be targeted). "blockedBy" (on add) declares dependencies the other way round: a card with blockers only starts once all of them are done.
 - Use action "start" to begin work on a card in a fresh session, exactly like the user clicking Start on the board.
+- Use action "approve"/"reject" on a card in the review column: approve moves it to done, reject sends it back to inprogress with the review findings as the next prompt.
 
 ## Actions
-- "list": returns every card (id, title, column, link, watchers).
+- "list": returns every card (id, title, column, status, blockedBy, watchers).
 - "move": moves a card to another column. Pass "card" to move a specific card by ID; omit it to move the card linked to the current session.
-- "add": creates a card with "title" in the open column (cards can only be created there; move it afterwards to start work).
+- "add": creates a card with "title" in the open column (cards can only be created there; move it afterwards to start work). Optional: "description", "criteria" (acceptance criteria), "agent", "model" ("provider/model"), "blockedBy" (array of card IDs), "isolate".
 - "watch" / "unwatch": start/stop watching a card — pass "card" to watch a specific card by ID, or omit it to use the card linked to the current session. Watchers are messaged when the card is marked done. Watching the card linked to this session is rejected: you are already working on it.
 - "link" / "unlink": point "card" (or the session's card) at "target" so the target starts automatically when the card is done; "unlink" removes the link.
 - "schedule": set a timed start on a card — a background scheduler starts it (exactly like "start") when the time passes. Only cards still waiting in the open column can be scheduled; startAt 0 clears the schedule.
-- "start": start a new agent session on card "card"; the card's title becomes the new session's task. The orchestrator agent automatically watches every card it starts.`
+- "start": start a new agent session on card "card"; the card's title becomes the new session's task. The orchestrator agent automatically watches every card it started.
+- "approve" / "reject": resolve a card waiting in review — approve moves it to done (merging its worktree when isolated), reject returns it to inprogress and prompts its session with the findings.
+- "merge": merge the card's worktree branch into the repository and remove the worktree (cards started with worktree isolation only).`
 }
 
 func (BoardTool) Schema() map[string]any {
@@ -56,21 +67,42 @@ func (BoardTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"enum":        []any{"list", "move", "add", "watch", "unwatch", "link", "unlink", "schedule", "start"},
+				"enum":        []any{"list", "move", "add", "watch", "unwatch", "link", "unlink", "schedule", "start", "approve", "reject", "merge"},
 				"description": "The board operation to perform",
 			},
 			"card": map[string]any{
 				"type":        "string",
-				"description": "Card ID to move, watch/unwatch, link/unlink or start. Omit for move/watch/unwatch/link/unlink to use the card linked to the current session.",
+				"description": "Card ID to move, watch/unwatch, link/unlink, approve/reject or start. Omit for move/watch/unwatch/link/unlink to use the card linked to the current session.",
 			},
 			"column": map[string]any{
 				"type":        "string",
-				"enum":        []any{"open", "inprogress", "done"},
+				"enum":        []any{"open", "inprogress", "review", "done"},
 				"description": "Target column for move (add always creates in open)",
 			},
 			"title": map[string]any{
 				"type":        "string",
 				"description": "Card title (action add)",
+			},
+			"description": map[string]any{
+				"type":        "string",
+				"description": "Optional card description (action add): context beyond the title, sent to the agent with the task",
+			},
+			"criteria": map[string]any{
+				"type":        "string",
+				"description": "Optional acceptance criteria (action add): what must hold for the card to be done",
+			},
+			"agent": map[string]any{
+				"type":        "string",
+				"description": "Agent the card runs with when started (action add); empty = the default build agent",
+			},
+			"model": map[string]any{
+				"type":        "string",
+				"description": "Model the card runs with, as \"provider/model\" (action add); empty = the default model",
+			},
+			"blockedBy": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Card IDs this card depends on (action add): it only starts once all of them are done",
 			},
 			"target": map[string]any{
 				"type":        "string",
@@ -84,6 +116,10 @@ func (BoardTool) Schema() map[string]any {
 				"type":        "string",
 				"description": "Alternative to startAt (action schedule): a duration from now, e.g. \"30m\", \"2h\", \"1d\"",
 			},
+			"isolate": map[string]any{
+				"type":        "boolean",
+				"description": "action add: run the card's session in an isolated git worktree on its own branch when the card is started",
+			},
 		},
 		"required": []any{"action"},
 	}
@@ -91,13 +127,19 @@ func (BoardTool) Schema() map[string]any {
 
 func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 	var p struct {
-		Action  string `json:"action"`
-		Card    string `json:"card"`
-		Column  string `json:"column"`
-		Title   string `json:"title"`
-		Target  string `json:"target"`
-		StartAt int64  `json:"startAt"`
-		In      string `json:"in"`
+		Action      string   `json:"action"`
+		Card        string   `json:"card"`
+		Column      string   `json:"column"`
+		Title       string   `json:"title"`
+		Description string   `json:"description"`
+		Criteria    string   `json:"criteria"`
+		Agent       string   `json:"agent"`
+		Model       string   `json:"model"`
+		BlockedBy   []string `json:"blockedBy"`
+		Target      string   `json:"target"`
+		StartAt     int64    `json:"startAt"`
+		In          string   `json:"in"`
+		Isolate     bool     `json:"isolate"`
 	}
 	_ = json.Unmarshal(args, &p)
 	if c.Ask != nil {
@@ -122,7 +164,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 
 	case "move":
 		if p.Column == "" {
-			return Result{}, errors.New("move requires a target column (open, inprogress or done)")
+			return Result{}, errors.New("move requires a target column (open, inprogress, review or done)")
 		}
 		id := p.Card
 		if id == "" {
@@ -140,7 +182,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
 		}
 		if err == board.ErrBadColumn {
-			return Result{}, fmt.Errorf("unknown column %q (valid: open, inprogress, done)", p.Column)
+			return Result{}, fmt.Errorf("unknown column %q (valid: open, inprogress, review, done)", p.Column)
 		}
 		if err != nil {
 			return Result{}, err
@@ -161,15 +203,29 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		if p.Column != "" && p.Column != "open" {
 			return Result{}, errors.New("cards can only be added to the open column (move the card afterwards to start work on it)")
 		}
-		card, err := board.Add(projectID, p.Title, nil)
+		card, err := board.Add(projectID, p.Title, board.AddOpts{
+			Isolate:     p.Isolate,
+			Agent:       p.Agent,
+			Model:       p.Model,
+			Description: p.Description,
+			Criteria:    p.Criteria,
+			BlockedBy:   p.BlockedBy,
+		})
+		if err == board.ErrBadLink {
+			return Result{}, errors.New("blockedBy references a card that does not exist (see action list)")
+		}
 		if err != nil {
 			return Result{}, err
 		}
 		t.notify()
+		out := fmt.Sprintf("Card %s (%q) created in column %q.", card.ID, card.Title, card.Column)
+		if p.Isolate {
+			out += " It will run in an isolated git worktree on its own branch when started."
+		}
 		return Result{
 			Title:    "Card added: " + card.Title,
 			Metadata: map[string]any{"card": card},
-			Output:   fmt.Sprintf("Card %s (%q) created in column %q.", card.ID, card.Title, card.Column),
+			Output:   out,
 		}, nil
 
 	case "watch", "unwatch":
@@ -340,8 +396,73 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			Output:   out,
 		}, nil
 
+	case "approve", "reject":
+		id := p.Card
+		if id == "" {
+			card, ok, err := board.ForSession(projectID, c.SessionID)
+			if err != nil {
+				return Result{}, err
+			}
+			if !ok {
+				return Result{}, errors.New("no card is linked to this session; pass the card ID (see action list)")
+			}
+			id = card.ID
+		}
+		if t.ResolveReview == nil {
+			return Result{}, errors.New("review resolution is not available in this context")
+		}
+		card, err := t.ResolveReview(projectID, id, p.Action == "approve")
+		if err == board.ErrNotFound {
+			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		t.notify()
+		if p.Action == "approve" {
+			return Result{
+				Title:    "Approved card " + card.ID,
+				Metadata: map[string]any{"card": card},
+				Output:   fmt.Sprintf("Card %s (%q) approved and moved to done.", card.ID, card.Title),
+			}, nil
+		}
+		return Result{
+			Title:    "Rejected card " + card.ID,
+			Metadata: map[string]any{"card": card},
+			Output:   fmt.Sprintf("Card %s (%q) sent back to inprogress; its session was prompted with the review findings.", card.ID, card.Title),
+		}, nil
+
+	case "merge":
+		id := p.Card
+		if id == "" {
+			card, ok, err := board.ForSession(projectID, c.SessionID)
+			if err != nil {
+				return Result{}, err
+			}
+			if !ok {
+				return Result{}, errors.New("no card is linked to this session; pass the card ID (see action list)")
+			}
+			id = card.ID
+		}
+		if t.MergeCard == nil {
+			return Result{}, errors.New("merging cards is not available in this context")
+		}
+		card, err := t.MergeCard(projectID, id)
+		if err == board.ErrNotFound {
+			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		t.notify()
+		return Result{
+			Title:    "Merged card " + card.ID,
+			Metadata: map[string]any{"card": card},
+			Output:   fmt.Sprintf("Card %s (%q): its worktree branch was merged into the repository and the worktree was removed.", card.ID, card.Title),
+		}, nil
+
 	default:
-		return Result{}, fmt.Errorf("unknown action %q (valid: list, move, add, watch, unwatch, link, unlink, schedule, start)", p.Action)
+		return Result{}, fmt.Errorf("unknown action %q (valid: list, move, add, watch, unwatch, link, unlink, schedule, start, approve, reject, merge)", p.Action)
 	}
 }
 

@@ -22,11 +22,11 @@ func TestSchedulerStartsDueCards(t *testing.T) {
 	i, _ := setupAbortTest(t, textSSE("Working on it."))
 	projectID := store.ProjectID(i.Directory)
 
-	due, err := board.Add(projectID, "Due now", nil)
+	due, err := board.Add(projectID, "Due now", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	later, err := board.Add(projectID, "Due later", nil)
+	later, err := board.Add(projectID, "Due later", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestSchedulerDoesNotDoubleStart(t *testing.T) {
 	i, _ := setupAbortTest(t, textSSE("Working on it."))
 	projectID := store.ProjectID(i.Directory)
 
-	card, err := board.Add(projectID, "Started by hand", nil)
+	card, err := board.Add(projectID, "Started by hand", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +146,7 @@ func TestSchedulerStartPinsDefaultModel(t *testing.T) {
 	cfg := fmt.Sprintf(`{
 		"model": "minimax/bad",
 		"small_model": "test/m",
+		"board": {"auto_review": false},
 		"provider": {"test": {"name": "test",
 			"options": {"baseURL": %q, "apiKey": "k"},
 			"models": {"m": {"name": "m", "tool_call": true,
@@ -158,7 +159,7 @@ func TestSchedulerStartPinsDefaultModel(t *testing.T) {
 	i := New(work)
 	projectID := store.ProjectID(i.Directory)
 
-	card, err := board.Add(projectID, "Scheduled with default model", nil)
+	card, err := board.Add(projectID, "Scheduled with default model", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,6 +195,17 @@ func TestSchedulerStartPinsDefaultModel(t *testing.T) {
 	// the turn ran on that model: the reply proves the prompt resolved to
 	// the connected provider instead of erroring on the config's minimax
 	waitUntil(t, 5*time.Second, func() bool { return watcherReplied(i, sess, "Working on it.") })
+	// the post-idle board writes (review move, status sync) must have
+	// landed before the temp dir is cleaned up
+	waitUntil(t, 5*time.Second, func() bool {
+		cards, _ := board.Get(projectID)
+		for _, c := range cards {
+			if c.ID == card.ID {
+				return c.Status != "running"
+			}
+		}
+		return false
+	})
 	msgs, err := i.Mgr.LoadMessages(sess)
 	if err != nil {
 		t.Fatal(err)

@@ -21,7 +21,7 @@ import (
 // so a non-open column is reached with a move.
 func linkCard(t *testing.T, i *Instance, s *session.Session, title, column string) board.Card {
 	t.Helper()
-	card, err := board.Add(store.ProjectID(i.Directory), title, nil)
+	card, err := board.Add(store.ProjectID(i.Directory), title, board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestBoardToolMovesLinkedCardToDone(t *testing.T) {
 func TestBoardToolListAndExplicitCard(t *testing.T) {
 	i, s := setupAbortTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	linked := linkCard(t, i, s, "Linked task", "inprogress")
-	other, err := board.Add(store.ProjectID(i.Directory), "Other task", nil)
+	other, err := board.Add(store.ProjectID(i.Directory), "Other task", board.AddOpts{Isolate: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestStartCardPromptsAttachments(t *testing.T) {
 	atts := []board.Attachment{
 		{Type: "file", MIME: "image/png", URL: "data:image/png;base64,AAAA", Filename: "shot.png"},
 	}
-	card, err := board.Add(projectID, "Fix the login page", atts)
+	card, err := board.Add(projectID, "Fix the login page", board.AddOpts{Attachments: atts})
 	if err != nil {
 		t.Fatal(err)
 	}

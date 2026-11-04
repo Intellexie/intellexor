@@ -11,10 +11,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Intellexie/intellexor/internal/board"
 	"github.com/Intellexie/intellexor/internal/config"
 	"github.com/Intellexie/intellexor/internal/provider"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/tool"
+	"github.com/Intellexie/intellexor/internal/worktree"
 )
 
 var (
@@ -42,6 +44,13 @@ func registryFor(i *Instance) *tool.Registry {
 		i.Hub.Publish("board.updated", map[string]any{"directory": i.Directory})
 	}, StartCard: func(projectID, cardID string) (string, error) {
 		return startCard(i, projectID, cardID)
+	}, MergeCard: func(projectID, cardID string) (board.Card, error) {
+		return MergeCard(i, projectID, cardID)
+	}, ResolveReview: func(projectID, cardID string, approve bool) (board.Card, error) {
+		if approve {
+			return ApproveCard(i, projectID, cardID)
+		}
+		return RejectCard(i, projectID, cardID)
 	}}
 	questionTool := tool.QuestionTool{Svc: i.Quest}
 	alarmTool := tool.AlarmTool{OnUpdate: func() {
@@ -168,7 +177,21 @@ func instructionText(dir string) string {
 
 // ---- subagents ----
 
-func (i *Instance) runSubagent(parentCtx context.Context, parent *session.Session, in tool.SubagentInput) (string, string, error) {
+func (i *Instance) runSubagent(parentCtx context.Context, parent *session.Session, parentAgent string, in tool.SubagentInput) (string, string, error) {
+	// hard backstop: an agent that does not have the task tool (e.g. explore)
+	// must not spawn subagents, even if the model emits a task call that was
+	// never offered to it
+	pAgent := parentAgent
+	if pAgent == "" {
+		pAgent = parent.Agent
+	}
+	if pAgent == "" {
+		pAgent = "build"
+	}
+	if pdef, perr := i.Agent(pAgent); perr == nil && !pdef.allowsTool("task") {
+		return "", "", fmt.Errorf("agent %q cannot spawn subagents", pAgent)
+	}
+
 	agent, aerr := i.Agent(in.SubagentType)
 	if aerr != nil {
 		// surface unknown subagent types to the model instead of silently
@@ -199,6 +222,22 @@ func (i *Instance) runSubagent(parentCtx context.Context, parent *session.Sessio
 	}
 	if err := i.Mgr.Create(child); err != nil {
 		return "", "", err
+	}
+	// worktree isolation: a fresh subagent can run in its own worktree on
+	// its own branch (requested via the task tool's isolation argument, or
+	// the config default) — created after the session exists so the branch
+	// is named after it, before the first prompt so all its tools work there
+	if in.Isolation == "worktree" || worktree.ConfigOf(i.Directory).Enabled {
+		if wt, werr := worktree.Create(i.Directory, child.ID, worktree.ConfigOf(i.Directory)); werr == nil {
+			if fresh, uerr := i.Mgr.Update(child.ID, func(u *session.Session) {
+				u.Directory = wt.Path
+				u.Worktree = &session.WorktreeInfo{Branch: wt.Branch, Path: wt.Path, Base: wt.Base}
+			}); uerr == nil {
+				*child = *fresh
+			} else {
+				_ = worktree.Remove(i.Directory, wt)
+			}
+		}
 	}
 	i.Hub.Publish("session.created", map[string]any{"sessionID": child.ID, "info": *child})
 	if in.OnChild != nil {

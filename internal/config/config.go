@@ -60,6 +60,8 @@ type Info struct {
 	Permission        map[string]any         `json:"permission,omitempty"`
 	Compaction        *CompactionCfg         `json:"compaction,omitempty"`
 	ToolOutput        *ToolOutputCfg         `json:"tool_output,omitempty"`
+	Worktree          *WorktreeCfg           `json:"worktree,omitempty"`
+	Board             *BoardCfg              `json:"board,omitempty"`
 	DisabledTools     []string               `json:"disabled_tools,omitempty"`
 	Commands          map[string]CommandCfg  `json:"commands,omitempty"`
 	Agent             map[string]AgentCfg    `json:"agent,omitempty"`
@@ -77,6 +79,69 @@ type CompactionCfg struct {
 type ToolOutputCfg struct {
 	MaxLines *int `json:"max_lines,omitempty"`
 	MaxBytes *int `json:"max_bytes,omitempty"`
+}
+
+// WorktreeCfg configures optional per-session git worktree isolation. When
+// enabled, board cards (and task subagents) run in a fresh git worktree on
+// their own branch instead of the shared working directory, so several can
+// work in parallel without touching each other's files.
+type WorktreeCfg struct {
+	// Enabled turns isolation on by default for every card and task
+	// subagent. Individual cards can still opt in via their isolate flag
+	// even when this is false.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Dir is where worktrees are created. Relative paths resolve against
+	// the repository root; the default ".intellexor/worktrees" keeps the
+	// worktree inside the repo (excluded via .git/info/exclude) so project
+	// config and AGENTS.md resolve identically.
+	Dir string `json:"dir,omitempty"`
+	// Base is the ref new worktrees branch from. Empty means the repo's
+	// current HEAD.
+	Base string `json:"base,omitempty"`
+}
+
+// BoardCfg configures the kanban board's automation: how many cards may run
+// at once, and the review stage that inspects a card's work before it counts
+// as done.
+type BoardCfg struct {
+	// MaxRunning caps how many cards are started automatically at once
+	// (dependency triggers). 0 means unlimited; manual starts are never
+	// capped.
+	MaxRunning *int `json:"max_running,omitempty"`
+	// ReviewAgent is the agent that reviews a card's changes when its
+	// session goes idle and the card moves to review. Empty disables the
+	// automatic review run (the review column itself stays active).
+	ReviewAgent string `json:"review_agent,omitempty"`
+	// AutoReview turns the automatic review run on/off (default on, when a
+	// ReviewAgent is set).
+	AutoReview *bool `json:"auto_review,omitempty"`
+}
+
+// ReviewAgentOrDefault returns the configured review agent, defaulting to
+// the built-in "review" agent.
+func (b *BoardCfg) ReviewAgentOrDefault() string {
+	if b != nil && b.ReviewAgent != "" {
+		return b.ReviewAgent
+	}
+	return "review"
+}
+
+// AutoReviewOn reports whether the review agent should run automatically
+// when a card moves to review (default true).
+func (b *BoardCfg) AutoReviewOn() bool {
+	if b == nil || b.AutoReview == nil {
+		return true
+	}
+	return *b.AutoReview
+}
+
+// MaxRunningOrZero returns the automatic-start concurrency cap (0 =
+// unlimited).
+func (b *BoardCfg) MaxRunningOrZero() int {
+	if b == nil || b.MaxRunning == nil {
+		return 0
+	}
+	return *b.MaxRunning
 }
 
 type CommandCfg struct {
@@ -522,6 +587,34 @@ func merge(dst, src *Info) {
 	}
 	if src.ToolOutput != nil {
 		dst.ToolOutput = src.ToolOutput
+	}
+	if src.Worktree != nil {
+		if dst.Worktree == nil {
+			dst.Worktree = &WorktreeCfg{}
+		}
+		if src.Worktree.Enabled != nil {
+			dst.Worktree.Enabled = src.Worktree.Enabled
+		}
+		if src.Worktree.Dir != "" {
+			dst.Worktree.Dir = src.Worktree.Dir
+		}
+		if src.Worktree.Base != "" {
+			dst.Worktree.Base = src.Worktree.Base
+		}
+	}
+	if src.Board != nil {
+		if dst.Board == nil {
+			dst.Board = &BoardCfg{}
+		}
+		if src.Board.MaxRunning != nil {
+			dst.Board.MaxRunning = src.Board.MaxRunning
+		}
+		if src.Board.ReviewAgent != "" {
+			dst.Board.ReviewAgent = src.Board.ReviewAgent
+		}
+		if src.Board.AutoReview != nil {
+			dst.Board.AutoReview = src.Board.AutoReview
+		}
 	}
 	for k, v := range src.Permission {
 		if dst.Permission == nil {

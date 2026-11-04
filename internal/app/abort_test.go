@@ -75,6 +75,7 @@ func setupAbortTest(t *testing.T, h http.HandlerFunc) (*Instance, *session.Sessi
 	cfg := fmt.Sprintf(`{
 		"model": "test/m",
 		"small_model": "test/m",
+		"board": {"auto_review": false},
 		"provider": {"test": {"name": "test",
 			"options": {"baseURL": %q, "apiKey": "k"},
 			"models": {"m": {"name": "m", "tool_call": true,

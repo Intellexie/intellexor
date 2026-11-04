@@ -35,9 +35,10 @@ func TestAgentOrdering(t *testing.T) {
 		names = append(names, a.Name)
 	}
 	// aaa (order -5) before the built-ins; plan moved between orchestrator
-	// (20) and general (30); reviewer and the untouched built-ins keep their
+	// (20) and general (30); the built-in review agent sits at 15, between plan
+	// and orchestrator; reviewer and the untouched built-ins keep their
 	// relative positions (reviewer defaults to 1000, after explore)
-	want := []string{"aaa", "build", "plan", "orchestrator", "general", "explore", "reviewer"}
+	want := []string{"aaa", "build", "plan", "review", "orchestrator", "general", "explore", "reviewer"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("agents = %v, want %v", names, want)
 	}

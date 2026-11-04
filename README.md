@@ -368,6 +368,33 @@ default — this covers vLLM, one-api, OpenRouter, Ollama, etc:
   measured prompt size plus the unmeasured growth since) reaches the window
   minus that reserve — so the summary request itself still fits.
   `/compact` in the composer summarizes the session on demand either way.
+- `worktree` enables optional **git worktree isolation** for parallel work:
+  `"enabled": true` runs every board card and `task` subagent in a fresh
+  worktree on its own branch (`itx/…`) instead of the shared directory, so
+  several sessions can edit the same repository at once. `"dir"` overrides
+  the worktree location (default `.intellexor/worktrees` inside the repo,
+  excluded via `.git/info/exclude` so project config and `AGENTS.md` resolve
+  identically), `"base"` overrides the ref new worktrees branch from
+  (default: current HEAD). Individual cards can opt in via their *Isolate in
+  a git worktree* toggle (or the board tool's `add … isolate: true`) even
+  when the default is off, and the `task` tool accepts
+  `isolation: "worktree"` per call. The card shows the branch, offers a
+  diff against the base (`GET /session/:id/worktree/diff`) and a **Merge**
+  action (`POST /board/card/:id/merge`) that commits pending worktree
+  changes, merges the branch into the repo and removes the worktree.
+- `board` configures the kanban board's automation: `"max_running"` caps how
+  many cards the dependency flow starts at once (0 = unlimited; manual
+  starts are never capped), `"review_agent"` names the agent that reviews a
+  card's changes when it moves to the review column (default the built-in
+  `review` agent; empty disables the automatic run), and `"auto_review":
+  false` turns the automatic review run off. Cards can pick their own agent
+  and model, carry a description and acceptance criteria (both sent to the
+  agent with the task), and declare `blockedBy` dependencies — a card only
+  starts once all of its blockers are done. When a card's session goes idle
+  it moves to review; approving moves it to done (merging an isolated
+  worktree), rejecting sends it back to in-progress with the findings as
+  the next prompt. Provider failures (429/5xx) are retried once, then the
+  card is marked blocked with the error.
 
 ## HTTP API
 
@@ -399,6 +426,11 @@ values as bare JSON. Highlights:
   `POST /board/import?mode=replace|merge` — body is such a file: replace
   makes the board exactly the imported one, merge appends its cards with
   fresh ids (done-links remapped); the board header offers both as a choice
+- `POST /board/card/:id/merge` — merge a worktree-isolated card's branch
+  back into the repository and remove the worktree (the card's session
+  returns to the main directory);
+  `GET /session/:id/worktree/diff` — diff of an isolated session's worktree
+  against its base ref
 - `POST /session/:id/summarize` — compact the context now (also the `/compact`
   command): the conversation is summarized into a `summary: true` assistant
   message and later requests replay history from it; runs automatically

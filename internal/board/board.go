@@ -17,8 +17,10 @@ import (
 	"github.com/Intellexie/intellexor/internal/util"
 )
 
-// Columns of the board, in display order.
-var Columns = []string{"open", "inprogress", "done"}
+// Columns of the board, in display order. Review sits between in-progress
+// and done: a card whose session went idle lands there for inspection
+// (optionally by a review agent) before it counts as done.
+var Columns = []string{"open", "inprogress", "review", "done"}
 
 // ErrBadColumn is returned when a card targets an unknown column.
 var ErrBadColumn = errors.New("unknown column")
@@ -48,6 +50,14 @@ var ErrBadSession = errors.New("only cards waiting in the open column can be lin
 // to notify watcher sessions.
 var OnMovedToDone func(projectID string, card Card)
 
+// OnStopped, when set, is called after a card is moved from inprogress back
+// to open — the "stop the agent" flow. The card's session link is cleared
+// (a card back in open is waiting and unowned again, so it can be started
+// fresh) and the hook hands the released session ID to the app layer, which
+// aborts the agent that was working on the card. Like OnMovedToDone it is
+// called without the board lock held, from any entry point.
+var OnStopped func(projectID, sessionID string)
+
 // Attachment is a file (usually an image) attached to a card when it is
 // created — the same shape the chat composer sends as a prompt part
 // (type/mime/url/filename with a data URL), so attachments can be passed to
@@ -67,24 +77,57 @@ type Attachment struct {
 // always sort by it. SessionID optionally links the card to the session
 // working on it (set when the card is started from the board). Watchers
 // lists session IDs watching the card: when it is marked done, each of them
-// is prompted with a message on behalf of the user. Link is the ID of the
-// card this one triggers: when it is moved to done, that card is started
-// automatically (the Start-button flow). Attachments are files (usually
+// is prompted with a message on behalf of the user. BlockedBy lists card
+// IDs this one depends on: it can only start once every blocker is done
+// (the legacy single Link field is migrated into it on load and kept
+// accepted, deprecated, in the API). Attachments are files (usually
 // images) attached at creation, passed to the session prompt on start.
 // StartAt is an optional scheduled start time (unix milliseconds, like
 // Created): when it passes, a background scheduler starts the card the same
 // way the Start button does; it is cleared once the card has started.
+// Isolate opts the card into git worktree isolation: when it is started,
+// the session runs in a fresh worktree on its own branch instead of the
+// shared directory. Branch and WorktreePath record the worktree the
+// running session was isolated into (set on start, cleared on merge).
+//
+// Richer cards: Agent and Model pick the agent/model the card runs with
+// (empty = the defaults); Description and Criteria are sent to the agent
+// alongside the title and shown on the card. Findings holds the review
+// agent's findings (set when the review session finishes); ReviewSessionID
+// links the review session while it inspects the card.
+//
+// Live status: Status is the card's runtime state — "running", "waiting"
+// (needs attention: pending question or permission), "error" or "blocked"
+// (provider failure after its retry; "" means idle). StatusText carries
+// the error/waiting detail, StartedAt is the last start (unix ms, for
+// elapsed time) and Cost/Tokens snapshot the linked session's usage.
 type Card struct {
-	ID          string       `json:"id"`
-	Title       string       `json:"title"`
-	Column      string       `json:"column"`
-	Order       int          `json:"order"`
-	Created     int64        `json:"created"`
-	SessionID   string       `json:"sessionID,omitempty"`
-	Watchers    []string     `json:"watchers,omitempty"`
-	Link        string       `json:"link,omitempty"`
-	StartAt     int64        `json:"startAt,omitempty"`
-	Attachments []Attachment `json:"attachments,omitempty"`
+	ID           string       `json:"id"`
+	Title        string       `json:"title"`
+	Column       string       `json:"column"`
+	Order        int          `json:"order"`
+	Created      int64        `json:"created"`
+	SessionID    string       `json:"sessionID,omitempty"`
+	Watchers     []string     `json:"watchers,omitempty"`
+	Link         string       `json:"link,omitempty"` // deprecated: migrated into BlockedBy
+	BlockedBy    []string     `json:"blockedBy,omitempty"`
+	StartAt      int64        `json:"startAt,omitempty"`
+	Attachments  []Attachment `json:"attachments,omitempty"`
+	Isolate      bool         `json:"isolate,omitempty"`
+	Branch       string       `json:"branch,omitempty"`
+	WorktreePath string       `json:"worktreePath,omitempty"`
+	Agent        string       `json:"agent,omitempty"`
+	Model        string       `json:"model,omitempty"`
+	Description  string       `json:"description,omitempty"`
+	Criteria     string       `json:"criteria,omitempty"`
+	Findings     string       `json:"findings,omitempty"`
+
+	ReviewSessionID string  `json:"reviewSessionID,omitempty"`
+	Status          string  `json:"status,omitempty"`
+	StatusText      string  `json:"statusText,omitempty"`
+	StartedAt       int64   `json:"startedAt,omitempty"`
+	Cost            float64 `json:"cost,omitempty"`
+	Tokens          float64 `json:"tokens,omitempty"`
 }
 
 var mu sync.Mutex
@@ -107,12 +150,40 @@ func load(projectID string) ([]Card, error) {
 	}
 	// cards created before IDs became plain numbers keep working, but are
 	// renumbered (and the renumber persisted) the first time they are loaded
-	if normalizeIDs(cards) {
+	changed := normalizeIDs(cards)
+	// the deprecated single Link migrates into BlockedBy — on the *target*:
+	// "when A is done, B starts" is the dependency "B is blockedBy A". The
+	// Link field is kept as-is so old clients reading the JSON keep working.
+	byID := map[string]int{}
+	for i := range cards {
+		byID[cards[i].ID] = i
+	}
+	for _, c := range cards {
+		if c.Link == "" {
+			continue
+		}
+		ti, ok := byID[c.Link]
+		if !ok || containsID(cards[ti].BlockedBy, c.ID) {
+			continue
+		}
+		cards[ti].BlockedBy = append(cards[ti].BlockedBy, c.ID)
+		changed = true
+	}
+	if changed {
 		if err := save(projectID, cards); err != nil {
 			return nil, err
 		}
 	}
 	return cards, nil
+}
+
+func containsID(ids []string, id string) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeIDs assigns a numeric ID to every card that still carries a
@@ -242,11 +313,26 @@ func ForSession(projectID, sessionID string) (Card, bool, error) {
 	return Card{}, false, nil
 }
 
+// AddOpts carries the optional fields of a new card: attachments and the
+// worktree-isolation flag (as before), plus the richer card fields — the
+// agent/model the card runs with, its description and acceptance criteria,
+// and the cards it is blocked by.
+type AddOpts struct {
+	Attachments []Attachment
+	Isolate     bool
+	Agent       string
+	Model       string
+	Description string
+	Criteria    string
+	BlockedBy   []string
+}
+
 // Add creates a card at the end of the open column. Cards can only be
 // created in open — work begins by moving a card to inprogress (which links
 // the session working on it), never by creating it there. Attachments, when
 // given, ride along and are prompted to the session when the card starts.
-func Add(projectID, title string, attachments []Attachment) (Card, error) {
+// Isolate opts the card into git worktree isolation when it is started.
+func Add(projectID, title string, o AddOpts) (Card, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	cards, err := load(projectID)
@@ -259,7 +345,13 @@ func Add(projectID, title string, attachments []Attachment) (Card, error) {
 		Column:      "open",
 		Order:       len(inColumn(cards, "open")), // end of the column
 		Created:     util.Now(),
-		Attachments: attachments,
+		Attachments: o.Attachments,
+		Isolate:     o.Isolate,
+		Agent:       o.Agent,
+		Model:       o.Model,
+		Description: o.Description,
+		Criteria:    o.Criteria,
+		BlockedBy:   o.BlockedBy,
 	}
 	cards = append(cards, card)
 	renumber(cards)
@@ -281,25 +373,31 @@ func Add(projectID, title string, attachments []Attachment) (Card, error) {
 // the card is still waiting in open and unowned — the same precondition
 // startCard enforces. Moving a card out of open clears its
 // start schedule (a schedule only makes sense for a waiting card — starting
-// it, by hand or by the scheduler, consumes it). Moving a card into done
-// fires OnMovedToDone (after the lock is released).
+// it, by hand or by the scheduler, consumes it). Moving a card from
+// inprogress back to open stops it: the session link is cleared (the card
+// is waiting and unowned again) and OnStopped fires so the released
+// session's agent is aborted. Moving a card into done fires OnMovedToDone
+// (both after the lock is released).
 func Update(projectID, id string, title *string, column, before, sessionID *string) (Card, error) {
-	card, movedDone, err := updateLocked(projectID, id, title, column, before, sessionID)
+	card, movedDone, stoppedSession, err := updateLocked(projectID, id, title, column, before, sessionID)
+	if err == nil && stoppedSession != "" && OnStopped != nil {
+		OnStopped(projectID, stoppedSession)
+	}
 	if err == nil && movedDone && OnMovedToDone != nil {
 		OnMovedToDone(projectID, card)
 	}
 	return card, err
 }
 
-func updateLocked(projectID, id string, title *string, column, before, sessionID *string) (Card, bool, error) {
+func updateLocked(projectID, id string, title *string, column, before, sessionID *string) (Card, bool, string, error) {
 	if column != nil && !validColumn(*column) {
-		return Card{}, false, ErrBadColumn
+		return Card{}, false, "", ErrBadColumn
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	cards, err := load(projectID)
 	if err != nil {
-		return Card{}, false, err
+		return Card{}, false, "", err
 	}
 	idx := -1
 	for i := range cards {
@@ -309,7 +407,7 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 		}
 	}
 	if idx < 0 {
-		return Card{}, false, ErrNotFound
+		return Card{}, false, "", ErrNotFound
 	}
 	// linking a session is only meaningful for a card that is still waiting
 	// in open and not owned by another session — the same precondition
@@ -317,7 +415,7 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 	// that is in progress or done (clearing a sessionID is always allowed)
 	if sessionID != nil && *sessionID != "" {
 		if cards[idx].Column != "open" || (cards[idx].SessionID != "" && cards[idx].SessionID != *sessionID) {
-			return Card{}, false, ErrBadSession
+			return Card{}, false, "", ErrBadSession
 		}
 	}
 	if title != nil {
@@ -327,6 +425,7 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 		cards[idx].SessionID = *sessionID
 	}
 	movedDone := false
+	stoppedSession := ""
 	if column != nil {
 		from := cards[idx].Column
 		to := *column
@@ -337,6 +436,14 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 		// a done-link trigger
 		if from == "open" && to != "open" {
 			cards[idx].StartAt = 0
+		}
+		// returning to open stops the card: drop the stale session link so
+		// the card is waiting and unowned again (a fresh Start can link a
+		// new session), and let the caller abort the released agent — from
+		// inprogress (the stop flow) or from review (dragged back)
+		if (from == "inprogress" || from == "review") && to == "open" && cards[idx].SessionID != "" {
+			stoppedSession = cards[idx].SessionID
+			cards[idx].SessionID = ""
 		}
 		// target column in display order, without the moved card
 		col := inColumn(cards, to)
@@ -372,10 +479,179 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 		}
 	}
 	if err := save(projectID, cards); err != nil {
-		return Card{}, false, err
+		return Card{}, false, "", err
 	}
-	return cards[idx], movedDone, nil
+	return cards[idx], movedDone, stoppedSession, nil
 }
+
+// SetIsolate toggles the card's worktree isolation flag. Only cards still
+// waiting in open can change it — a started card already has its
+// environment fixed.
+func SetIsolate(projectID, id string, isolate bool) (Card, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	idx := -1
+	for i := range cards {
+		if cards[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Card{}, ErrNotFound
+	}
+	if cards[idx].Column != "open" {
+		return Card{}, ErrNotOpen
+	}
+	cards[idx].Isolate = isolate
+	if err := save(projectID, cards); err != nil {
+		return Card{}, err
+	}
+	return cards[idx], nil
+}
+
+// SetWorktree records (or clears, with empty branch) the worktree the
+// card's session was isolated into: the branch name and the worktree path,
+// shown on the card and used by the merge flow.
+func SetWorktree(projectID, id, branch, path string) (Card, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	idx := -1
+	for i := range cards {
+		if cards[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Card{}, ErrNotFound
+	}
+	cards[idx].Branch = branch
+	cards[idx].WorktreePath = path
+	if err := save(projectID, cards); err != nil {
+		return Card{}, err
+	}
+	return cards[idx], nil
+}
+
+// Edit applies fn to the card under the board lock and persists the change.
+// It is the generic mutation used for the richer card fields (description,
+// criteria, agent, model, blockers) that the older dedicated setters do not
+// cover. ErrNotFound when the card does not exist.
+func Edit(projectID, id string, fn func(c *Card) error) (Card, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	idx := -1
+	for i := range cards {
+		if cards[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Card{}, ErrNotFound
+	}
+	if err := fn(&cards[idx]); err != nil {
+		return Card{}, err
+	}
+	if err := save(projectID, cards); err != nil {
+		return Card{}, err
+	}
+	return cards[idx], nil
+}
+
+// SetBlockedBy replaces the card's dependency list. Every blocker must be
+// an existing card other than the card itself; duplicates are dropped.
+// An empty list clears the dependencies.
+func SetBlockedBy(projectID, id string, blockers []string) (Card, error) {
+	seen := map[string]bool{}
+	var clean []string
+	for _, b := range blockers {
+		if b == id || seen[b] {
+			continue
+		}
+		seen[b] = true
+		clean = append(clean, b)
+	}
+	card, err := Edit(projectID, id, func(c *Card) error {
+		for _, b := range clean {
+			if _, err := findCard(projectID, b); err != nil {
+				return err
+			}
+		}
+		c.BlockedBy = clean
+		return nil
+	})
+	if err == ErrNotFound {
+		return Card{}, ErrBadLink // a blocker that does not exist
+	}
+	return card, err
+}
+
+// findCard returns the card with the given ID (caller holds the lock or
+// accepts the race-free file read).
+func findCard(projectID, id string) (Card, error) {
+	cards, err := load(projectID)
+	if err != nil {
+		return Card{}, err
+	}
+	for _, c := range cards {
+		if c.ID == id {
+			return c, nil
+		}
+	}
+	return Card{}, ErrNotFound
+}
+
+// Runtime is a card's live status snapshot, updated by the app layer as the
+// linked session works. Status is "" (idle), "running", "waiting" (needs
+// attention: pending question or permission), "error" or "blocked" (provider
+// failure after the card's retry); StatusText carries the detail.
+type Runtime struct {
+	Status     string
+	StatusText string
+	StartedAt  int64
+	Cost       float64
+	Tokens     float64
+}
+
+// SetRuntime stores the card's live status snapshot and reports whether
+// anything changed (so callers can skip the board.updated broadcast when
+// nothing did).
+func SetRuntime(projectID, id string, rt Runtime) (Card, bool, error) {
+	card, err := Edit(projectID, id, func(c *Card) error {
+		if c.Status == rt.Status && c.StatusText == rt.StatusText && c.StartedAt == rt.StartedAt &&
+			c.Cost == rt.Cost && c.Tokens == rt.Tokens {
+			return errUnchanged
+		}
+		c.Status = rt.Status
+		c.StatusText = rt.StatusText
+		c.StartedAt = rt.StartedAt
+		c.Cost = rt.Cost
+		c.Tokens = rt.Tokens
+		return nil
+	})
+	if err == errUnchanged {
+		return card, false, nil
+	}
+	return card, err == nil, err
+}
+
+// errUnchanged is the sentinel Edit fn returns when the runtime snapshot is
+// already stored — not an error, a "nothing to do" signal.
+var errUnchanged = errors.New("unchanged")
 
 // Watch adds the session to (watch=true) or removes it from (watch=false)
 // the card's watchers.
@@ -460,7 +736,38 @@ func SetLink(projectID, id, target string) (Card, error) {
 			return Card{}, ErrBadLink
 		}
 	}
+	oldTarget := cards[idx].Link
 	cards[idx].Link = target
+	// keep the dependency list in sync: "when this card is done, the target
+	// starts" is the dependency "target is blockedBy this card" — stored on
+	// the target, where the dependency flow reads it
+	ti := -1
+	for i := range cards {
+		if cards[i].ID == target {
+			ti = i
+			break
+		}
+	}
+	if ti >= 0 && target != "" {
+		if !containsID(cards[ti].BlockedBy, id) {
+			cards[ti].BlockedBy = append(cards[ti].BlockedBy, id)
+		}
+	}
+	// unlink: drop the dependency the old target got from this card
+	if oldTarget != "" && oldTarget != target {
+		for i := range cards {
+			if cards[i].ID != oldTarget {
+				continue
+			}
+			var out []string
+			for _, b := range cards[i].BlockedBy {
+				if b != id {
+					out = append(out, b)
+				}
+			}
+			cards[i].BlockedBy = out
+		}
+	}
 	if err := save(projectID, cards); err != nil {
 		return Card{}, err
 	}
@@ -518,6 +825,15 @@ func Delete(projectID, id string) error {
 		}
 		if c.Link == id {
 			c.Link = "" // the trigger target is gone
+		}
+		if containsID(c.BlockedBy, id) {
+			var out []string
+			for _, b := range c.BlockedBy {
+				if b != id {
+					out = append(out, b)
+				}
+			}
+			c.BlockedBy = out // the blocker is gone: the card unblocks
 		}
 		kept = append(kept, c)
 	}

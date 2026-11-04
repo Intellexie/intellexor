@@ -1685,6 +1685,7 @@ function initSidebar() {
 // intentionally absent: the panel is a working queue, not an archive.
 const BOARD_PANEL_COLUMNS = [
   { id: "inprogress", label: "In Progress" },
+  { id: "review", label: "Review" },
   { id: "open", label: "Open" },
 ];
 
@@ -3261,15 +3262,7 @@ function renderUserMessage(info, parts, sid) {
   if (!text && !files.length) return null;
   if (files.length) {
     const row = el("div", "attach-row");
-    for (const f of files) {
-      if (f.mime && f.mime.startsWith("image/")) {
-        const chip = el("div", "attach-chip");
-        chip.innerHTML = `<img src="${esc(f.url)}"><span>${esc(f.filename || "image")}</span>`;
-        row.appendChild(chip);
-      } else {
-        row.appendChild(el("div", "attach-chip", ICONS.file + `<span>${esc(f.filename || "file")}</span>`));
-      }
-    }
+    for (const f of files) row.appendChild(attachmentChip(f));
     wrap.appendChild(row);
   }
   if (text) {
@@ -3433,7 +3426,7 @@ function renderPart(p, info) {
       return renderTool(p, info);
     case "file": {
       const row = el("div", "attach-row");
-      row.appendChild(el("div", "attach-chip", ICONS.file + `<span>${esc(p.filename || "file")}</span>`));
+      row.appendChild(attachmentChip(p));
       return row;
     }
     case "retry":
@@ -3674,6 +3667,7 @@ function renderTurnFiles(files) {
 const BOARD_COLUMNS = [
   { id: "open", label: "Open" },
   { id: "inprogress", label: "In Progress" },
+  { id: "review", label: "Review" },
   { id: "done", label: "Done" },
 ];
 
@@ -4312,6 +4306,62 @@ function openModal(title, build) {
   return ov;
 }
 
+// Builds an attachment chip for a {type, mime, url, filename} file part —
+// the shape stored on board cards and chat messages. Chips with content
+// (a data URL) are clickable and open the attachment popup; used on board
+// cards, in chat messages and in the composers.
+function attachmentChip(a) {
+  const chip = el("div", "attach-chip");
+  if (a.mime && a.mime.startsWith("image/")) {
+    chip.innerHTML = `<img src="${esc(a.url)}"><span>${esc(a.filename || "image")}</span>`;
+  } else {
+    chip.innerHTML = ICONS.file + `<span>${esc(a.filename || "file")}</span>`;
+  }
+  if (a.url) {
+    chip.classList.add("clickable");
+    chip.title = "Click to view " + (a.filename || "attachment");
+    chip.onclick = (e) => { e.stopPropagation(); openAttachmentModal(a); };
+  }
+  return chip;
+}
+
+// Opens an attachment (a file part with an inline data URL) in a popup:
+// markdown is rendered, other text shown as-is, images at full size and
+// binaries with a download link.
+function openAttachmentModal(att) {
+  const name = att.filename || "attachment";
+  const mime = att.mime || "";
+  const isImg = mime.startsWith("image/");
+  const isMd = mime === "text/markdown" || /\.md$/i.test(name);
+  const isText = !isImg && (!mime || mime.startsWith("text/") || /^(application\/(json|xml|javascript|yaml|x-yaml))$/.test(mime) || /(\+json|\+xml)$/.test(mime));
+  openModal(name, (modal, ov) => {
+    const body = el("div", "att-view");
+    modal.appendChild(body);
+    if (isImg) {
+      const img = el("img", "att-img");
+      img.src = att.url;
+      img.alt = name;
+      body.appendChild(img);
+    } else if (isText) {
+      // data URLs fetch fine and decode the base64 payload for us
+      fetch(att.url).then((r) => r.text()).then((txt) => {
+        if (isMd) body.appendChild(el("div", "assistant-text", renderMarkdown(txt)));
+        else body.appendChild(el("pre", "att-pre", esc(txt)));
+      }).catch((e) => {
+        body.textContent = "Could not load attachment: " + (e && e.message || e);
+      });
+    } else {
+      body.appendChild(el("div", "att-binary", "Binary file" + (mime ? " (" + esc(mime) + ")" : "") + "."));
+    }
+    const foot = el("div", "m-actions");
+    const dl = el("a", "btn ghost", "Download");
+    dl.href = att.url;
+    dl.download = name;
+    foot.appendChild(dl);
+    modal.appendChild(foot);
+  });
+}
+
 // Cards can only be created in the Open column (work starts by moving a
 // card to In Progress), so there is no column picker here. The title is
 // multiline: Enter creates the card, Ctrl+Enter (or Shift+Enter) inserts a
@@ -4348,6 +4398,35 @@ function openAddCardModal() {
     };
     input.oninput = () => autosize(input);
 
+    // richer card fields: description and acceptance criteria go to the
+    // agent with the task; agent/model pick how the card runs
+    const descField = el("div", "m-field");
+    descField.appendChild(el("label", "m-label", "Description"));
+    const desc = el("textarea", "m-textarea");
+    desc.rows = 2;
+    desc.placeholder = "Optional context beyond the title…";
+    descField.appendChild(desc);
+    modal.appendChild(descField);
+
+    const critField = el("div", "m-field");
+    critField.appendChild(el("label", "m-label", "Acceptance criteria"));
+    const crit = el("textarea", "m-textarea");
+    crit.rows = 2;
+    crit.placeholder = "What must hold for this card to be done…";
+    critField.appendChild(crit);
+    modal.appendChild(critField);
+
+    // agent/model: the composer's pickers, bound to the new card
+    const am = buildCardAgentModelRow("", "");
+    modal.appendChild(am.row);
+
+    // worktree isolation: the card's session runs in its own git worktree
+    // on its own branch, so several cards can edit code in parallel
+    const isoCb = el("input");
+    isoCb.type = "checkbox";
+    const isoWrap = el("label", "m-check");
+    isoWrap.append(isoCb, el("span", "", "Isolate in a git worktree (own branch, mergeable when done)"));
+
     const actions = el("div", "m-actions");
     const attachBtn = el("button", "c-btn", ICONS.plus);
     attachBtn.title = "Attach files";
@@ -4367,7 +4446,11 @@ function openAddCardModal() {
       if (!title) { input.focus(); return; }
       create.disabled = true;
       try {
-        await post("/board/card", { title, column: "open", attachments: files });
+        await post("/board/card", {
+          title, column: "open", attachments: files, isolate: isoCb.checked,
+          description: desc.value, criteria: crit.value,
+          ...am.get(),
+        });
         ov.remove();
         await loadBoard();
         renderBoard();
@@ -4383,14 +4466,36 @@ function openAddCardModal() {
       if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); commit(); }
     };
     actions.append(attachBtn, fileInput, spacer, cancel, create);
+    modal.appendChild(isoWrap);
     modal.appendChild(attachRow);
     modal.appendChild(actions);
     setTimeout(() => { autosize(input); input.focus(); }, 0);
   });
 }
 
-/* ---------- schedule a timed start ---------- */
+/* ---------- worktree diff view ---------- */
 
+// The diff of an isolated card's worktree against its base ref: fetched
+// from the card's session and shown as a plain patch.
+function openWorktreeDiffModal(c) {
+  openModal(`Diff #${esc(c.id)} — ${esc(c.branch)}`, (modal, ov) => {
+    const pre = el("pre", "m-diff");
+    pre.textContent = "Loading…";
+    modal.appendChild(pre);
+    (async () => {
+      try {
+        const diffs = await get(`/session/${c.sessionID}/worktree/diff`);
+        pre.textContent = diffs.length
+          ? diffs.map((d) => d.patch).join("\n")
+          : "No changes against the base branch.";
+      } catch (e) {
+        pre.textContent = "Failed to load diff: " + (e.message || String(e));
+      }
+    })();
+  });
+}
+
+/* ---------- schedule a timed start ---------- */
 // A card in Open can be given a startAt (unix ms): a background scheduler on
 // the server starts it when the time passes — same flow as the Start button,
 // so it works with no client connected. The dialog offers quick offsets plus
@@ -4719,8 +4824,17 @@ function buildBoardColumn(col) {
     fileInput.style.display = "none";
     fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
     attachBtn.onclick = () => fileInput.click();
+    // worktree isolation toggle for cards created here: active means the
+    // card's session will run in its own git worktree on its own branch
+    let addIsolate = false;
+    const isoBtn = el("button", "kanban-add-attach kanban-add-iso", ICONS.branch);
+    isoBtn.title = "Isolate in a git worktree: the card's session gets its own branch (click to toggle)";
+    isoBtn.onclick = () => {
+      addIsolate = !addIsolate;
+      isoBtn.classList.toggle("active", addIsolate);
+    };
     const row = el("div", "kanban-add-row");
-    row.append(attachBtn, input, fileInput);
+    row.append(attachBtn, isoBtn, input, fileInput);
     add.append(attachRow, row);
     colEl.appendChild(add);
     const commit = async () => {
@@ -4728,10 +4842,12 @@ function buildBoardColumn(col) {
       if (!title) return;
       const attachments = [...files];
       try {
-        await post("/board/card", { title, column: "open", attachments });
+        await post("/board/card", { title, column: "open", attachments, isolate: addIsolate });
         input.value = "";
         kanbanAddDraft = "";
         files.length = 0;
+        addIsolate = false;
+        isoBtn.classList.remove("active");
         redraw();
         await loadBoard();
         renderBoard();
@@ -4758,6 +4874,50 @@ function buildBoardColumn(col) {
 // payload is unreadable during dragover).
 const LINK_MIME = "application/x-board-link";
 let linkDragSource = null;
+
+// Blockers of a card that are not done yet — an open card with unmet
+// blockers renders as blocked and is not started by the dependency flow.
+function boardUnmetBlockers(c) {
+  return (c.blockedBy || []).filter((id) => {
+    const b = boardCardById(id);
+    return !b || b.column !== "done";
+  });
+}
+
+// Coarse elapsed time for the card's running status: "3m", "1h 05m".
+function fmtElapsed(sinceMs) {
+  let s = Math.max(0, Math.round((Date.now() - sinceMs) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m`;
+  return s < 10 ? "just now" : `${s}s`;
+}
+
+// Compact tokens/cost for the card's status row.
+function fmtCardUsage(cost, tokens) {
+  const parts = [];
+  if (tokens >= 1000) parts.push(Math.round(tokens / 1000) + "k tok");
+  else if (tokens) parts.push(Math.round(tokens) + " tok");
+  if (cost) parts.push("$" + (cost >= 0.01 ? cost.toFixed(2) : cost.toFixed(4)));
+  return parts.join(" · ");
+}
+
+// The card's live status row: running (with elapsed time), waiting for
+// input, blocked (provider failure) — plus the usage snapshot.
+function boardStatusRow(c) {
+  const st = c.status || "idle";
+  if (st === "idle" && !c.cost && !c.tokens) return null;
+  const row = el("div", "kanban-card-status status-" + st);
+  let label = "";
+  if (st === "running") label = `<span class="spinner">${ICONS.spinner}</span><span>running${c.startedAt ? " · " + fmtElapsed(c.startedAt) : ""}</span>`;
+  else if (st === "waiting") label = `<span>⏳ ${esc(c.statusText || "waiting for input")}</span>`;
+  else if (st === "blocked" || st === "error") label = `<span title="${esc(c.statusText || "")}">⛔ ${esc(c.statusText || st)}</span>`;
+  else label = "<span>idle</span>";
+  row.innerHTML = label;
+  const usage = fmtCardUsage(c.cost, c.tokens);
+  if (usage) row.appendChild(el("span", "kanban-card-usage", usage));
+  return row;
+}
 
 function boardCardNode(c) {
   const card = el("div", "kanban-card");
@@ -4795,19 +4955,61 @@ function boardCardNode(c) {
     card.appendChild(sched);
   }
 
-  // attachments (usually screenshots) attached at creation — shown as chips,
-  // and prompted to the session when the card is started
+  // dependency blockers: an open card whose blockers are not all done yet
+  // is waiting for them (the dependency flow starts it when they land)
+  if (c.column === "open") {
+    const unmet = boardUnmetBlockers(c);
+    if (unmet.length) {
+      const blk = el("div", "kanban-card-blocked", "⛔ <span>blocked by " + unmet.map((id) => "#" + esc(id)).join(", ") + "</span>");
+      blk.title = "This card starts automatically once all of its blockers are done.";
+      card.appendChild(blk);
+    }
+  }
+
+  // live status: running/waiting/blocked plus tokens/cost
+  const statusRow = boardStatusRow(c);
+  if (statusRow) card.appendChild(statusRow);
+
+  // the agent/model the card runs with (empty = the defaults)
+  if (c.agent || c.model) {
+    const am = el("div", "kanban-card-agent", "@" + esc(c.agent || "build") + (c.model ? " · " + esc(c.model) : ""));
+    am.title = "Agent and model this card runs with when started";
+    card.appendChild(am);
+  }
+
+  // description and acceptance criteria: sent to the agent with the task
+  // and shown on the card (truncated; full text in the tooltip)
+  if (c.description) {
+    const d = el("div", "kanban-card-desc", esc(c.description));
+    d.title = c.description;
+    card.appendChild(d);
+  }
+  if (c.criteria) {
+    const cr = el("div", "kanban-card-criteria", "✓ " + esc(c.criteria));
+    cr.title = "Acceptance criteria: " + c.criteria;
+    card.appendChild(cr);
+  }
+
+  // review findings: what the review agent found on the card's changes
+  if (c.findings && (c.column === "review" || c.column === "done")) {
+    const f = el("div", "kanban-card-findings", esc(c.findings));
+    f.title = c.findings;
+    card.appendChild(f);
+  }
+
+  // worktree isolation: the branch (and where the worktree lives) the
+  // card's session runs in
+  if (c.branch) {
+    const wt = el("div", "kanban-card-worktree", ICONS.branch + "<span>" + esc(c.branch) + "</span>");
+    wt.title = "Isolated git worktree" + (c.worktreePath ? ": " + c.worktreePath : "");
+    card.appendChild(wt);
+  }
+
+  // attachments (usually screenshots) attached at creation — shown as chips
+  // (click to view) and prompted to the session when the card is started
   if (c.attachments && c.attachments.length) {
     const atts = el("div", "kanban-card-attachments");
-    for (const a of c.attachments) {
-      const chip = el("div", "attach-chip");
-      if (a.mime && a.mime.startsWith("image/")) {
-        chip.innerHTML = `<img src="${esc(a.url)}"><span>${esc(a.filename || "image")}</span>`;
-      } else {
-        chip.innerHTML = ICONS.file + `<span>${esc(a.filename || "file")}</span>`;
-      }
-      atts.appendChild(chip);
-    }
+    for (const a of c.attachments) atts.appendChild(attachmentChip(a));
     card.appendChild(atts);
   }
 
@@ -4838,6 +5040,74 @@ function boardCardNode(c) {
     view.title = "Open the session working on this card";
     view.onclick = (e) => { e.stopPropagation(); viewCard(c); };
     actions.appendChild(view);
+  }
+  // review stage: approve resolves the card as done (merging an isolated
+  // worktree), reject sends it back to In Progress with the findings as
+  // the next prompt
+  if (c.column === "review") {
+    const approve = el("button", "kanban-card-btn kanban-approve", "✓<span>Approve</span>");
+    approve.title = "Approve: the card is done (its worktree, if any, is merged)";
+    approve.onclick = async (e) => {
+      e.stopPropagation();
+      approve.disabled = true;
+      try {
+        await post(`/board/card/${c.id}/approve`, {});
+        await loadBoard();
+        renderBoard();
+        toast(`Card #${c.id} approved`);
+      } catch (err) {
+        approve.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    actions.appendChild(approve);
+    const reject = el("button", "kanban-card-btn kanban-reject", "✕<span>Reject</span>");
+    reject.title = "Reject: back to In Progress, the findings become the session's next prompt";
+    reject.onclick = async (e) => {
+      e.stopPropagation();
+      reject.disabled = true;
+      try {
+        await post(`/board/card/${c.id}/reject`, {});
+        await loadBoard();
+        renderBoard();
+        toast(`Card #${c.id} sent back to In Progress`);
+      } catch (err) {
+        reject.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    actions.appendChild(reject);
+  }
+  // isolated card: diff against its base ref, and (once finished) merge the
+  // worktree branch back into the repository — which also removes the
+  // worktree and its branch
+  if (c.branch) {
+    const diffBtn = el("button", "kanban-card-btn", ICONS.file + "<span>Diff</span>");
+    diffBtn.title = "Diff the card's worktree against its base branch";
+    diffBtn.onclick = (e) => { e.stopPropagation(); openWorktreeDiffModal(c); };
+    actions.appendChild(diffBtn);
+    const merge = el("button", "kanban-card-btn", ICONS.fork + "<span>Merge</span>");
+    merge.title = "Merge the worktree branch into the repository and remove the worktree";
+    merge.onclick = async (e) => {
+      e.stopPropagation();
+      const ok = await confirmModal(
+        "Merge worktree",
+        `Merge branch ${esc(c.branch)} into the repository and remove the worktree of card #${esc(c.id)}?`,
+        "Merge"
+      );
+      if (!ok) return;
+      merge.disabled = true;
+      try {
+        await post(`/board/card/${c.id}/merge`, {});
+        await loadBoard();
+        renderBoard();
+        toast(`Merged ${c.branch} and removed its worktree`);
+      } catch (err) {
+        merge.disabled = false;
+        toast(err.message || String(err), true);
+      }
+    };
+    actions.appendChild(merge);
   }
   // Only Open cards are editable: In Progress and Done cards are locked —
   // no Edit button, and their titles can't be double-click-edited either.
@@ -5070,6 +5340,59 @@ function hotLinkLines(id) {
 // Edit dialog: title and column, pre-filled with the card's current values.
 // The title is a multiline textarea (Enter saves, Ctrl+Enter a newline) so
 // multiline card titles stay editable.
+// Agent/model picker row for the card modals: the same c-select buttons and
+// popovers the composer uses, bound to local card values instead of the
+// workspace state. Returns the row plus a getter for the chosen values.
+function buildCardAgentModelRow(initAgent, initModel) {
+  let agent = initAgent || "";
+  let model = initModel || "";
+  const row = el("div", "m-field-row");
+
+  const agentField = el("div", "m-field");
+  agentField.appendChild(el("label", "m-label", "Agent"));
+  const agentBtn = el("button", "c-select");
+  agentBtn.title = "Agent this card runs with when started";
+  const renderAgent = () => {
+    agentBtn.innerHTML =
+      `<span class="agent-dot" style="background:${agentColor(agent || "build")}"></span>` +
+      `<span class="name">${esc(agent ? cap(agent) : "Default (build)")}</span>${ICONS.chev}`;
+  };
+  agentBtn.onclick = (e) => {
+    e.stopPropagation();
+    openAgentPicker(agentBtn, agent, (a) => { agent = a; renderAgent(); }, true);
+  };
+  renderAgent();
+  agentField.appendChild(agentBtn);
+
+  const modelField = el("div", "m-field");
+  modelField.appendChild(el("label", "m-label", "Model"));
+  const modelBtn = el("button", "c-select");
+  modelBtn.title = "Model this card runs with when started";
+  const renderModel = () => {
+    modelBtn.innerHTML = `<span class="name">${esc(model || "Default model")}</span>${ICONS.chev}`;
+  };
+  modelBtn.onclick = (e) => {
+    e.stopPropagation();
+    openModelPicker(modelBtn, parseModelSel(model), (sel) => {
+      model = sel ? sel.providerID + "/" + sel.modelID : "";
+      renderModel();
+    }, true);
+  };
+  renderModel();
+  modelField.appendChild(modelBtn);
+
+  row.append(agentField, modelField);
+  return { row, get: () => ({ agent, model }) };
+}
+
+// "provider/model" -> {providerID, modelID} (model IDs may contain slashes).
+function parseModelSel(s) {
+  if (!s) return null;
+  const i = s.indexOf("/");
+  if (i <= 0 || i === s.length - 1) return null;
+  return { providerID: s.slice(0, i), modelID: s.slice(i + 1) };
+}
+
 function openEditCardModal(c) {
   openModal("Edit card", (modal, ov) => {
     const field = el("div", "m-field");
@@ -5079,6 +5402,51 @@ function openEditCardModal(c) {
     input.value = c.title;
     field.appendChild(input);
     modal.appendChild(field);
+
+    // the richer card fields: sent to the agent with the task and shown
+    // on the card; agent/model pick how the card runs when started
+    const descField = el("div", "m-field");
+    descField.appendChild(el("label", "m-label", "Description"));
+    const desc = el("textarea", "m-textarea");
+    desc.rows = 2;
+    desc.value = c.description || "";
+    desc.placeholder = "Optional context beyond the title…";
+    descField.appendChild(desc);
+    modal.appendChild(descField);
+
+    const critField = el("div", "m-field");
+    critField.appendChild(el("label", "m-label", "Acceptance criteria"));
+    const crit = el("textarea", "m-textarea");
+    crit.rows = 2;
+    crit.value = c.criteria || "";
+    crit.placeholder = "What must hold for this card to be done…";
+    critField.appendChild(crit);
+    modal.appendChild(critField);
+
+    // agent/model: the composer's pickers, bound to the card
+    const am = buildCardAgentModelRow(c.agent, c.model);
+    modal.appendChild(am.row);
+
+    // attachments: chips with remove, plus an attach button in the actions
+    // row — saved back to the card on Save (the session prompt gets them
+    // when the card starts)
+    const files = [...(c.attachments || [])];
+    const attachRow = el("div", "attach-row");
+    const redrawAtt = () => renderAttachChipsInto(attachRow, files, (a) => {
+      files.splice(files.indexOf(a), 1);
+      redrawAtt();
+    });
+    const addFiles = async (fl) => {
+      files.push(...(await filesToAttachments(fl)));
+      redrawAtt();
+    };
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+    fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
+    redrawAtt();
+    modal.appendChild(attachRow);
 
     const colField = el("div", "m-field");
     colField.appendChild(el("label", "m-label", "Column"));
@@ -5092,7 +5460,19 @@ function openEditCardModal(c) {
     colField.appendChild(sel);
     modal.appendChild(colField);
 
+    // worktree isolation (open cards only): the session started for this
+    // card runs in its own git worktree on its own branch
+    const isoCb = el("input");
+    isoCb.type = "checkbox";
+    isoCb.checked = !!c.isolate;
+    const isoWrap = el("label", "m-check");
+    isoWrap.append(isoCb, el("span", "", "Isolate in a git worktree (own branch, mergeable when done)"));
+    modal.appendChild(isoWrap);
+
     const actions = el("div", "m-actions");
+    const attachBtn = el("button", "c-btn", ICONS.plus);
+    attachBtn.title = "Attach files (sent to the session when the card starts)";
+    attachBtn.onclick = () => fileInput.click();
     const cancel = el("button", "btn ghost", "Cancel");
     cancel.onclick = () => ov.remove();
     const save = el("button", "btn primary", "Save");
@@ -5101,8 +5481,15 @@ function openEditCardModal(c) {
       if (!title) { input.focus(); return; }
       save.disabled = true;
       try {
-        const body = { title };
+        const body = {
+          title,
+          description: desc.value,
+          criteria: crit.value,
+          ...am.get(),
+        };
+        if (JSON.stringify(files) !== JSON.stringify(c.attachments || [])) body.attachments = files;
         if (sel.value !== c.column) body.column = sel.value;
+        if (isoCb.checked !== !!c.isolate) body.isolate = isoCb.checked;
         await patch("/board/card/" + c.id, body);
         ov.remove();
         await loadBoard();
@@ -5118,7 +5505,7 @@ function openEditCardModal(c) {
       if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); save.click(); }
     };
     input.oninput = () => autosize(input);
-    actions.append(cancel, save);
+    actions.append(attachBtn, fileInput, cancel, save);
     modal.appendChild(actions);
     setTimeout(() => { autosize(input); input.focus(); input.setSelectionRange(input.value.length, input.value.length); }, 0);
   });
@@ -5187,6 +5574,9 @@ async function moveBoardCard(id, column, beforeID) {
   // optimistic: reposition locally, then reconcile with the server
   col.splice(targetIdx, 0, card);
   col.forEach((c, i) => { c.column = column; c.order = i; });
+  // returning to Open stops the card: the server clears its session link
+  // (and aborts the agent) — mirror that locally so Start is offered at once
+  if (card.column === "open") card.sessionID = "";
   renderBoard();
   try {
     await patch("/board/card/" + id, { column, before: beforeID || "" });
@@ -5849,12 +6239,7 @@ async function onFilesPicked(files) {
 function renderAttachChipsInto(row, list, onRemove) {
   row.innerHTML = "";
   for (const a of list) {
-    const chip = el("div", "attach-chip");
-    if (a.mime && a.mime.startsWith("image/")) {
-      chip.innerHTML = `<img src="${esc(a.url)}"><span>${esc(a.filename)}</span>`;
-    } else {
-      chip.innerHTML = ICONS.file + `<span>${esc(a.filename)}</span>`;
-    }
+    const chip = attachmentChip(a);
     const x = el("button", "", "✕");
     x.onclick = () => onRemove && onRemove(a);
     chip.appendChild(x);
@@ -5927,20 +6312,34 @@ function buildAgentSelect() {
      <span class="name">${esc(cap(S.agent))}</span>${ICONS.chev}`;
   btn.onclick = (e) => {
     e.stopPropagation();
-    const pop = el("div", "popover");
-    for (const a of agentList()) {
-      const item = el("button", "p-item" + (S.agent === a.name ? " on" : ""));
-      item.title = a.description || "";
-      item.innerHTML = `<span class="agent-dot" style="background:${a.color || "#999"}"></span><span>${cap(a.name)}</span>`;
-      item.onclick = () => {
-        closePopovers();
-        setAgent(a.name);
-      };
-      pop.appendChild(item);
-    }
-    openPopover(btn, pop);
+    openAgentPicker(btn, S.agent, (name) => setAgent(name));
   };
   return btn;
+}
+
+// The agent picker popover, shared by the composer and the card modals:
+// current is the selected agent name ("" = none), onPick receives the chosen
+// name. allowClear prepends a "Default" item that picks "".
+function openAgentPicker(anchor, current, onPick, allowClear) {
+  const pop = el("div", "popover");
+  if (allowClear) {
+    const def = el("button", "p-item" + (!current ? " on" : ""));
+    def.innerHTML = `<span class="agent-dot" style="background:${agentColor("build")}"></span><span>Default (build)</span>`;
+    def.title = "Use the default agent";
+    def.onclick = () => { closePopovers(); onPick(""); };
+    pop.appendChild(def);
+  }
+  for (const a of agentList()) {
+    const item = el("button", "p-item" + (current === a.name ? " on" : ""));
+    item.title = a.description || "";
+    item.innerHTML = `<span class="agent-dot" style="background:${a.color || "#999"}"></span><span>${cap(a.name)}</span>`;
+    item.onclick = () => {
+      closePopovers();
+      onPick(a.name);
+    };
+    pop.appendChild(item);
+  }
+  openPopover(anchor, pop);
 }
 
 function modelForSession(sess) {
@@ -5957,20 +6356,36 @@ function buildModelButton() {
   btn.innerHTML = `<span class="name">${esc(cur || "Select model")}</span>${ICONS.chev}`;
   btn.onclick = (e) => {
     e.stopPropagation();
-    openModelPicker(btn);
+    openModelPicker(btn, S.model, (sel) => {
+      S.model = sel;
+      wsSet("model", JSON.stringify(S.model));
+      renderComposerRegion();
+    });
   };
   return btn;
 }
 
-function openModelPicker(anchor) {
+// The model picker popover, shared by the composer and the card modals:
+// current is a {providerID, modelID} selection (or null), onPick receives
+// the chosen selection. allowClear prepends a "Default model" item that
+// picks null.
+function openModelPicker(anchor, current, onPick, allowClear) {
   const pop = el("div", "popover");
   const search = el("input");
   search.placeholder = "Search models…";
   pop.appendChild(search);
   const list = el("div");
   pop.appendChild(list);
+  const isCur = (p, m) => current && current.providerID === p.id && current.modelID === m.id;
   const render = () => {
     list.innerHTML = "";
+    if (allowClear) {
+      const def = el("button", "p-item" + (!current ? " on" : ""));
+      def.innerHTML = `<span>Default model</span><span class="pm">first connected</span>`;
+      def.title = "Use the default model (first connected provider's preferred model)";
+      def.onclick = () => { closePopovers(); onPick(null); };
+      list.appendChild(def);
+    }
     const q = search.value.toLowerCase();
     for (const p of S.providers.all) {
       const models = Object.values(p.models || {}).filter(
@@ -5981,13 +6396,11 @@ function openModelPicker(anchor) {
       models
         .sort((a, b) => (a.release_date || "") < (b.release_date || "") ? 1 : -1)
         .forEach((m) => {
-          const item = el("button", "p-item" + (S.model && S.model.providerID === p.id && S.model.modelID === m.id ? " on" : ""));
+          const item = el("button", "p-item" + (isCur(p, m) ? " on" : ""));
           item.innerHTML = `<span>${esc(m.name || m.id)}</span><span class="pm">${esc(p.id)}</span>`;
           item.onclick = () => {
-            S.model = { providerID: p.id, modelID: m.id };
-            wsSet("model", JSON.stringify(S.model));
             closePopovers();
-            renderComposerRegion();
+            onPick({ providerID: p.id, modelID: m.id });
           };
           list.appendChild(item);
         });
@@ -6361,7 +6774,11 @@ async function runUICommand(name) {
   if (name === "new") { newSessionTab(); return; }
   if (name === "models") {
     const anchor = $("#composer-region .c-select") || $("#composer-region");
-    if (anchor) openModelPicker(anchor);
+    if (anchor) openModelPicker(anchor, S.model, (sel) => {
+      S.model = sel;
+      wsSet("model", JSON.stringify(S.model));
+      renderComposerRegion();
+    });
     return;
   }
   if (name === "undo" || name === "redo") {

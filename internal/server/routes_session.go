@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -208,6 +209,40 @@ func (s *Server) sessionDiff(w http.ResponseWriter, r *http.Request) *apiError {
 		diffs = []session.FileDiff{}
 	}
 	writeJSON(w, 200, diffs)
+	return nil
+}
+
+// sessionWorktreeDiff returns the diff of the session's isolated worktree
+// against its base ref — the same per-file shape as /vcs/diff, but computed
+// inside the worktree and including uncommitted changes. Only sessions
+// running in a git worktree (isolation enabled) have one.
+func (s *Server) sessionWorktreeDiff(w http.ResponseWriter, r *http.Request) *apiError {
+	_, sess, err := s.resolveSession(r, r.PathValue("sessionID"))
+	if err != nil {
+		return err
+	}
+	if sess.Worktree == nil || sess.Worktree.Path == "" {
+		return badRequest("session is not running in a git worktree")
+	}
+	base := sess.Worktree.Base
+	if base == "" {
+		base = "HEAD"
+	}
+	b, gerr := git(sess.Worktree.Path, "diff", "--unified="+ctxOr(r.URL.Query().Get("context")), base)
+	if gerr != nil {
+		return badRequest("worktree diff failed: " + gerr.Error())
+	}
+	out := []map[string]any{}
+	for _, f := range splitFileDiffs(b) {
+		add, del := countDiff(f)
+		out = append(out, map[string]any{
+			"file":      filepath.Join(sess.Worktree.Path, filepathFromPatch(f)),
+			"patch":     f,
+			"additions": add,
+			"deletions": del,
+		})
+	}
+	writeJSON(w, 200, out)
 	return nil
 }
 
