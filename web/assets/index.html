@@ -16,7 +16,11 @@
   <div class="bg-vignette"></div>
 </div>
 <div id="app">
-  <aside class="rail">
+  <button class="rail-burger" id="rail-burger" title="Menu" aria-label="Toggle menu">
+    <svg class="ic-burger" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    <svg class="ic-close" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+  </button>
+  <aside class="rail" id="rail">
     <a class="rail-brand" href="/" title="Intellexor"><img src="/logo.png" alt="Intellexor"></a>
     <button class="rail-btn" id="rail-sidebar" title="Toggle sidebar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg></button>
     <button class="rail-btn" id="rail-board-panel" title="Toggle cards panel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg></button>

@@ -110,7 +110,10 @@ const S = {
   agent: wsGet("agent") || "build",
   scheme: localStorage.getItem("intellexor.scheme") || "system",
   bg: localStorage.getItem("intellexor.bg") !== "0", // animated background on/off (global pref)
-  layout: localStorage.getItem("intellexor.layout") || "tabs", // "tabs" (default) | "sidebar" — sidebar-first chrome
+  // "tabs" (desktop default) | "sidebar" — sidebar-first chrome. On small
+  // screens the default is sidebar-first (no tab bars, everything in the
+  // floating sidebar) unless the user explicitly picked a layout.
+  layout: localStorage.getItem("intellexor.layout") || (isNarrow() ? "sidebar" : "tabs"),
   unseen: new Set(),
   errored: new Set(),
   scrollStick: true,
@@ -121,6 +124,7 @@ const S = {
   alarms: {}, // sessionID -> earliest pending wake-up triggerAt (unix seconds) — drives the ⏰ indicator and its hover title
   sidebarOpen: true, // resolved from localStorage/viewport by initSidebar()
   boardPanelOpen: false, // cards side panel (rail toggle), resolved by initBoardPanel()
+  railOpen: false, // mobile-only floating rail; always starts collapsed
   commands: null, // cached GET /command result (slash-command menu)
   subagents: new Map(), // sessionID -> info for subagent sessions (fetched on demand, not in the sidebar)
   es: null,
@@ -259,6 +263,7 @@ const ICONS = {
   clock: svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>', 12),
   pause: svg('<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>', 12),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>', 12),
+  burger: svg('<path d="M4 6h16M4 12h16M4 18h16"/>', 14),
 };
 
 /* ============================== tab progress ============================== */
@@ -1618,6 +1623,43 @@ function openWorkspacePicker() {
   });
 }
 
+/* ---------- floating rail (mobile) ---------- */
+
+// On small screens the icon rail is a floating overlay, collapsed by default
+// and toggled by the burger button (which doubles as its close control). The
+// state is never persisted: like the sidebar, it auto-collapses when dismissed.
+function applyRail() {
+  const app = $("#app");
+  if (!app) return;
+  app.classList.toggle("rail-open", S.railOpen);
+  let bd = $("#rail-backdrop");
+  if (isNarrow() && S.railOpen) {
+    if (!bd) {
+      bd = el("div", "sidebar-backdrop");
+      bd.id = "rail-backdrop";
+      bd.onclick = () => setRail(false);
+      // inside #app's stacking context, same as the other backdrops
+      app.appendChild(bd);
+    }
+  } else if (bd) {
+    bd.remove();
+  }
+}
+
+function setRail(open) {
+  S.railOpen = open;
+  // the rail, sidebar and board panel are all left-edge floating overlays on
+  // mobile — opening one dismisses the others (transiently, preferences aside)
+  if (open && S.sidebarOpen) setSidebar(false, true);
+  if (open && S.boardPanelOpen) setBoardPanel(false, true);
+  applyRail();
+}
+
+function initRail() {
+  S.railOpen = false; // collapsed by default on every load
+  applyRail();
+}
+
 /* ---------- sidebar collapse ---------- */
 
 function isNarrow() { return matchMedia("(max-width: 767px)").matches; }
@@ -1635,7 +1677,9 @@ function applySidebar() {
       bd = el("div", "sidebar-backdrop");
       bd.id = "sidebar-backdrop";
       bd.onclick = () => setSidebar(false);
-      document.body.appendChild(bd);
+      // appended to #app, not body: #app is a stacking context (z-index:1), so
+      // a body-level backdrop would paint above the sidebar and lock it out
+      app.appendChild(bd);
     }
   } else if (bd) {
     bd.remove();
@@ -1652,7 +1696,12 @@ function setSidebar(open, transient = false) {
   S.sidebarOpen = open;
   if (!transient) {
     boardPanelHoldsSidebar = false;
-    try { localStorage.setItem("intellexor.sidebar", open ? "1" : "0"); } catch {}
+    // On small screens the open state is deliberately not persisted: the
+    // floating panel auto-collapses when dismissed (backdrop tap, navigation,
+    // reload) and always starts collapsed so it never covers the chat.
+    if (!isNarrow()) {
+      try { localStorage.setItem("intellexor.sidebar", open ? "1" : "0"); } catch {}
+    }
     if (open && S.boardPanelOpen) {
       sidebarHoldsBoardPanel = true;
       setBoardPanel(false, true);
@@ -1667,8 +1716,10 @@ function setSidebar(open, transient = false) {
 function initSidebar() {
   let saved = null;
   try { saved = localStorage.getItem("intellexor.sidebar"); } catch {}
-  // default: open on desktop, closed (drawer) on small screens
-  S.sidebarOpen = saved != null ? saved === "1" : !isNarrow();
+  // Small screens: the sidebar is a floating overlay that auto-collapses when
+  // dismissed — an persisted "open" is ignored so it never covers the chat on
+  // load. Desktop: open by default, otherwise the saved choice wins.
+  S.sidebarOpen = isNarrow() ? false : saved != null ? saved === "1" : true;
   applySidebar();
 }
 
@@ -1710,7 +1761,8 @@ function applyBoardPanel() {
       bd = el("div", "sidebar-backdrop");
       bd.id = "board-panel-backdrop";
       bd.onclick = () => setBoardPanel(false);
-      document.body.appendChild(bd);
+      // same as the sidebar backdrop: must live inside #app's stacking context
+      app.appendChild(bd);
     }
   } else if (bd) {
     bd.remove();
@@ -1723,7 +1775,11 @@ function setBoardPanel(open, transient = false) {
   if (!transient) {
     // an explicit panel change cancels a pending restore, mirroring setSidebar
     sidebarHoldsBoardPanel = false;
-    try { localStorage.setItem("intellexor.boardPanel", open ? "1" : "0"); } catch {}
+    // like the sidebar: on small screens the open state is not persisted —
+    // the floating panel auto-collapses when dismissed
+    if (!isNarrow()) {
+      try { localStorage.setItem("intellexor.boardPanel", open ? "1" : "0"); } catch {}
+    }
   }
   // The panel takes over the sidebar's slot on the left: collapse the sidebar
   // for as long as the panel is open, and hand the slot back on close. Both
@@ -1744,7 +1800,9 @@ function setBoardPanel(open, transient = false) {
 function initBoardPanel() {
   let saved = null;
   try { saved = localStorage.getItem("intellexor.boardPanel"); } catch {}
-  S.boardPanelOpen = saved === "1"; // default closed — an optional panel
+  // like the sidebar: on small screens a persisted "open" is ignored so the
+  // floating panel never covers the chat on load
+  S.boardPanelOpen = !isNarrow() && saved === "1"; // default closed — an optional panel
   // Runs after initSidebar, so the resolved sidebar state is known: if the
   // panel boots open, it takes the slot and the sidebar waits.
   if (S.boardPanelOpen && S.sidebarOpen) {
@@ -2758,8 +2816,36 @@ function buildHeader(sess) {
 // Export / Import links. Export downloads the full session as JSON; Import
 // is offered only while the session has no messages (a fresh session) and
 // loads an exported file into a brand-new session.
+// On small screens the text links don't fit next to the context circle —
+// they collapse into one burger-icon menu that keeps hugging the right edge
+// (the header renders it just left of the context circle).
 function buildHeaderActions(sess) {
   const wrap = el("div", "header-actions");
+  if (isNarrow()) {
+    const btn = el("button", "c-select header-more");
+    btn.title = "Session actions";
+    btn.innerHTML = ICONS.burger;
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const pop = el("div", "popover");
+      const item = (label, title, action) => {
+        const it = el("button", "p-item");
+        it.innerHTML = `<span>${label}</span>`;
+        it.title = title;
+        it.onclick = () => { closePopovers(); action(); };
+        pop.appendChild(it);
+      };
+      item("Export", "Download the full session as a JSON file", () => exportSession(sess));
+      if (sessionImportable(sess.id)) {
+        item("Import", "Import a session JSON file into a new session", () => importSessionFile());
+      }
+      item("Add scheduled message", "Schedule a message the session receives at a chosen time (like an alarm the agent sets itself)", () => openScheduleMessageModal(sess.id));
+      item("Link card", "Link this session to a kanban card — an existing open one or a newly created one; the card moves to In Progress", () => openLinkCardModal(sess));
+      openPopover(btn, pop);
+    };
+    wrap.appendChild(btn);
+    return wrap;
+  }
   const exp = el("a", "header-link", "Export");
   exp.href = "#";
   exp.title = "Download the full session as a JSON file";
@@ -6078,16 +6164,21 @@ function buildComposerRegion(region) {
   actions.appendChild(buildAgentSelect());
   actions.appendChild(buildModelButton());
   const cm = composerModel();
-  if (cm && cm.reasoning) actions.appendChild(buildEffortButton());
-
-  // branch label lives inside the composer row (was a hint-row below it)
-  const vcs = S.vcs;
-  const branch = el("span", "c-branch");
-  branch.title = vcs.branch ? "Git branch" : "Not a Git repository";
-  branch.innerHTML = vcs.branch
-    ? `${ICONS.branch}<span class="name">${esc(vcs.branch)}</span>`
-    : "No Git";
-  actions.appendChild(branch);
+  if (isNarrow()) {
+    // mobile: the effort selector and branch label don't fit the row —
+    // they collapse into one burger-icon popup
+    actions.appendChild(buildMobileMoreButton(cm));
+  } else {
+    if (cm && cm.reasoning) actions.appendChild(buildEffortButton());
+    // branch label lives inside the composer row (was a hint-row below it)
+    const vcs = S.vcs;
+    const branch = el("span", "c-branch");
+    branch.title = vcs.branch ? "Git branch" : "Not a Git repository";
+    branch.innerHTML = vcs.branch
+      ? `${ICONS.branch}<span class="name">${esc(vcs.branch)}</span>`
+      : "No Git";
+    actions.appendChild(branch);
+  }
 
   const sp = el("span");
   sp.style.flex = "1";
@@ -6457,6 +6548,43 @@ function buildEffortButton() {
       };
       pop.appendChild(item);
     }
+    openPopover(btn, pop);
+  };
+  return btn;
+}
+
+// Mobile composer: the thinking-effort selector and the git branch don't fit
+// the actions row — they collapse into one burger-icon button that opens a
+// small popup with both (the branch is display-only, like the desktop label).
+function buildMobileMoreButton(cm) {
+  const btn = el("button", "c-select c-more");
+  btn.title = "Thinking effort & git branch";
+  btn.innerHTML = ICONS.burger;
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const pop = el("div", "popover");
+    if (cm && cm.reasoning) {
+      pop.appendChild(el("div", "p-group", "Thinking effort"));
+      for (const [val, label] of EFFORT_LEVELS) {
+        const item = el("button", "p-item" + ((S.effort || "") === val ? " on" : ""));
+        item.innerHTML = `<span>${label}</span>`;
+        item.onclick = () => {
+          S.effort = val;
+          wsSet("effort", val);
+          closePopovers();
+          renderComposerRegion();
+        };
+        pop.appendChild(item);
+      }
+    }
+    pop.appendChild(el("div", "p-group", "Git"));
+    const vcs = S.vcs;
+    const branch = el("div", "p-item static");
+    branch.title = vcs.branch ? "Current git branch" : "Not a Git repository";
+    branch.innerHTML = vcs.branch
+      ? `${ICONS.branch}<span>${esc(vcs.branch)}</span>`
+      : "<span>No Git</span>";
+    pop.appendChild(branch);
     openPopover(btn, pop);
   };
   return btn;
@@ -6996,10 +7124,10 @@ function renderSettingsGeneral(content) {
   content.appendChild(bgRow);
 
   const layoutRow = el("div", "m-row");
-  layoutRow.appendChild(el("div", "", '<div class="m-label">Layout</div><div class="m-sub">Sidebar-first: workspaces and Board/Cron in the sidebar, no tab bars</div>'));
+  layoutRow.appendChild(el("div", "", '<div class="m-label">Layout</div><div class="m-sub">Sidebar-first: workspaces and Board/Cron in the sidebar, no tab bars — also the default on small screens</div>'));
   const laySeg = el("div", "seg");
   for (const opt of ["tabs", "sidebar"]) {
-    const label = opt === "tabs" ? "Tabs (default)" : "Sidebar-first";
+    const label = opt === "tabs" ? "Tabs" : "Sidebar-first";
     const b = el("button", S.layout === opt ? "on" : "", label);
     b.onclick = () => {
       S.layout = opt;
@@ -7864,12 +7992,39 @@ async function boot() {
   $("#rail-settings").onclick = () => openSettings();
   $("#rail-sidebar").onclick = () => setSidebar(!S.sidebarOpen);
   $("#rail-board-panel").onclick = () => setBoardPanel(!S.boardPanelOpen);
+  $("#rail-burger").onclick = () => setRail(!S.railOpen);
+  // on mobile, using any rail control dismisses the rail (the action itself
+  // — modal, drawer, picker — takes over the screen)
+  $("#rail").addEventListener("click", (e) => {
+    if (isNarrow() && S.railOpen && e.target.closest("button, a")) setRail(false);
+  });
   $("#board-panel-expand").onclick = () => navigate("/board");
   $("#board-panel-list").onscroll = hideBoardPanelTip; // a scrolled-away row must not keep its tooltip
   initSidebar();
   initBoardPanel();
+  initRail();
   if (S.boardPanelOpen) loadBoard(); // seed the panel with cards on boot
-  window.addEventListener("resize", () => { applySidebar(); applyBoardPanel(); }); // keep drawer/backdrop correct across the breakpoint
+  // keep drawer/backdrop correct across the breakpoint, and rebuild the
+  // composer row once when the mobile/desktop layout flips (the mobile row
+  // collapses effort+branch into the burger popup). Without an explicit
+  // layout preference the chrome itself follows the viewport: sidebar-first
+  // on small screens, tabs on desktop.
+  let lastNarrow = isNarrow();
+  window.addEventListener("resize", () => {
+    applySidebar(); applyBoardPanel(); applyRail();
+    const n = isNarrow();
+    if (n !== lastNarrow) {
+      lastNarrow = n;
+      if (!localStorage.getItem("intellexor.layout")) {
+        S.layout = n ? "sidebar" : "tabs";
+        applyLayout();
+        renderSidebar();
+        renderMain();
+      }
+      renderComposerRegion();
+      renderHeader();
+    }
+  });
   const name = (S.dir || "Project").split("/").filter(Boolean).pop() || "P";
   $("#rail-avatar").textContent = name[0].toUpperCase();
   $("#sidebar-title").textContent = name;
