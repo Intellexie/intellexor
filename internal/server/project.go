@@ -19,7 +19,7 @@ import (
 //
 // Wire shapes follow opencode's Project.Info / Project.Current schemas, with
 // a few Intellexor-only fields (directory, sessions, busy, hasIdle,
-// lastActivity) that opencode clients ignore.
+// questions, lastActivity) that opencode clients ignore.
 
 // projectID derives opencode's fallback project id: sha1("directory:" + abs
 // path), hex-encoded. opencode prefers git-remote-derived ids when available;
@@ -44,11 +44,14 @@ type projectInfo struct {
 	Sandboxes []string    `json:"sandboxes"`
 
 	// Intellexor extensions (not part of opencode's Project.Info):
-	Directory    string `json:"directory"`
-	Sessions     int    `json:"sessions"`
-	Busy         bool   `json:"busy"`
-	HasIdle      bool   `json:"hasIdle"`
-	LastActivity int64  `json:"lastActivity"`
+	Directory string `json:"directory"`
+	Sessions  int    `json:"sessions"`
+	Busy      bool   `json:"busy"`
+	HasIdle   bool   `json:"hasIdle"`
+	// Questions: sessions currently blocked on a pending question tool call
+	// (the web UI pulses the workspace tab while it is positive).
+	Questions    int   `json:"questions"`
+	LastActivity int64 `json:"lastActivity"`
 }
 
 // projectCurrent mirrors opencode's Project.Current: the project resolved for
@@ -92,6 +95,7 @@ func toProjectInfo(ws workspaceInfo) projectInfo {
 		Sessions:     ws.Sessions,
 		Busy:         ws.Busy,
 		HasIdle:      ws.HasIdle,
+		Questions:    ws.Questions,
 		LastActivity: ws.LastActivity,
 	}
 }

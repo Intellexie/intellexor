@@ -152,6 +152,19 @@ body.bg-live .brand-mark img { position:relative; z-index:1; }
 .dot-permission { background:#fcd53a; }
 .dot-error { background:var(--diff-del); }
 .dot-unseen { background:var(--accent); }
+/* agent blocked on a question — attention indicators */
+.dot-question { background:var(--accent); animation:dot-question-pulse 1.2s ease-in-out infinite; }
+@keyframes dot-question-pulse { 0%,100% { opacity:.35; } 50% { opacity:1; } }
+.tab.pulse { animation:tab-question-pulse 1.2s ease-in-out infinite; }
+@keyframes tab-question-pulse {
+  0%,100% { background:color-mix(in srgb, var(--accent) 4%, transparent); }
+  50% { background:color-mix(in srgb, var(--accent) 26%, transparent); }
+}
+.kanban-card.pulse, .board-panel-card.pulse { animation:card-question-pulse 1.2s ease-in-out infinite; }
+@keyframes card-question-pulse {
+  0%,100% { border-color:var(--border-weak); box-shadow:none; }
+  50% { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+}
 .alarm-indicator { flex:0 0 auto; font-size:12px; line-height:1; cursor:pointer; }
 .alarm-indicator:hover { transform:scale(1.15); }
 .alarm-list { margin-top:8px; }

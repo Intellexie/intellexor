@@ -656,7 +656,9 @@ Working directories with their own sessions/config, exposed in **opencode's `Pro
     "time": { "created": 0, "updated": 0, "active": 0 },  // ms; created = registration time (0 for the default dir)
     "sandboxes": [],
     // Intellexor extensions (opencode clients ignore unknown fields):
-    "directory": "/abs", "sessions": 0, "busy": false, "hasIdle": true, "lastActivity": 0
+    "directory": "/abs", "sessions": 0, "busy": false, "hasIdle": true,
+    "questions": 0,              // sessions in this workspace currently blocked on a pending question tool call
+    "lastActivity": 0
   }
   ```
   The `?archived=true` query param is accepted (opencode compat) but ignored — Intellexor never archives.

@@ -24,12 +24,16 @@ type Workspace struct {
 }
 
 type workspaceInfo struct {
-	Directory    string `json:"directory"`
-	Name         string `json:"name"`
-	Sessions     int    `json:"sessions"`
-	Busy         bool   `json:"busy"`
-	HasIdle      bool   `json:"hasIdle"`
-	LastActivity int64  `json:"lastActivity"`
+	Directory string `json:"directory"`
+	Name      string `json:"name"`
+	Sessions  int    `json:"sessions"`
+	Busy      bool   `json:"busy"`
+	HasIdle   bool   `json:"hasIdle"`
+	// Questions is the number of sessions in this workspace currently blocked
+	// on a pending question tool call — the web UI pulses the workspace's tab
+	// while it is positive (the agent needs the user's attention there).
+	Questions    int   `json:"questions"`
+	LastActivity int64 `json:"lastActivity"`
 }
 
 var wsMu sync.Mutex
@@ -125,7 +129,7 @@ func (s *Server) workspaceInfos() []workspaceInfo {
 	for _, d := range dirs {
 		in := s.Instance(d)
 		sts := in.Statuses()
-		info := workspaceInfo{Directory: d, Name: workspaceDisplayName(d), Busy: len(sts) > 0}
+		info := workspaceInfo{Directory: d, Name: workspaceDisplayName(d), Busy: len(sts) > 0, Questions: len(in.Quest.Pending())}
 		for _, sess := range in.Mgr.List(in.Directory, false, projectIDOf(in.Directory)) {
 			if sess.ParentID != "" {
 				continue // subagents are not workspace-level sessions

@@ -270,7 +270,8 @@ const ICONS = {
 
 // Progress indicator for the browser tab: an animated ring around the favicon
 // plus a braille spinner in the title while the current session is running,
-// a dot while other sessions are busy, and a red dot on error.
+// a dot while other sessions are busy, a red dot on error, and a pulsating
+// "?" badge while the agent is blocked on a question.
 const TabProgress = (() => {
   const link = document.querySelector('link[rel="icon"]');
   const BASE = "/logo.png";
@@ -323,10 +324,38 @@ const TabProgress = (() => {
     });
   }
 
+  // Pulsating "?" badge: the agent is blocked on a question and needs the
+  // user. The badge breathes (alpha + size) so the tab keeps drawing the eye
+  // even when the browser window is in the background.
+  function questionBadge(t) {
+    paint((ctx) => {
+      logo(ctx, 64, 1);
+      const pulse = 0.5 + 0.5 * Math.sin(t * 2 * Math.PI);
+      const r = 12 + 2 * pulse;
+      ctx.globalAlpha = 0.65 + 0.35 * pulse;
+      ctx.fillStyle = ACCENT;
+      ctx.strokeStyle = "rgba(0,0,0,0.4)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(48, 48, r, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold " + Math.round(14 + 2 * pulse) + "px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("?", 48, 49);
+    });
+  }
+
   function render() {
     if (mode === "busy") {
       ring(frame / 20);
       document.title = SPIN[frame % SPIN.length] + " " + baseTitle;
+    } else if (mode === "question") {
+      questionBadge(frame / 10);
+      document.title = "❓ " + baseTitle;
     } else {
       if (mode === "working") dot(WARN);
       else if (mode === "error") dot(ERR);
@@ -341,6 +370,7 @@ const TabProgress = (() => {
       mode = m;
       if (timer) { clearInterval(timer); timer = 0; }
       if (mode === "busy") timer = setInterval(() => { frame++; render(); }, 100);
+      else if (mode === "question") timer = setInterval(() => { frame++; render(); }, 120);
       else frame = 0;
       render();
     },
@@ -354,7 +384,10 @@ function updateTab() {
     return !!(st && st.type !== "idle");
   };
   let mode = "idle";
-  if (S.current && busy(S.current)) mode = "busy";
+  // a pending question on the viewed session (or one of its docked children)
+  // outranks the busy ring: the agent is blocked and needs the user
+  if (S.questions.some((q) => isDockSession(q.sessionID))) mode = "question";
+  else if (S.current && busy(S.current)) mode = "busy";
   else if (Object.keys(S.statuses).some(busy)) mode = "working";
   else if (S.current && S.errored.has(S.current)) mode = "error";
   TabProgress.set(mode);
@@ -732,15 +765,30 @@ function handleEvent(ev) {
       updateSidebarRow(p.sessionID);
       if (isDockSession(p.sessionID)) renderComposerRegion();
       break;
-    case "question.asked":
+    case "question.asked": {
       S.questions.push(p);
+      updateSidebarRow(p.sessionID);
+      renderTabs(); // pulsating tab + favicon badge
+      updateBoardSpinners(); // pulsating card
+      updateBoardPanelSpinners();
+      updateTab();
       if (isDockSession(p.sessionID)) renderComposerRegion();
+      // the agent is blocked and needs the user — chime (same unlock rules
+      // as the completion chime; blocked plays are silent no-ops)
+      Notify.play();
       break;
+    }
     case "question.replied":
-    case "question.rejected":
+    case "question.rejected": {
       S.questions = S.questions.filter((q) => q.id !== p.requestID);
+      updateSidebarRow(p.sessionID);
+      renderTabs();
+      updateBoardSpinners();
+      updateBoardPanelSpinners();
+      updateTab();
       if (isDockSession(p.sessionID)) renderComposerRegion();
       break;
+    }
     case "todo.updated":
       S.todos[p.sessionID] = p.todos;
       if (isDockSession(p.sessionID)) renderComposerRegion();
@@ -777,6 +825,13 @@ function isDockSession(sessionID) {
 function sessionBusy(sessionID) {
   const st = S.statuses[sessionID];
   return !!(st && st.type !== "idle");
+}
+
+// True while the session is blocked on a pending question tool call — the
+// agent needs the user's attention (drives the chime, tab/card pulsing and
+// the favicon badge).
+function sessionWaiting(sessionID) {
+  return S.questions.some((q) => q.sessionID === sessionID);
 }
 
 // True when sessionID is a subagent referenced by a task tool part in
@@ -1204,6 +1259,13 @@ function renderWorkspaceTabs() {
       dot.title = "Finished session since you were last here";
       tab.appendChild(dot);
     }
+    // a workspace whose agent is blocked on a question pulses its tab until
+    // the user switches to it (the question count comes from /project,
+    // refreshed by the cross-workspace event stream)
+    if (dir !== currentDir() && ws && ws.questions > 0) {
+      tab.classList.add("pulse");
+      tab.appendChild(el("span", "dot dot-question"));
+    }
     const close = el("button", "tab-close", ICONS.close);
     close.title = "Close workspace tab";
     close.onclick = (e) => { e.stopPropagation(); closeWorkspaceTab(dir); };
@@ -1303,7 +1365,12 @@ function renderTabs() {
       : title + " — click to switch, right-click to rename, middle-click to close";
     if (!pending) {
       const st = S.statuses[sid];
-      if (st && st.type !== "idle") {
+      if (sessionWaiting(sid)) {
+        // agent blocked on a question: pulsate the tab (unless it is the one
+        // being looked at — the composer already shows the question there)
+        if (sid !== S.current) tab.classList.add("pulse");
+        tab.appendChild(el("span", "dot dot-question"));
+      } else if (st && st.type !== "idle") {
         tab.appendChild(el("span", "spinner", ICONS.spinner));
       } else if (S.permissions.some((p) => p.sessionID === sid)) {
         tab.appendChild(el("span", "dot dot-permission"));
@@ -1433,6 +1500,13 @@ function scheduleWorkspaceRefresh() {
   wsRefreshTimer = setTimeout(() => { wsRefreshTimer = null; loadWorkspaces(); }, 500);
 }
 
+// Event types that change a workspace's cross-workspace indicators (the
+// finished-session dot and the question pulse on its tab).
+function wsIndicatorEvent(t) {
+  return t === "session.status" || t === "session.idle" || t === "session.created" ||
+    t === "session.deleted" || t === "question.asked" || t === "question.replied" || t === "question.rejected";
+}
+
 // Desktop only: one Wails events channel ("server-event", emitted by the
 // Go bridge for every instance event) feeds both the session event handler
 // and the cross-workspace refresh — the web mode uses the /event and
@@ -1442,8 +1516,7 @@ function initDesktopEvents() {
   window.runtime.EventsOn("server-event", (m) => {
     if (!m || typeof m !== "object") return;
     const t = m.payload && m.payload.type;
-    if (m.directory && m.directory !== currentDir() &&
-        (t === "session.status" || t === "session.idle" || t === "session.created" || t === "session.deleted")) {
+    if (m.directory && m.directory !== currentDir() && wsIndicatorEvent(t)) {
       scheduleWorkspaceRefresh();
     }
     // currentDir() is empty until /global/path loads — accept everything
@@ -1541,8 +1614,7 @@ function connectGlobalSSE() {
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     const t = m.payload && m.payload.type;
-    if (m.directory && m.directory !== currentDir() &&
-        (t === "session.status" || t === "session.idle" || t === "session.created" || t === "session.deleted")) {
+    if (m.directory && m.directory !== currentDir() && wsIndicatorEvent(t)) {
       scheduleWorkspaceRefresh();
     }
   };
@@ -1851,7 +1923,8 @@ function showBoardPanelTip(row, c) {
 }
 
 // Toggle the busy spinner on board-panel rows in place — same rationale as
-// updateBoardSpinners, for the collapsed panel's card list.
+// updateBoardSpinners, for the collapsed panel's card list. Also toggles the
+// attention pulse for rows whose session is blocked on a question.
 function updateBoardPanelSpinners() {
   const list = $("#board-panel-list");
   if (!list || !S.boardPanelOpen) return;
@@ -1859,12 +1932,14 @@ function updateBoardPanelSpinners() {
     const c = boardCardById(row.dataset.id);
     const want = !!(c && c.column === "inprogress" && c.sessionID && sessionBusy(c.sessionID));
     const has = !!row.querySelector("span.spinner");
-    if (want === has) return;
-    if (want) row.appendChild(el("span", "spinner", ICONS.spinner));
-    else {
-      const sp = row.querySelector("span.spinner");
-      if (sp) sp.remove();
+    if (want !== has) {
+      if (want) row.appendChild(el("span", "spinner", ICONS.spinner));
+      else {
+        const sp = row.querySelector("span.spinner");
+        if (sp) sp.remove();
+      }
     }
+    row.classList.toggle("pulse", !!(c && c.sessionID && sessionWaiting(c.sessionID)));
   });
 }
 
@@ -1886,6 +1961,8 @@ function renderBoardPanel() {
     for (const c of cards) {
       const row = el("div", "board-panel-card");
       row.dataset.id = c.id;
+      // attention pulse while the linked session is blocked on a question
+      if (c.sessionID && sessionWaiting(c.sessionID)) row.classList.add("pulse");
       row.appendChild(el("span", "board-panel-dot" + (col.id === "inprogress" ? " inprogress" : "")));
       row.appendChild(el("span", "kanban-card-id", "#" + esc(c.id)));
       row.appendChild(el("span", "board-panel-card-title", esc(c.title)));
@@ -4755,7 +4832,8 @@ function boardCardById(id) {
 // per subagent lifecycle, and the full board rebuild this used to trigger was
 // the heaviest DOM op in the app (and the reason renderBoard needs its
 // focus/contenteditable rescue logic). Cards are keyed by data-id; the
-// spinner is the head's first child when present.
+// spinner is the head's first child when present. Also toggles the
+// attention pulse for cards whose session is blocked on a question.
 function updateBoardSpinners() {
   const board = $("#kanban");
   if (!board) return;
@@ -4765,12 +4843,14 @@ function updateBoardSpinners() {
     const head = card.querySelector(".kanban-card-head");
     if (!head) return;
     const has = !!head.querySelector(":scope > span.spinner");
-    if (want === has) return;
-    if (want) head.insertBefore(el("span", "spinner", ICONS.spinner), head.firstChild);
-    else {
-      const sp = head.querySelector(":scope > span.spinner");
-      if (sp) sp.remove();
+    if (want !== has) {
+      if (want) head.insertBefore(el("span", "spinner", ICONS.spinner), head.firstChild);
+      else {
+        const sp = head.querySelector(":scope > span.spinner");
+        if (sp) sp.remove();
+      }
     }
+    card.classList.toggle("pulse", !!(c && c.sessionID && sessionWaiting(c.sessionID)));
   });
 }
 
@@ -5009,6 +5089,9 @@ function boardCardNode(c) {
   const card = el("div", "kanban-card");
   card.draggable = true;
   card.dataset.id = c.id;
+  // the linked session is blocked on a question — pulse the card until the
+  // user answers (kept in sync by updateBoardSpinners between rebuilds)
+  if (c.sessionID && sessionWaiting(c.sessionID)) card.classList.add("pulse");
   const head = el("div", "kanban-card-head");
   // same busy indicator as the session tabs: a spinner while the linked
   // session is actively working on this in-progress card
