@@ -383,10 +383,13 @@ function updateTab() {
     const st = S.statuses[id];
     return !!(st && st.type !== "idle");
   };
+  // a pending question anywhere outranks the busy ring: the agent is blocked
+  // and needs the user. Global on purpose — a question in another session tab
+  // or another workspace must still badge the favicon (cross-workspace counts
+  // arrive via the /project refresh triggered by the global event stream).
+  const waiting = S.questions.length > 0 || S.workspaces.some((w) => w.questions > 0);
   let mode = "idle";
-  // a pending question on the viewed session (or one of its docked children)
-  // outranks the busy ring: the agent is blocked and needs the user
-  if (S.questions.some((q) => isDockSession(q.sessionID))) mode = "question";
+  if (waiting) mode = "question";
   else if (S.current && busy(S.current)) mode = "busy";
   else if (Object.keys(S.statuses).some(busy)) mode = "working";
   else if (S.current && S.errored.has(S.current)) mode = "error";
@@ -1479,6 +1482,7 @@ async function loadWorkspaces() {
   renderWorkspaceTabs();
   renderSidebarWorkspaces();
   refreshWorkspaceChrome();
+  updateTab(); // the favicon "?" badge is global — cross-workspace questions land here
 }
 
 // Keep the workspace chrome (sidebar title, rail badge, tab progress) in
@@ -1507,6 +1511,14 @@ function wsIndicatorEvent(t) {
     t === "session.deleted" || t === "question.asked" || t === "question.replied" || t === "question.rejected";
 }
 
+// Cross-workspace question events: the attention chime is global too — an
+// agent blocked in another workspace still needs the user. Only called for
+// events from OTHER directories (current-dir questions chime via handleEvent,
+// so this must not double-play).
+function wsQuestionChime(t) {
+  if (t === "question.asked") Notify.play();
+}
+
 // Desktop only: one Wails events channel ("server-event", emitted by the
 // Go bridge for every instance event) feeds both the session event handler
 // and the cross-workspace refresh — the web mode uses the /event and
@@ -1517,6 +1529,7 @@ function initDesktopEvents() {
     if (!m || typeof m !== "object") return;
     const t = m.payload && m.payload.type;
     if (m.directory && m.directory !== currentDir() && wsIndicatorEvent(t)) {
+      wsQuestionChime(t);
       scheduleWorkspaceRefresh();
     }
     // currentDir() is empty until /global/path loads — accept everything
@@ -1615,6 +1628,7 @@ function connectGlobalSSE() {
     try { m = JSON.parse(e.data); } catch { return; }
     const t = m.payload && m.payload.type;
     if (m.directory && m.directory !== currentDir() && wsIndicatorEvent(t)) {
+      wsQuestionChime(t);
       scheduleWorkspaceRefresh();
     }
   };
