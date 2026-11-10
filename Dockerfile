@@ -16,7 +16,7 @@
 
 # ---- build stage ----
 FROM golang:1.26-alpine AS build
-ARG GO_VERSION=1.26.2
+ARG GO_VERSION=1.26.10
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY *.go ./
@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/intelle
 
 # ---- runtime stage ----
 FROM ubuntu:24.04
-ARG GO_VERSION=1.26.2
+ARG GO_VERSION=1.26.10
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
