@@ -1,7 +1,10 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +17,7 @@ import (
 	"github.com/Intellexie/intellexor/internal/question"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
+	"github.com/Intellexie/intellexor/internal/util"
 )
 
 func mergedConfig(dir string) *config.Info { return config.Merge(dir) }
@@ -420,6 +424,64 @@ func (s *Server) fileContent(w http.ResponseWriter, r *http.Request) *apiError {
 	}
 	content := string(b)
 	writeJSON(w, 200, map[string]any{"type": "text", "content": content})
+	return nil
+}
+
+// GET /attachment/{id} serves a file the agent sent to the user via the
+// attach tool, from <DataDir>/attachments. Images and text/code files are
+// served inline (the web UI previews them); everything else — and any
+// request with ?download=1 — gets a Content-Disposition: attachment header.
+// ?format=base64 returns a JSON envelope {name, mime, data} instead, which
+// is how the desktop webview downloads binaries through the string-only
+// Api bridge. Untrusted content is served with CSP sandbox + nosniff so it
+// can never script the app origin.
+func (s *Server) attachmentServe(w http.ResponseWriter, r *http.Request) *apiError {
+	id := r.PathValue("id")
+	if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+		return badRequest("invalid attachment id")
+	}
+	path := filepath.Join(store.DataDir(), "attachments", id)
+	f, err := os.Open(path)
+	if err != nil {
+		return notFound("Attachment not found: " + id)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.IsDir() {
+		return notFound("Attachment not found: " + id)
+	}
+
+	// original name = stored name minus the "<8 hex>_" prefix
+	orig := id
+	if len(id) > 9 && id[8] == '_' {
+		orig = id[9:]
+	}
+	mimeType := util.MimeOfFile(path)
+
+	if r.URL.Query().Get("format") == "base64" {
+		b, err := io.ReadAll(f)
+		if err != nil {
+			return badRequest("could not read attachment: " + err.Error())
+		}
+		writeJSON(w, 200, map[string]any{
+			"name": orig, "mime": mimeType, "data": base64.StdEncoding.EncodeToString(b),
+		})
+		return nil
+	}
+
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox")
+
+	disposition := "inline"
+	if util.AttachmentKind(mimeType) == "download" || r.URL.Query().Get("download") == "1" {
+		disposition = "attachment"
+	}
+	if cd := mime.FormatMediaType(disposition, map[string]string{"filename": orig}); cd != "" {
+		w.Header().Set("Content-Disposition", cd)
+	}
+
+	w.Header().Set("Content-Type", mimeType)
+	http.ServeContent(w, r, orig, fi.ModTime(), f)
 	return nil
 }
 

@@ -183,6 +183,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	handle("GET /file", s.fileHandler)
 	handle("GET /file/content", s.fileContent)
+	// files the agent sent to the user via the attach tool
+	handle("GET /attachment/{id}", s.attachmentServe)
 	handle("GET /file/status", func(w http.ResponseWriter, r *http.Request) *apiError {
 		writeJSON(w, 200, []any{})
 		return nil

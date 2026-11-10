@@ -689,6 +689,7 @@ Working directories with their own sessions/config, exposed in **opencode's `Pro
 - `GET /mcp` → `{}`; `GET /skill`, `GET /lsp`, `GET /formatter` → `[]` (stubs)
 - `GET /file?path=<dir>&dirs=1` → `[ { "name", "path", "absolute", "type": "file"|"directory", "ignored": false } ]` (`.git`/`node_modules` marked `ignored: true` but still listed)
 - `GET /file/content?path=<file>` → `{ "type": "text", "content": "..." }` (relative paths resolve against the instance directory)
+- `GET /attachment/{id}` → serves a file the agent sent to the user via the **attach** tool, from `<DataDir>/attachments/`. `{id}` is the stored name (`<8 hex>_<basename>`); the original basename is recovered by stripping the prefix and used in `Content-Disposition`. Images and text/code files are served **inline** with a sniffed mime type; anything else — and any request with `?download=1` — gets `Content-Disposition: attachment`. `?format=base64` returns `{ "name", "mime", "data" }` (base64 body) instead of the raw bytes — the desktop webview uses this because its Api bridge returns string bodies only. Responses carry `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` (untrusted content must not script the app origin). Unknown ids → 404; ids containing `/`, `\` or `..` → 400.
 - `GET /doc` → OpenAPI stub
 - `POST /log` → `true` (no-op)
 - TUI stubs (`POST /tui/*`, `GET /tui/control/next`) → `true` (accepted, no-op)
@@ -908,6 +909,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `GET /path`, `GET /vcs`, `/vcs/status`, `/vcs/diff`, `/vcs/diff/raw` | paths & git |
 | `GET /agent`, `GET /command`, `GET /mcp` | agents, commands, mcp |
 | `GET /file`, `GET /file/content` | file browser |
+| `GET /attachment/{id}` | files the agent sent via the attach tool |
 | `GET /doc` | OpenAPI stub |
 
 ---
@@ -1000,6 +1002,7 @@ The composer is the heart of the app. Requirements:
   - `edit`/`write`/`apply_patch` → **diff body** (render `metadata.diff` unified-diff with add/del/hunk styling), **default open**.
   - `task` → subagent row; if `state.metadata.sessionId` exists the row links to the child's read-only session view (spinner while the child is busy).
   - `todowrite` → **not rendered in the timeline** (todos appear in the dock).
+  - `attach` → "Attachment", file name (+ optional description) as sub-label, **default open**; body renders `state.metadata.attachment` (`{name, mime, kind, size, url, description}`): `kind: "image"` → inline `<img src="{url}">` (click → full-size modal), `kind: "text"` (≤512 KB) → fetch `{url}?format=base64` via the API wrapper and render color-coded code (highlight.js, language from the extension), anything else → download card. Downloads: web mode uses a plain `{url}?download=1` anchor; desktop mode fetches the base64 envelope through the bridge and saves it as a Blob (the bridge returns string bodies only).
   - `grep`/`glob`/`webfetch`/`question`/`invalid` → friendly labels; unknown tools → capitalized name + output body.
 - **Thinking indicator:** while status is `busy`/`retry`/`compact`, show a shimmer row ("Thinking" + animated dots + right-aligned `agent · model` label); `retry` shows "retrying in Ns — attempt #N" from `status.next`/`status.attempt`; `compact` shows "Compacting".
 - **Autoscroll:** stick to bottom when within ~60px of it; floating "jump to latest" button when scrolled up >200px.

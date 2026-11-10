@@ -406,7 +406,7 @@ const md = new marked.Marked({
   breaks: true, // single newlines become <br> (chat-style soft wrap)
   renderer: {
     code({ text, lang }) {
-      return `<pre><button class="copy-code" type="button">copy</button><code data-lang="${esc(lang || "")}">${esc(text)}</code></pre>`;
+      return `<pre><button class="copy-code" type="button">copy</button><code data-lang="${esc(lang || "")}">${highlightCode(text, lang)}</code></pre>`;
     },
     codespan({ text }) {
       return `<code class="inline">${esc(text)}</code>`;
@@ -417,6 +417,26 @@ const md = new marked.Marked({
     },
   },
 });
+
+// Color-coded code blocks via the vendored highlight.js
+// (web/assets/highlight.min.js, common language bundle). Output is span
+// markup with language classes — DOMPurify keeps those, so no extra
+// allowlisting is needed. Falls back to plain escaped text when hljs is
+// missing (e.g. stripped assets) or the language is unknown.
+function highlightCode(text, lang) {
+  if (!window.hljs) return esc(text);
+  const language = (lang || "").trim().split(/\s+/)[0].toLowerCase();
+  try {
+    if (language && hljs.getLanguage(language)) {
+      return hljs.highlight(text, { language, ignoreIllegals: true }).value;
+    }
+    // auto-detect only small blocks — detection cost grows with size
+    if ((text || "").length <= 10000) {
+      return hljs.highlightAuto(text).value;
+    }
+  } catch {}
+  return esc(text);
+}
 
 // Rendered markdown is memoized by source: full timeline rebuilds re-render
 // every part, but during a run only one or two parts actually change — the
@@ -3721,6 +3741,15 @@ function renderTool(p, info) {
     case "question":
       title = "Questions";
       break;
+    case "attach": {
+      title = "Attachment";
+      const att = st.metadata && st.metadata.attachment;
+      sub = att && att.name ? att.name : truncate(inStr(input.path), 60);
+      if (att && att.description) sub += " — " + att.description;
+      bodyFn = () => renderAttachmentPreview(st);
+      defaultOpen = true;
+      break;
+    }
     case "invalid":
       title = "Invalid Tool";
       break;
@@ -3822,9 +3851,125 @@ function renderToolContent(p, st, name) {
     pre.textContent = "$ " + (inp.command || "") + "\n\n" + ((st.metadata && st.metadata.output) || st.output || "");
     return pre;
   }
+  if (name === "attach") return renderAttachmentPreview(st);
   const pre = el("pre");
   pre.textContent = st.output || "";
   return pre;
+}
+
+/* ---------- attachments (files the agent sent via the attach tool) ---------- */
+
+// Preview body for an attach tool part. Images render inline (the URL goes
+// through the same http.Handler in web and desktop mode — the webview's
+// scheme handler forwards it), text/code is fetched as a base64 JSON
+// envelope through api() (works identically over the desktop bridge) and
+// shown color-coded, everything else is a download card.
+function renderAttachmentPreview(st) {
+  const att = (st.metadata && st.metadata.attachment) || {};
+  const box = el("div", "attach-preview");
+  const url = att.url || "";
+  const kind = att.kind || (att.mime && att.mime.startsWith("image/") ? "image" : "download");
+  if (!url) {
+    box.appendChild(el("div", "att-binary", st.status === "running" ? "preparing attachment…" : "(no attachment)"));
+    return box;
+  }
+  const name = att.name || "file";
+  if (kind === "image") {
+    const img = el("img", "att-preview-img");
+    img.src = url;
+    img.alt = name;
+    img.title = "Click to view " + name;
+    img.onclick = () => openAttachmentModal({ mime: att.mime, url, filename: name });
+    box.appendChild(img);
+  } else if (kind === "text" && (att.size || 0) <= 512 * 1024) {
+    const pre = el("pre", "att-preview-code");
+    pre.textContent = "loading…";
+    api("GET", url + "?format=base64").then((v) => {
+      if (!v || !v.data) { pre.textContent = "(empty file)"; return; }
+      const txt = new TextDecoder().decode(Uint8Array.from(atob(v.data), (c) => c.charCodeAt(0)));
+      pre.innerHTML = "";
+      const code = el("code", "hljs");
+      code.innerHTML = DOMPurify.sanitize(highlightCode(txt, hljsLangFor(name)));
+      pre.appendChild(code);
+    }).catch((e) => {
+      pre.textContent = "Could not load preview: " + (e && e.message || e);
+    });
+    box.appendChild(pre);
+  } else {
+    const card = el("div", "att-dl-card");
+    card.appendChild(el("span", "att-dl-icon", ICONS.file));
+    const meta = el("div", "att-dl-meta");
+    meta.appendChild(el("div", "att-dl-name", name));
+    const bits = [att.mime || "unknown type", fmtBytes(att.size || 0)];
+    if (att.size > 512 * 1024 && kind === "text") bits.push("too large to preview");
+    meta.appendChild(el("div", "att-dl-sub", esc(bits.join(" · "))));
+    card.appendChild(meta);
+    const dl = el("button", "btn ghost att-dl-btn", "Download");
+    dl.type = "button";
+    dl.onclick = (e) => { e.stopPropagation(); downloadAttachment(att); };
+    card.appendChild(dl);
+    box.appendChild(card);
+  }
+  const foot = el("div", "att-preview-foot");
+  const save = el("a", "att-save", "Download");
+  save.href = url + "?download=1";
+  save.download = name;
+  // always through downloadAttachment: in desktop mode a plain anchor would
+  // navigate the webview to the scheme URL instead of saving
+  save.onclick = (e) => { e.preventDefault(); downloadAttachment(att); };
+  foot.appendChild(save);
+  box.appendChild(foot);
+  return box;
+}
+
+// Binary-safe download. Web mode: a plain anchor with ?download=1 (the
+// server sets Content-Disposition). Desktop mode: the Api bridge returns
+// bodies as strings, which would corrupt binaries — so fetch the base64
+// envelope through the bridge and save it as a Blob instead.
+function downloadAttachment(att) {
+  const name = att.name || "file";
+  const url = att.url || "";
+  if (!DESKTOP) {
+    const a = el("a");
+    a.href = url + "?download=1";
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  api("GET", url + "?format=base64").then((v) => {
+    const bytes = Uint8Array.from(atob(v.data), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: v.mime || "application/octet-stream" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }).catch((e) => toast("Download failed: " + (e && e.message || e)));
+}
+
+// Map a file extension to a highlight.js language name (common bundle).
+function hljsLangFor(name) {
+  const ext = ((name || "").split(".").pop() || "").toLowerCase();
+  const map = {
+    js: "javascript", mjs: "javascript", cjs: "javascript",
+    ts: "typescript", tsx: "typescript", jsx: "javascript",
+    yml: "yaml", sh: "bash", shell: "bash", zsh: "bash",
+    py: "python", rb: "ruby", rs: "rust", kt: "kotlin",
+    "c++": "cpp", hpp: "cpp", cc: "cpp", h: "c", html: "xml", svg: "xml",
+    cs: "csharp", md: "markdown", dockerfile: "makefile",
+  };
+  const lang = map[ext] || ext;
+  return window.hljs && hljs.getLanguage(lang) ? lang : "";
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
 }
 
 function patchSummary(st) {
