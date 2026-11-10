@@ -200,13 +200,14 @@ func TestCleanEOFMidStreamIsRetryable(t *testing.T) {
 	}
 }
 
-// When the provider keeps resetting mid-stream, the retries must stay bounded:
-// after maxStepRetries the turn ends with the retryable error instead of
-// looping forever.
-func TestMidStreamResetGivesUpAfterMaxRetries(t *testing.T) {
+// Retries never stop: when the provider keeps resetting mid-stream, the step
+// is retried indefinitely until the endpoint recovers — the turn completes
+// with the recovering attempt's content no matter how many attempts it took.
+func TestMidStreamResetRetriesUntilRecovery(t *testing.T) {
 	provider.SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
 	defer provider.SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
 
+	var calls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(body), "title generator") {
@@ -214,18 +215,29 @@ func TestMidStreamResetGivesUpAfterMaxRetries(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&calls, 1) <= 5 {
+			// stream one partial token, then kill the connection mid-stream
+			chunk := map[string]any{"choices": []map[string]any{{
+				"delta": map[string]any{"content": "partial"},
+			}}}
+			b, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			w.(http.Flusher).Flush()
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack failed: %v", err)
+				return
+			}
+			conn.Close()
+			return
+		}
 		chunk := map[string]any{"choices": []map[string]any{{
-			"delta": map[string]any{"content": "partial"},
+			"delta": map[string]any{"content": "recovered full answer"}, "finish_reason": "stop",
 		}}}
 		b, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
 		w.(http.Flusher).Flush()
-		conn, _, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack failed: %v", err)
-			return
-		}
-		conn.Close()
 	}
 
 	i, s := setupAbortTest(t, h)
@@ -243,13 +255,16 @@ func TestMidStreamResetGivesUpAfterMaxRetries(t *testing.T) {
 		if asst == nil {
 			t.Fatal("no assistant message returned")
 		}
-		if asst.Error == nil {
-			t.Fatal("expected the turn to end with an error after the retries")
+		if asst.Error != nil {
+			t.Fatalf("turn died on the mid-stream resets: %v", asst.Error.Data["message"])
 		}
-		if name, _ := asst.Error.Data["isRetryable"].(bool); !name {
-			t.Errorf("expected the surfaced error to stay retryable, got %v", asst.Error.Data)
+		if asst.Finish != "stop" {
+			t.Fatalf("expected finish=stop after the retries, got %q", asst.Finish)
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("prompt did not return: retries are not bounded")
+		t.Fatal("prompt did not return: retries did not recover")
+	}
+	if got := atomic.LoadInt32(&calls); got <= 5 {
+		t.Errorf("expected the step to be retried past the failures, got %d calls", got)
 	}
 }

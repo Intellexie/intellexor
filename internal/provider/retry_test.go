@@ -91,40 +91,44 @@ func TestStreamRetriesUntilSuccess(t *testing.T) {
 	}
 }
 
-// The retry budget bounds the patience: a permanently stalled endpoint must
-// surface its error once the budget is spent instead of retrying forever and
-// keeping the session busy.
-func TestStreamGivesUpAfterRetryBudget(t *testing.T) {
+// Retries never give up on their own: a persistently failing endpoint is
+// retried indefinitely (well past the old 5-minute budget) until it recovers.
+func TestStreamRetriesForeverUntilRecovery(t *testing.T) {
 	SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
 	defer SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
-	SetRetryBudgetForTest(300 * time.Millisecond)
-	defer SetRetryBudgetForTest(5 * time.Minute)
 
+	var calls int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "overloaded", http.StatusServiceUnavailable)
+		// fail far more times than the old budget would have allowed
+		if atomic.AddInt32(&calls, 1) <= 50 {
+			http.Error(w, "overloaded", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer ts.Close()
 
 	c := &Client{Resolved: &Resolved{ID: "test", Protocol: "openai", BaseURL: ts.URL}}
-	start := time.Now()
 	ch, err := c.Stream(context.Background(), Request{Model: "m"}, nil)
 	if err != nil {
 		t.Fatalf("Stream returned error: %v", err)
 	}
-	var gotErr *StreamError
+	var text string
 	for ev := range ch {
+		if ev.Type == "text-delta" {
+			text += ev.Text
+		}
 		if ev.Type == "error" {
-			gotErr = ev.Err
+			t.Fatalf("stream gave up after %d calls: %s", calls, ev.Err.Message)
 		}
 	}
-	if gotErr == nil {
-		t.Fatal("expected an error event after the budget was spent")
+	if text != "ok" {
+		t.Errorf("recovered stream text = %q, want %q", text, "ok")
 	}
-	if !gotErr.IsRetryable {
-		t.Errorf("expected the surfaced error to stay retryable, got %q", gotErr.Message)
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("giving up took %v, expected ~the budget", elapsed)
+	if calls <= 50 {
+		t.Errorf("expected the endpoint to be retried past the failures, got %d calls", calls)
 	}
 }
 

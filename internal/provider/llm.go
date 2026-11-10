@@ -159,15 +159,12 @@ func truncate(s string, n int) string {
 
 // Retry backoff for retryable stream failures: doubling from retryBaseDelay,
 // capped at retryMaxDelay (5s, 10s, 20s, 40s, 80s, ..., 10m, 10m, ...). The
-// retries are patient — a flaky provider is waited out instead of failing
-// the turn — but not unbounded: once retryBudget has been spent since the
-// first attempt, the last error is surfaced so the turn ends (a permanently
-// hung endpoint must not keep the session busy forever). Aborting the
-// session (ctx.Done) always wins over the backoff sleep.
+// retries are unbounded — a flaky or long-down provider is waited out
+// indefinitely instead of failing the turn; only aborting the session
+// (ctx.Done) ends the wait, and abort always wins over the backoff sleep.
 var (
 	retryBaseDelay = 5 * time.Second
 	retryMaxDelay  = 10 * time.Minute
-	retryBudget    = 5 * time.Minute
 )
 
 // SetRetryBackoffForTest overrides the backoff bounds (tests only; the app
@@ -175,9 +172,6 @@ var (
 func SetRetryBackoffForTest(base, max time.Duration) {
 	retryBaseDelay, retryMaxDelay = base, max
 }
-
-// SetRetryBudgetForTest overrides the total retry budget (tests only).
-func SetRetryBudgetForTest(d time.Duration) { retryBudget = d }
 
 // Backoff exposes the retry delay schedule to the app-level step retry. A
 // mid-stream failure (after partial output was forwarded) cannot be retried
@@ -207,17 +201,15 @@ func backoff(attempt int) time.Duration {
 // channel: a retryable error is retried with exponential backoff (5s
 // doubling, capped at 10m) as long as nothing has been forwarded to the
 // consumer yet. Once partial output was streamed, a retry would replay and
-// duplicate it, so the error is passed through instead. The retries are
-// bounded by retryBudget, spent from the first attempt: once it is used up
-// the last error is surfaced, so a permanently hung endpoint ends the turn
-// (with an error) instead of keeping the session busy forever. The loop
-// also exits on success, a non-retryable error, an error after partial
-// output, or an aborted request (abort always wins over the backoff sleep).
+// duplicate it, so the error is passed through instead (the app-level step
+// retry takes over — see internal/app/prompt.go). The retries never give up
+// on their own: only success, a non-retryable error, an error after partial
+// output, or an aborted request (abort always wins over the backoff sleep)
+// end the loop.
 func (c *Client) Stream(ctx context.Context, req Request, onRetry func(attempt int, err *StreamError, next time.Time)) (<-chan StreamEvent, error) {
 	out := make(chan StreamEvent, 256)
 	go func() {
 		defer close(out)
-		start := time.Now()
 		for attempt := 1; ; attempt++ {
 			var last *StreamError
 			ch, err := c.streamOnce(ctx, req)
@@ -246,13 +238,9 @@ func (c *Client) Stream(ctx context.Context, req Request, onRetry func(attempt i
 					return // clean finish: every event forwarded
 				}
 			}
-			// retryable failure with nothing on the wire yet: give up when
-			// the budget is spent (the error must reach the consumer so the
-			// turn ends), otherwise back off and retry
-			if time.Since(start) >= retryBudget {
-				out <- StreamEvent{Type: "error", Err: last}
-				return
-			}
+			// retryable failure with nothing on the wire yet: back off and
+			// retry — forever, until the endpoint recovers or the request
+			// is aborted
 			delay := backoff(attempt)
 			if onRetry != nil {
 				onRetry(attempt, last, time.Now().Add(delay))

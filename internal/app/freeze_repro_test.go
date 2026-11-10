@@ -120,18 +120,15 @@ func TestVLLMStyleBoardMoveThenFinish(t *testing.T) {
 // freeze: after the board tool completes, the NEXT provider request opens a
 // connection but never sends a byte (hung vLLM / dead proxy / silent NAT
 // drop). The agent must NOT freeze forever — the idle watchdog must abandon
-// the stream, surface a retryable error on the assistant message, and let
-// the prompt return, with the card in done and the tool part completed.
+// the stream and the retry must ride the stall out until the endpoint
+// recovers, with the card in done and the tool part completed.
 func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 	provider.SetStreamIdleTimeoutForTest(500 * time.Millisecond)
 	defer provider.SetStreamIdleTimeoutForTest(15 * time.Minute)
-	// the retry backoff and budget must be shortened too: the production
-	// schedule (5s doubling to 10m, 5m budget) would blow the test's 15s
-	// budget on the stalls
+	// the retry backoff must be shortened too: the production schedule
+	// (5s doubling to 10m) would blow the test's 15s budget on the stalls
 	provider.SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
 	defer provider.SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
-	provider.SetRetryBudgetForTest(2 * time.Second)
-	defer provider.SetRetryBudgetForTest(5 * time.Minute)
 
 	var calls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
@@ -142,13 +139,18 @@ func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 			respondEmptyStop(w)
 			return
 		}
-		if atomic.AddInt32(&calls, 1) == 1 {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
 			vllmToolCallStep(w, fl, "chatcmpl-tool-1")
-			return
+		case 2, 3:
+			// accept the request, then go silent (no bytes, no [DONE],
+			// connection kept open) — the idle watchdog must abandon the
+			// stream and the retry must ride it out
+			<-r.Context().Done()
+		default:
+			// the endpoint recovers: the turn completes
+			respondEmptyStop(w)
 		}
-		// second step: accept the request, then go silent forever
-		// (no bytes, no [DONE], connection kept open)
-		<-r.Context().Done()
 	}
 
 	i, s := setupAbortTest(t, h)
@@ -173,14 +175,11 @@ func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 	if asst == nil {
 		t.Fatal("no assistant message returned")
 	}
-	if asst.Error == nil {
-		t.Fatalf("expected a stall error on the assistant message, got finish=%q", asst.Finish)
+	if asst.Error != nil {
+		t.Fatalf("expected the retries to ride out the stalls, got error %v", asst.Error.Data["message"])
 	}
-	if !strings.Contains(asst.Error.Name, "APIError") {
-		t.Fatalf("expected APIError, got %q", asst.Error.Name)
-	}
-	if msg, _ := asst.Error.Data["message"].(string); !strings.Contains(msg, "stalled") {
-		t.Fatalf("expected the stall message, got %q", msg)
+	if atomic.LoadInt32(&calls) < 4 {
+		t.Errorf("expected the stalled endpoint to be retried, got %d calls", calls)
 	}
 
 	// the card DID move and the tool part IS completed — the work before the
@@ -210,15 +209,17 @@ func TestStalledStreamAfterToolCallRecovers(t *testing.T) {
 }
 
 // A stream that stalls MID-body (bytes flowed, then silence) must also be
-// abandoned instead of freezing the loop. With the step-level retry the stall
-// is first retried (backoff shortened for the test); when every attempt
-// stalls again, the turn ends with the retryable stall error.
+// abandoned instead of freezing the loop. The partial output makes the
+// provider client pass the error through; the step-level retry then resends
+// the step (backoff shortened for the test) and keeps retrying until the
+// endpoint recovers.
 func TestStalledMidStreamRecovers(t *testing.T) {
 	provider.SetStreamIdleTimeoutForTest(500 * time.Millisecond)
 	defer provider.SetStreamIdleTimeoutForTest(15 * time.Minute)
 	provider.SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
 	defer provider.SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
 
+	var calls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
 		fl, _ := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -227,14 +228,25 @@ func TestStalledMidStreamRecovers(t *testing.T) {
 			respondEmptyStop(w)
 			return
 		}
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			chunk := map[string]any{"choices": []map[string]any{{
+				"delta": map[string]any{"content": "partial "},
+			}}}
+			b, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			fl.Flush()
+			// then silence until the client gives up
+			<-r.Context().Done()
+			return
+		}
+		// the endpoint recovers: the turn completes
 		chunk := map[string]any{"choices": []map[string]any{{
-			"delta": map[string]any{"content": "partial "},
+			"delta": map[string]any{"content": "recovered"}, "finish_reason": "stop",
 		}}}
 		b, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
 		fl.Flush()
-		// then silence forever
-		<-r.Context().Done()
 	}
 
 	i, s := setupAbortTest(t, h)
@@ -249,11 +261,17 @@ func TestStalledMidStreamRecovers(t *testing.T) {
 	}()
 	select {
 	case asst := <-done:
-		if asst == nil || asst.Error == nil {
-			t.Fatal("expected a stall error on the assistant message")
+		if asst == nil {
+			t.Fatal("no assistant message returned")
 		}
-		if msg, _ := asst.Error.Data["message"].(string); !strings.Contains(msg, "stalled") {
-			t.Fatalf("expected the stall message, got %q", msg)
+		if asst.Error != nil {
+			t.Fatalf("expected the retries to ride out the stalls, got %v", asst.Error.Data["message"])
+		}
+		if asst.Finish != "stop" {
+			t.Fatalf("expected finish=stop after recovery, got %q", asst.Finish)
+		}
+		if got := atomic.LoadInt32(&calls); got <= 2 {
+			t.Errorf("expected the stalled endpoint to be retried, got %d calls", got)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("agent froze: prompt did not return after the mid-stream stall")

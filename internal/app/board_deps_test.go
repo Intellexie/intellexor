@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Intellexie/intellexor/internal/board"
-	"github.com/Intellexie/intellexor/internal/provider"
 	"github.com/Intellexie/intellexor/internal/session"
 	"github.com/Intellexie/intellexor/internal/store"
 )
@@ -290,16 +289,12 @@ func TestApproveAndRejectReviewCard(t *testing.T) {
 	}
 }
 
-// A provider error that survives the card's single retry marks the card
-// blocked with the error — the work stops visibly instead of silently dying.
+// A non-retryable provider error marks the card blocked with the error —
+// the work stops visibly instead of silently dying. (Retryable errors are
+// retried forever and never block the card.)
 func TestProviderErrorBlocksCard(t *testing.T) {
-	provider.SetRetryBudgetForTest(time.Millisecond)
-	defer provider.SetRetryBudgetForTest(5 * time.Minute)
-	provider.SetRetryBackoffForTest(time.Millisecond, 2*time.Millisecond)
-	defer provider.SetRetryBackoffForTest(5*time.Second, 10*time.Minute)
-
 	h := func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"error":{"message":"provider exploded"}}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":{"message":"provider exploded"}}`, http.StatusBadRequest)
 	}
 	i, _ := setupAbortTest(t, h)
 	projectID := store.ProjectID(i.Directory)

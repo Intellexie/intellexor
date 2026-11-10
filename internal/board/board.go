@@ -98,7 +98,7 @@ type Attachment struct {
 //
 // Live status: Status is the card's runtime state — "running", "waiting"
 // (needs attention: pending question or permission), "error" or "blocked"
-// (provider failure after its retry; "" means idle). StatusText carries
+// (non-retryable provider failure; "" means idle). StatusText carries
 // the error/waiting detail, StartedAt is the last start (unix ms, for
 // elapsed time) and Cost/Tokens snapshot the linked session's usage.
 type Card struct {
@@ -617,8 +617,8 @@ func findCard(projectID, id string) (Card, error) {
 
 // Runtime is a card's live status snapshot, updated by the app layer as the
 // linked session works. Status is "" (idle), "running", "waiting" (needs
-// attention: pending question or permission), "error" or "blocked" (provider
-// failure after the card's retry); StatusText carries the detail.
+// attention: pending question or permission), "error" or "blocked"
+// (non-retryable provider failure); StatusText carries the detail.
 type Runtime struct {
 	Status     string
 	StatusText string

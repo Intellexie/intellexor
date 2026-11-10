@@ -338,8 +338,9 @@ func RejectCard(i *Instance, projectID, cardID string) (board.Card, error) {
 
 // markCardBlocked flags the card a failed session was working on as
 // blocked, with the provider error as the status text — the failure
-// handling for 429/5xx: after the card's single retry, the work stops
-// instead of silently dying.
+// handling for non-retryable provider errors (4xx, bad request): the work
+// stops visibly instead of silently dying. Retryable errors are retried
+// forever and never reach this.
 func markCardBlocked(i *Instance, sessionID, errMsg string) {
 	projectID := store.ProjectID(i.Directory)
 	cards, err := board.Get(projectID)

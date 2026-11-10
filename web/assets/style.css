@@ -877,12 +877,6 @@ body.board-chat-resizing { cursor:col-resize; user-select:none; }
 .bch-title { font-size:13px; font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .bch-meta { flex:none; font-size:11px; color:var(--text-faint); }
 
-@media (max-width: 767px) {
-  /* narrow screens: the chat stays a column, just a narrower one that the
-     board's horizontal scroll reaches like any other column */
-  .board-chat { flex:0 0 300px; min-width:300px; max-width:none; }
-}
-
 /* ---------- cron jobs (second fixed tab) ---------- */
 .cron-list { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding:14px 18px 18px; width:100%; max-width:860px; margin:0 auto; }
 .cron-empty { margin:auto; text-align:center; font-size:13px; color:var(--text-faint); line-height:1.8; }
@@ -933,6 +927,29 @@ body.board-chat-resizing { cursor:col-resize; user-select:none; }
   .kanban-col { min-width:200px; }
   #toast-root { left:16px; }
   .toast { max-width:none; }
+}
+
+@media (max-width: 767px) {
+  /* the board turns vertical: columns stack top-to-bottom and the board
+     scrolls vertically instead of sideways; each column grows to its content
+     so nothing is clipped by the viewport height */
+  .kanban { flex-direction:column; overflow-x:hidden; overflow-y:auto; gap:10px; padding:10px 10px 14px; }
+  .kanban-col { flex:0 0 auto; min-width:0; max-width:none; }
+  .kanban-cards { flex:0 0 auto; overflow-y:visible; }
+  /* collapsed columns gather in a horizontal row of regular buttons instead
+     of the sideways-text vertical rail */
+  .kanban-rail { flex-direction:row; flex-wrap:wrap; }
+  .kanban-col-collapsed { writing-mode:horizontal-tb; padding:8px 12px; }
+  /* the orchestrator chat becomes a full-width column with its own height
+     (its timeline scrolls internally); the horizontal grip is meaningless here */
+  .board-chat { flex:0 0 auto; min-width:0; max-width:none; height:70vh; }
+  .board-chat-resize { display:none; }
+  /* a collapsed chat is a slim horizontal strip, not a vertical one; the
+     expand button gets a proper touch target inside it */
+  .board-chat.collapsed { flex:0 0 auto; height:56px; }
+  .board-chat.collapsed .board-chat-head { flex-direction:row; height:auto; padding:8px 12px; }
+  .board-chat.collapsed .board-chat-btn { width:36px; height:36px; flex:0 0 36px; }
+  .board-chat.collapsed .board-chat-title { writing-mode:horizontal-tb; transform:none; }
 }
 
 /* ---------- mic / speech-to-text ---------- */

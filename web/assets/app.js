@@ -1205,6 +1205,18 @@ function closeTab(sid) {
   renderTabs();
 }
 
+// Close every open session tab except the given one. If the current view was
+// one of the closed tabs, switch to the surviving tab (navigate re-renders);
+// otherwise just refresh the tab bar.
+function closeAllTabsBut(sid) {
+  if (!S.tabs.includes(sid)) return;
+  const switchTo = S.current !== sid;
+  S.tabs = [sid];
+  saveTabs();
+  if (switchTo) navigate("/" + sid);
+  else renderTabs();
+}
+
 function buildTabBar() {
   const bar = el("div", "tab-bar");
   bar.id = "tab-bar";
@@ -1365,7 +1377,7 @@ function renderTabs() {
     const title = pending ? "New session" : (s.title || "New session");
     tab.title = pending
       ? "New session — click to switch, middle-click to close"
-      : title + " — click to switch, right-click to rename, middle-click to close";
+      : title + " — click to switch, right-click to rename or close others, middle-click to close";
     if (!pending) {
       const st = S.statuses[sid];
       if (sessionWaiting(sid)) {
@@ -1404,6 +1416,7 @@ function renderTabs() {
       e.preventDefault();
       openContextMenu(e.clientX, e.clientY, [
         { label: "Rename", icon: ICONS.edit, action: () => openRenamePopover(e.clientX, e.clientY, s) },
+        { label: "Close all but this one", icon: ICONS.close, action: () => closeAllTabsBut(sid) },
       ]);
     };
     bar.appendChild(tab);
@@ -3991,6 +4004,14 @@ function applyBoardChatCollapsed() {
   panel.classList.toggle("collapsed", collapsed);
   const btn = $("#board-chat-collapse");
   if (btn) btn.title = collapsed ? "Expand" : "Collapse";
+  // narrow screens: the board is vertical and the chat is full-width CSS —
+  // inline width/flex pinning would fight it, so clear and bail
+  if (isNarrow()) {
+    panel.style.flex = "";
+    panel.style.maxWidth = "";
+    if (!collapsed) renderBoardChat();
+    return;
+  }
   if (collapsed) {
     panel.style.flex = "0 0 46px";
     panel.style.maxWidth = "46px";
@@ -4013,6 +4034,9 @@ const BOARD_CHAT_MAX_W = 720;
 const BOARD_CHAT_WIDTH_KEY = "intellexor.boardChatWidth";
 
 function applyBoardChatWidth(panel, w) {
+  // narrow screens run the vertical board, where the chat is CSS-sized —
+  // never pin an inline width there
+  if (isNarrow()) return;
   w = Math.round(Math.max(BOARD_CHAT_MIN_W, Math.min(BOARD_CHAT_MAX_W, w)));
   // a resized chat is pinned to the dragged width — the default flex sizing
   // (grow up to 420px) only applies until the user resizes it themselves
