@@ -16,7 +16,7 @@
  * {type:"progress", loaded, total} during model download, {type:"fallback"}
  * when WebGPU init failed and we dropped to CPU.
  */
-import { pipeline, env } from "./stt/transformers.min.js";
+import { AutoProcessor, AutoTokenizer, AutoModelForCTC, env } from "./stt/transformers.min.js";
 
 // Serve the vendored onnxruntime-web binaries from the app itself — no CDN,
 // works fully offline once the model is cached.
@@ -26,7 +26,7 @@ env.backends.onnx.wasm.wasmPaths = "/stt/";
 // Hard requirement: Parakeet (FastConformer CTC). Do not swap for Whisper.
 const MODEL = "onnx-community/parakeet-ctc-0.6b-ONNX";
 
-let transcriber = null;
+let transcriber = null; // {processor, model, tokenizer}
 let progress = new Map(); // file -> {loaded, total}
 
 const post = (id, data) => self.postMessage({ id, dir: "sender", data });
@@ -47,13 +47,23 @@ function onProgress(p) {
 
 async function buildPipeline(device) {
   progress = new Map();
-  return await pipeline("automatic-speech-recognition", MODEL, {
+  const opts = {
     device,
     // Parakeet is a single CTC model (no encoder/decoder split): fp16 on
     // WebGPU, q8 on CPU wasm.
     dtype: device === "webgpu" ? "fp16" : "q8",
     progress_callback: onProgress,
-  });
+  };
+  // Loaded piecewise (not via pipeline) because the ASR pipeline's CTC path
+  // decodes argmax ids WITHOUT collapsing consecutive duplicates — any token
+  // the model holds for 2+ frames (80 ms each) is printed twice
+  // ("soundounds", "have have"). We decode ourselves, see transcribe().
+  const [processor, tokenizer, model] = await Promise.all([
+    AutoProcessor.from_pretrained(MODEL, { progress_callback: onProgress }),
+    AutoTokenizer.from_pretrained(MODEL, { progress_callback: onProgress }),
+    AutoModelForCTC.from_pretrained(MODEL, opts),
+  ]);
+  return { processor, tokenizer, model };
 }
 
 // Split a long recording into segments cut at the quietest point near each
@@ -89,6 +99,56 @@ function splitChunks(samples, rate, targetSec = 25, searchSec = 4) {
   return chunks;
 }
 
+// Greedy CTC decode of one segment. Parakeet emits one token per ~80 ms
+// frame; a token held across consecutive frames is ONE token, so the argmax
+// stream must be collapsed (drop repeated ids, then blanks) before decoding.
+// transformers.js's own pipeline skips the collapse — the source of every
+// "soundounds" / "have have" doubling. Repeats separated by a blank are real
+// and kept: A A _ A decodes to "aa", not "a".
+async function ctcDecode({ processor, tokenizer, model }, samples) {
+  const rate = processor.feature_extractor.config.sampling_rate || 16000;
+  const blank = model.config.pad_token_id ?? tokenizer.pad_token_id ?? 1024;
+
+  const run = async (pcm) => await model(await processor(pcm));
+  let out = await run(samples);
+  // The exported graph deterministically produces all-NaN logits for some
+  // input lengths (seen with fp32 and q8 alike) — the transcript would come
+  // back empty. Appending a beat of silence changes the frame count, which
+  // is enough to dodge it; content is untouched.
+  if (hasNaN(out.logits.data)) {
+    const padded = new Float32Array(samples.length + Math.round(rate / 4));
+    padded.set(samples);
+    out = await run(padded);
+  }
+
+  // logits: [batch, frames, vocab] — batch is always 1, so frames/vocab are
+  // the last two dims and batch 0 starts at offset 0 of the flat buffer.
+  const nd = out.logits.dims.length;
+  const T = out.logits.dims[nd - 2];
+  const V = out.logits.dims[nd - 1];
+  const data = out.logits.data;
+  const ids = [];
+  let prev = blank;
+  for (let t = 0; t < T; t++) {
+    const off = t * V;
+    let best = blank, bestVal = -Infinity;
+    for (let v = 0; v < V; v++) {
+      const s = data[off + v];
+      if (s > bestVal) { bestVal = s; best = v; }
+    }
+    // a frame that stayed NaN decodes as blank, not as token 0 (<unk>)
+    if (best !== blank && best !== prev) ids.push(best);
+    prev = best;
+  }
+  if (ids.length === 0) return "";
+  return tokenizer.decode(ids, { skip_special_tokens: true }).trim();
+}
+
+function hasNaN(data) {
+  for (let i = 0; i < data.length; i++) if (Number.isNaN(data[i])) return true;
+  return false;
+}
+
 self.onmessage = async (e) => {
   const { id, type, payload } = e.data || {};
   if (id === undefined) return;
@@ -112,12 +172,11 @@ self.onmessage = async (e) => {
       // are decoded in silence-aligned segments (see splitChunks) — the
       // model itself handles long input, but browser runtimes degrade on
       // one giant sequence.
-      const rate = transcriber.processor?.feature_extractor?.config?.sampling_rate || 16000;
+      const rate = transcriber.processor.feature_extractor.config.sampling_rate || 16000;
       const chunks = splitChunks(payload.samples, rate);
       let text = "";
       for (let i = 0; i < chunks.length; i++) {
-        const out = await transcriber(chunks[i]);
-        const t = (out && out.text ? out.text : "").trim();
+        const t = await ctcDecode(transcriber, chunks[i]);
         if (t) text += (text ? " " : "") + t;
         self.postMessage({ type: "decode-progress", done: i + 1, total: chunks.length });
       }
