@@ -51,6 +51,8 @@ func registryFor(i *Instance) *tool.Registry {
 			return ApproveCard(i, projectID, cardID)
 		}
 		return RejectCard(i, projectID, cardID)
+	}, MovedToReview: func(projectID, cardID string) {
+		StartReviewOnMove(i, projectID, cardID)
 	}}
 	questionTool := tool.QuestionTool{Svc: i.Quest}
 	alarmTool := tool.AlarmTool{OnUpdate: func() {

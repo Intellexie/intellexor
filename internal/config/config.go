@@ -108,9 +108,9 @@ type BoardCfg struct {
 	// (dependency triggers). 0 means unlimited; manual starts are never
 	// capped.
 	MaxRunning *int `json:"max_running,omitempty"`
-	// ReviewAgent is the agent that reviews a card's changes when its
-	// session goes idle and the card moves to review. Empty disables the
-	// automatic review run (the review column itself stays active).
+	// ReviewAgent is the agent that reviews a card's changes when the card
+	// is moved to the review column. Empty disables the automatic review
+	// run (the review column itself stays active).
 	ReviewAgent string `json:"review_agent,omitempty"`
 	// AutoReview turns the automatic review run on/off (default on, when a
 	// ReviewAgent is set).
@@ -127,7 +127,7 @@ func (b *BoardCfg) ReviewAgentOrDefault() string {
 }
 
 // AutoReviewOn reports whether the review agent should run automatically
-// when a card moves to review (default true).
+// when a card is moved to review (default true).
 func (b *BoardCfg) AutoReviewOn() bool {
 	if b == nil || b.AutoReview == nil {
 		return true

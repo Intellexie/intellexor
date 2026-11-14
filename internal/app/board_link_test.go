@@ -186,8 +186,8 @@ func TestLinkedCardAutoStartsOnDone(t *testing.T) {
 	if !watcherReplied(i, child, "Following up.") {
 		t.Fatal("auto-started session never ran the model on the card's task")
 	}
-	// and the post-idle board writes (review move, status sync) must have
-	// landed before cleanup
+	// and the post-idle board writes (status sync) must have landed
+	// before cleanup
 	waitCardSettled(t, i, projectID, target.ID)
 }
 

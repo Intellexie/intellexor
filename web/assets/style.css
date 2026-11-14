@@ -520,6 +520,9 @@ position it is about to restore. */
 /* multiline modal field (add/edit card): Enter submits, Ctrl+Enter a newline */
 .modal .m-textarea { border:1px solid var(--border-base); background:transparent; border-radius:var(--radius-md); padding:6px 10px; outline:none; resize:none; overflow:hidden; min-height:34px; max-height:240px; line-height:1.5; transition:border-color .15s ease, box-shadow .15s ease; }
 .modal .m-textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+/* long-form fields (card description / acceptance criteria): grow via the
+   native grip instead of being clipped at max-height */
+.modal .m-textarea.resizable { resize:vertical; overflow:auto; min-height:64px; max-height:none; }
 .seg { display:flex; border:1px solid var(--border-base); border-radius:var(--radius-md); overflow:hidden; }
 .seg button { padding:5px 12px; font-size:12.5px; color:var(--text-muted); }
 .seg button.on { background:var(--layer-2); color:var(--text-base); }

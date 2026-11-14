@@ -63,8 +63,8 @@ func cardByID(t *testing.T, i *Instance, projectID, id string) (board.Card, bool
 }
 
 // waitCardSettled waits until the card's session turn has fully ended and
-// the post-idle board writes (review move, status sync) have landed — the
-// last await before the test's temp dir is cleaned up.
+// the post-idle board writes (status sync) have landed — the last await
+// before the test's temp dir is cleaned up.
 func waitCardSettled(t *testing.T, i *Instance, projectID, cardID string) {
 	t.Helper()
 	waitUntil(t, 10*time.Second, func() bool {
@@ -235,9 +235,50 @@ func TestCardAgentModelAndSpec(t *testing.T) {
 	}
 }
 
-// When a card's session goes idle the card moves to review and the review
-// agent runs on its changes; the findings attach to the card.
-func TestIdleCardMovesToReviewAndReviewAgentRuns(t *testing.T) {
+// A card's session going idle must NOT move the card to review or spawn a
+// review session — the card stays in inprogress until it is explicitly
+// moved.
+func TestIdleCardStaysInProgress(t *testing.T) {
+	var reviewCalls int32
+	h := func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, "title generator") {
+			respondEmptyStop(w)
+			return
+		}
+		if strings.Contains(body, "Review the changes of kanban card") {
+			atomic.AddInt32(&reviewCalls, 1)
+			textSSE("## Findings")(w, r)
+			return
+		}
+		textSSE("Work done.")(w, r)
+	}
+	i, s := setupBoardTest(t, h, `"board": {"review_agent": "review"},`)
+	projectID := store.ProjectID(i.Directory)
+
+	card := linkCard(t, i, s, "Implement the parser", "inprogress")
+	go func() { _, _ = i.Prompt(s, textInput("Implement the parser")) }()
+
+	// the worker turn ends -> the card stays in inprogress, untouched
+	waitUntil(t, 10*time.Second, func() bool {
+		c, _ := cardByID(t, i, projectID, card.ID)
+		return c.SessionID != "" && c.Status != "running"
+	})
+	c, _ := cardByID(t, i, projectID, card.ID)
+	if c.Column != "inprogress" {
+		t.Fatalf("idle moved the card to %q, want inprogress", c.Column)
+	}
+	if c.ReviewSessionID != "" {
+		t.Fatalf("idle spawned a review session: %q", c.ReviewSessionID)
+	}
+	if atomic.LoadInt32(&reviewCalls) != 0 {
+		t.Fatal("review agent ran without an explicit move to review")
+	}
+}
+
+// Explicitly moving a card to the review column runs the review agent on
+// its changes; the findings attach to the card.
+func TestMoveToReviewRunsReviewAgent(t *testing.T) {
 	var reviewCalls int32
 	h := func(w http.ResponseWriter, r *http.Request) {
 		body := readBody(r)
@@ -256,13 +297,17 @@ func TestIdleCardMovesToReviewAndReviewAgentRuns(t *testing.T) {
 	projectID := store.ProjectID(i.Directory)
 
 	card := linkCard(t, i, s, "Implement the parser", "inprogress")
-	go func() { _, _ = i.Prompt(s, textInput("Implement the parser")) }()
 
-	// the worker turn ends -> the card moves to review and the review
-	// session runs on its changes
+	// the explicit move (web UI drag / board tool / API) starts the review
+	col := "review"
+	if _, err := board.Update(projectID, card.ID, nil, &col, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	StartReviewOnMove(i, projectID, card.ID)
+
 	waitUntil(t, 10*time.Second, func() bool {
 		c, _ := cardByID(t, i, projectID, card.ID)
-		return c.Column == "review" && c.Findings != ""
+		return c.Findings != ""
 	})
 	c, _ := cardByID(t, i, projectID, card.ID)
 	if !strings.Contains(c.Findings, "misses edge cases") {
@@ -273,6 +318,17 @@ func TestIdleCardMovesToReviewAndReviewAgentRuns(t *testing.T) {
 	}
 	if atomic.LoadInt32(&reviewCalls) == 0 {
 		t.Fatal("review agent never ran")
+	}
+
+	// StartReviewOnMove is a no-op for cards outside the review column
+	if _, err := board.Update(projectID, card.ID, nil, strPtr("inprogress"), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := atomic.LoadInt32(&reviewCalls)
+	StartReviewOnMove(i, projectID, card.ID)
+	time.Sleep(200 * time.Millisecond)
+	if atomic.LoadInt32(&reviewCalls) != before {
+		t.Fatal("review agent ran for a card not in review")
 	}
 }
 

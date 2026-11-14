@@ -192,6 +192,12 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 	if err != nil {
 		return badRequest(err.Error())
 	}
+	// an explicit move into the review column starts the review stage (the
+	// review agent inspects the card's changes) — an agent going idle never
+	// triggers it on its own
+	if body.Column != nil && *body.Column == "review" && card.Column == "review" {
+		app.StartReviewOnMove(s.Instance(directoryOf(r)), s.boardProjectID(r), r.PathValue("cardID"))
+	}
 	// the web UI's Start flow links a freshly created session to the card:
 	// when the card wants worktree isolation, the session moves into a new
 	// worktree now (before its first prompt)

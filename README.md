@@ -385,13 +385,14 @@ default — this covers vLLM, one-api, OpenRouter, Ollama, etc:
 - `board` configures the kanban board's automation: `"max_running"` caps how
   many cards the dependency flow starts at once (0 = unlimited; manual
   starts are never capped), `"review_agent"` names the agent that reviews a
-  card's changes when it moves to the review column (default the built-in
+  card's changes when it is moved to the review column (default the built-in
   `review` agent; empty disables the automatic run), and `"auto_review":
   false` turns the automatic review run off. Cards can pick their own agent
   and model, carry a description and acceptance criteria (both sent to the
   agent with the task), and declare `blockedBy` dependencies — a card only
-  starts once all of its blockers are done. When a card's session goes idle
-  it moves to review; approving moves it to done (merging an isolated
+  starts once all of its blockers are done. A card enters review only by an
+  explicit move (an agent going idle never moves its card or spawns a
+  review session); approving moves it to done (merging an isolated
   worktree), rejecting sends it back to in-progress with the findings as
   the next prompt. Provider failures (429/5xx) are retried once, then the
   card is marked blocked with the error.

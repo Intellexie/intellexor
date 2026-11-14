@@ -14,19 +14,21 @@ import (
 	"github.com/Intellexie/intellexor/internal/worktree"
 )
 
-// Review stage and live card status. When a card's session goes idle the
-// card moves to the review column, where a configurable review agent
-// inspects the card's changes; its findings are attached to the card.
-// Approving moves the card to done (merging an isolated worktree), rejecting
-// sends it back to inprogress with the findings as the next prompt. The
-// same hooks keep the card's live status (running/waiting/idle/error/
-// blocked) and usage snapshot in sync with its session.
+// Review stage and live card status. A card enters the review column only
+// by an explicit move (web UI drag, board tool, API) — an agent stopping or
+// going idle never moves its card or spawns a review session. Once a card
+// is in review, a configurable review agent inspects the card's changes;
+// its findings are attached to the card. Approving moves the card to done
+// (merging an isolated worktree), rejecting sends it back to inprogress
+// with the findings as the next prompt. The same hooks keep the card's
+// live status (running/waiting/idle/error/blocked) and usage snapshot in
+// sync with its session.
 
 // onSessionStatus is called from Instance.SetStatus for every session
 // status change. It is the single hook that keeps cards in sync with their
-// sessions: live status, the inprogress→review transition on idle, the
-// review→inprogress transition when work resumes, and the review agent's
-// findings. Cheap no-op for sessions without a card.
+// sessions: live status, the review→inprogress transition when work
+// resumes, and the review agent's findings. Cheap no-op for sessions
+// without a card.
 func onSessionStatus(i *Instance, sessionID string, st StatusInfo) {
 	typ, _ := st["type"].(string)
 	projectID := store.ProjectID(i.Directory)
@@ -46,7 +48,9 @@ func onSessionStatus(i *Instance, sessionID string, st StatusInfo) {
 
 // syncWorkerCard updates a card whose worker session changed status: on
 // busy it (re)enters inprogress (a rejected card getting more work leaves
-// review), on idle it moves to review and the review agent may run.
+// review). Going idle never moves the card — the card stays where it is
+// until it is explicitly moved (to review or done) or its session is
+// stopped by moving it back to open.
 func syncWorkerCard(i *Instance, projectID string, c board.Card, sessionID, typ string) {
 	if typ == "busy" {
 		if c.Column == "review" {
@@ -59,20 +63,6 @@ func syncWorkerCard(i *Instance, projectID string, c board.Card, sessionID, typ 
 		}
 		syncCardRuntime(i, projectID, c, sessionID)
 		return
-	}
-	if typ != "idle" {
-		syncCardRuntime(i, projectID, c, sessionID)
-		return
-	}
-	// idle: the turn ended. A card still in inprogress moves to review.
-	if c.Column == "inprogress" {
-		updated, err := board.Update(projectID, c.ID, nil, strPtr("review"), nil, nil)
-		if err != nil {
-			return
-		}
-		c = updated
-		publishBoardUpdate(i)
-		startReviewIfNeeded(i, projectID, c)
 	}
 	syncCardRuntime(i, projectID, c, sessionID)
 }
@@ -158,6 +148,25 @@ func publishBoardUpdate(i *Instance) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// StartReviewOnMove runs the review stage for a card that was just moved
+// to the review column by an explicit action (web UI drag, board tool,
+// API). A no-op for cards in any other column. Called by the board card
+// PATCH route and the board tool's move hook.
+func StartReviewOnMove(i *Instance, projectID, cardID string) {
+	cards, err := board.Get(projectID)
+	if err != nil {
+		return
+	}
+	for _, c := range cards {
+		if c.ID == cardID {
+			if c.Column == "review" {
+				startReviewIfNeeded(i, projectID, c)
+			}
+			return
+		}
+	}
+}
 
 // startReviewIfNeeded runs the configured review agent on a card that just
 // entered review — a fresh session prompted with the card's spec and the

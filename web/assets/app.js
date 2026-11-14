@@ -4747,17 +4747,21 @@ function openAddCardModal() {
     // richer card fields: description and acceptance criteria go to the
     // agent with the task; agent/model pick how the card runs
     const descField = el("div", "m-field");
-    descField.appendChild(el("label", "m-label", "Description"));
-    const desc = el("textarea", "m-textarea");
-    desc.rows = 2;
+    const descLabel = el("label", "m-label", "Description");
+    descLabel.title = "Drag the bottom edge to resize";
+    descField.appendChild(descLabel);
+    const desc = el("textarea", "m-textarea resizable");
+    desc.rows = 3;
     desc.placeholder = "Optional context beyond the title…";
     descField.appendChild(desc);
     modal.appendChild(descField);
 
     const critField = el("div", "m-field");
-    critField.appendChild(el("label", "m-label", "Acceptance criteria"));
-    const crit = el("textarea", "m-textarea");
-    crit.rows = 2;
+    const critLabel = el("label", "m-label", "Acceptance criteria");
+    critLabel.title = "Drag the bottom edge to resize";
+    critField.appendChild(critLabel);
+    const crit = el("textarea", "m-textarea resizable");
+    crit.rows = 3;
     crit.placeholder = "What must hold for this card to be done…";
     critField.appendChild(crit);
     modal.appendChild(critField);
@@ -5758,18 +5762,22 @@ function openEditCardModal(c) {
     // the richer card fields: sent to the agent with the task and shown
     // on the card; agent/model pick how the card runs when started
     const descField = el("div", "m-field");
-    descField.appendChild(el("label", "m-label", "Description"));
-    const desc = el("textarea", "m-textarea");
-    desc.rows = 2;
+    const descLabel = el("label", "m-label", "Description");
+    descLabel.title = "Drag the bottom edge to resize";
+    descField.appendChild(descLabel);
+    const desc = el("textarea", "m-textarea resizable");
+    desc.rows = 3;
     desc.value = c.description || "";
     desc.placeholder = "Optional context beyond the title…";
     descField.appendChild(desc);
     modal.appendChild(descField);
 
     const critField = el("div", "m-field");
-    critField.appendChild(el("label", "m-label", "Acceptance criteria"));
-    const crit = el("textarea", "m-textarea");
-    crit.rows = 2;
+    const critLabel = el("label", "m-label", "Acceptance criteria");
+    critLabel.title = "Drag the bottom edge to resize";
+    critField.appendChild(critLabel);
+    const crit = el("textarea", "m-textarea resizable");
+    crit.rows = 3;
     crit.value = c.criteria || "";
     crit.placeholder = "What must hold for this card to be done…";
     critField.appendChild(crit);

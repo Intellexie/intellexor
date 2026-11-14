@@ -33,6 +33,9 @@ type BoardTool struct {
 	// isolated), reject returns it to inprogress and prompts its session
 	// with the findings.
 	ResolveReview func(projectID, cardID string, approve bool) (board.Card, error)
+	// MovedToReview runs the review stage after a card was explicitly moved
+	// into the review column (the review agent inspects the card's changes).
+	MovedToReview func(projectID, cardID string)
 }
 
 func (BoardTool) Name() string { return "board" }
@@ -188,6 +191,9 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			return Result{}, err
 		}
 		t.notify()
+		if p.Column == "review" && t.MovedToReview != nil {
+			t.MovedToReview(projectID, id)
+		}
 		return Result{
 			Title:    fmt.Sprintf("%s → %s", card.Title, card.Column),
 			Metadata: map[string]any{"card": card},

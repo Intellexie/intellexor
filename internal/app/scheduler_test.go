@@ -195,8 +195,8 @@ func TestSchedulerStartPinsDefaultModel(t *testing.T) {
 	// the turn ran on that model: the reply proves the prompt resolved to
 	// the connected provider instead of erroring on the config's minimax
 	waitUntil(t, 5*time.Second, func() bool { return watcherReplied(i, sess, "Working on it.") })
-	// the post-idle board writes (review move, status sync) must have
-	// landed before the temp dir is cleaned up
+	// the post-idle board writes (status sync) must have landed before the
+	// temp dir is cleaned up
 	waitUntil(t, 5*time.Second, func() bool {
 		cards, _ := board.Get(projectID)
 		for _, c := range cards {
