@@ -101,10 +101,13 @@ func onCardDone(projectID string, card board.Card) {
 
 // triggerReadyCards starts every open, unowned card whose blockers are all
 // done — the dependency chain: finishing one card releases the next wave.
-// The project's max_running cap (config board.max_running) limits how many
-// cards run at once; cards already in inprogress count against it. Manual
-// starts are never capped. Missing blocker IDs count as satisfied (a deleted
-// blocker must not block forever — Delete clears references anyway).
+// Only explicitly linked cards start: a card with no blockers is not part
+// of the chain and waits for a manual start (the empty-BlockedBy fallthrough
+// of blockersSatisfied must not read as "ready"). The project's max_running
+// cap (config board.max_running) limits how many cards run at once; cards
+// already in inprogress count against it. Manual starts are never capped.
+// Missing blocker IDs count as satisfied (a deleted blocker must not block
+// forever — Delete clears references anyway).
 func triggerReadyCards(in *Instance, projectID string) {
 	maxRun := config.Merge(in.Directory).Board.MaxRunningOrZero()
 	for {
@@ -127,7 +130,7 @@ func triggerReadyCards(in *Instance, projectID string) {
 		}
 		started := false
 		for _, c := range cards {
-			if c.Column != "open" || c.SessionID != "" || !blockersSatisfied(c, done) {
+			if c.Column != "open" || c.SessionID != "" || len(c.BlockedBy) == 0 || !blockersSatisfied(c, done) {
 				continue
 			}
 			if _, err := startCard(in, projectID, c.ID); err != nil {

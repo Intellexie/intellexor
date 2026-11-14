@@ -124,6 +124,42 @@ func TestDependenciesTriggerOnDone(t *testing.T) {
 	}
 }
 
+// Moving a card to done must only start cards that are explicitly linked
+// (blockedBy): an unlinked open card is not part of the dependency chain
+// and waits for a manual start.
+func TestDoneDoesNotStartUnlinkedCards(t *testing.T) {
+	i, s := setupAbortTest(t, textSSE("Wave two."))
+	projectID := store.ProjectID(i.Directory)
+
+	source := linkCard(t, i, s, "Source task", "inprogress")
+	linked, err := board.Add(projectID, "Linked follow-up", board.AddOpts{BlockedBy: []string{source.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlinked, err := board.Add(projectID, "Unlinked bystander", board.AddOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	col := "done"
+	if _, err := board.Update(projectID, source.ID, nil, &col, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// the linked card starts; the unlinked one stays waiting in open
+	waitUntil(t, 5*time.Second, func() bool {
+		c, _ := cardByID(t, i, projectID, linked.ID)
+		return c.Column == "inprogress" || c.Column == "review"
+	})
+	if c, _ := cardByID(t, i, projectID, unlinked.ID); c.Column != "open" || c.SessionID != "" {
+		t.Fatalf("unlinked card auto-started: column=%s session=%q", c.Column, c.SessionID)
+	}
+
+	// let the auto-started turn run to completion before the temp dir is
+	// cleaned up — its prompt loop keeps writing session files otherwise
+	waitCardSettled(t, i, projectID, linked.ID)
+}
+
 // The project's max_running cap limits how many cards the dependency flow
 // starts at once; manual starts are never capped.
 func TestDependencyConcurrencyCap(t *testing.T) {
