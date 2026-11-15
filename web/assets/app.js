@@ -5800,6 +5800,17 @@ function openEditCardModal(c) {
       files.push(...(await filesToAttachments(fl)));
       redrawAtt();
     };
+    // paste images/files straight in (screenshots, copied files) — same as
+    // the add-card modal, from any of the modal's text fields
+    const onPaste = (e) => {
+      const fl = e.clipboardData && e.clipboardData.files;
+      if (!fl || !fl.length) return; // plain text paste: default behaviour
+      e.preventDefault();
+      addFiles([...fl]);
+    };
+    input.onpaste = onPaste;
+    desc.onpaste = onPaste;
+    crit.onpaste = onPaste;
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.multiple = true;
