@@ -38,6 +38,11 @@ type BoardTool struct {
 	MovedToReview func(projectID, cardID string)
 }
 
+// errNotWaiting is returned when an edit targets a card that has already
+// left its waiting column (started, in review or done): a running card is
+// owned by its session and a finished one is history.
+var errNotWaiting = errors.New("only cards waiting in the planning or open column can be edited")
+
 func (BoardTool) Name() string { return "board" }
 
 func (BoardTool) Description() string {
@@ -47,6 +52,7 @@ func (BoardTool) Description() string {
 - When you finish working on the card linked to this session, move it to the done column (action "move", column "done") — the card is resolved automatically, no ID needed.
 - Use action "list" to see all cards with their IDs, titles, columns, status and watchers.
 - Use action "add" to create a follow-up card for work that is out of scope for the current task.
+- Use action "edit" to refine a card that is still waiting in planning or open (title, description, criteria, agent, model, isolate, blockedBy) instead of recreating it.
 - Use action "watch" when your work depends on another card: you receive a message on behalf of the user as soon as that card is marked done.
 - Use action "link" to chain a follow-up card to this one: when this card is moved to done, the target card starts automatically in a fresh session (only cards still waiting in planning or open can be targeted). "blockedBy" (on add) declares dependencies the other way round: a card with blockers only starts once all of them are done.
 - Use action "start" to begin work on a card in a fresh session, exactly like the user clicking Start on the board.
@@ -56,6 +62,7 @@ func (BoardTool) Description() string {
 - "list": returns every card (id, title, column, status, blockedBy, watchers).
 - "move": moves a card to another column. Pass "card" to move a specific card by ID; omit it to move the card linked to the current session.
 - "add": creates a card with "title" in a waiting column — "column" "planning" or "open" (default; move it afterwards to start work). Optional: "description", "criteria" (acceptance criteria), "agent", "model" ("provider/model"), "blockedBy" (array of card IDs), "isolate".
+- "edit": changes fields on a card that is still waiting in planning or open: "title", "description", "criteria", "agent", "model", "isolate", "blockedBy" (empty array clears the dependencies). Only pass the fields you want to change; started or finished cards cannot be edited.
 - "watch" / "unwatch": start/stop watching a card — pass "card" to watch a specific card by ID, or omit it to use the card linked to the current session. Watchers are messaged when the card is marked done. Watching the card linked to this session is rejected: you are already working on it.
 - "link" / "unlink": point "card" (or the session's card) at "target" so the target starts automatically when the card is done; "unlink" removes the link.
 - "schedule": set a timed start on a card — a background scheduler starts it (exactly like "start") when the time passes. Only cards still waiting in planning or open can be scheduled; startAt 0 clears the schedule.
@@ -70,12 +77,12 @@ func (BoardTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"enum":        []any{"list", "move", "add", "watch", "unwatch", "link", "unlink", "schedule", "start", "approve", "reject", "merge"},
+				"enum":        []any{"list", "move", "add", "edit", "watch", "unwatch", "link", "unlink", "schedule", "start", "approve", "reject", "merge"},
 				"description": "The board operation to perform",
 			},
 			"card": map[string]any{
 				"type":        "string",
-				"description": "Card ID to move, watch/unwatch, link/unlink, approve/reject or start. Omit for move/watch/unwatch/link/unlink to use the card linked to the current session.",
+				"description": "Card ID to move, edit, watch/unwatch, link/unlink, approve/reject or start. Omit for move/watch/unwatch/link/unlink to use the card linked to the current session.",
 			},
 			"column": map[string]any{
 				"type":        "string",
@@ -84,28 +91,28 @@ func (BoardTool) Schema() map[string]any {
 			},
 			"title": map[string]any{
 				"type":        "string",
-				"description": "Card title (action add)",
+				"description": "Card title (actions add and edit)",
 			},
 			"description": map[string]any{
 				"type":        "string",
-				"description": "Optional card description (action add): context beyond the title, sent to the agent with the task",
+				"description": "Optional card description (actions add and edit): context beyond the title, sent to the agent with the task",
 			},
 			"criteria": map[string]any{
 				"type":        "string",
-				"description": "Optional acceptance criteria (action add): what must hold for the card to be done",
+				"description": "Optional acceptance criteria (actions add and edit): what must hold for the card to be done",
 			},
 			"agent": map[string]any{
 				"type":        "string",
-				"description": "Agent the card runs with when started (action add); empty = the default build agent",
+				"description": "Agent the card runs with when started (actions add and edit); empty = the default build agent",
 			},
 			"model": map[string]any{
 				"type":        "string",
-				"description": "Model the card runs with, as \"provider/model\" (action add); empty = the default model",
+				"description": "Model the card runs with, as \"provider/model\" (actions add and edit); empty = the default model",
 			},
 			"blockedBy": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Card IDs this card depends on (action add): it only starts once all of them are done",
+				"description": "Card IDs this card depends on (actions add and edit): it only starts once all of them are done; an empty array clears the dependencies",
 			},
 			"target": map[string]any{
 				"type":        "string",
@@ -121,7 +128,7 @@ func (BoardTool) Schema() map[string]any {
 			},
 			"isolate": map[string]any{
 				"type":        "boolean",
-				"description": "action add: run the card's session in an isolated git worktree on its own branch when the card is started",
+				"description": "actions add and edit: run the card's session in an isolated git worktree on its own branch when the card is started",
 			},
 		},
 		"required": []any{"action"},
@@ -130,19 +137,20 @@ func (BoardTool) Schema() map[string]any {
 
 func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 	var p struct {
-		Action      string   `json:"action"`
-		Card        string   `json:"card"`
-		Column      string   `json:"column"`
-		Title       string   `json:"title"`
-		Description string   `json:"description"`
-		Criteria    string   `json:"criteria"`
-		Agent       string   `json:"agent"`
-		Model       string   `json:"model"`
+		Action string `json:"action"`
+		Card   string `json:"card"`
+		Column string `json:"column"`
+		// pointer fields so "edit" can tell "not passed" from "cleared"
+		Title       *string  `json:"title"`
+		Description *string  `json:"description"`
+		Criteria    *string  `json:"criteria"`
+		Agent       *string  `json:"agent"`
+		Model       *string  `json:"model"`
 		BlockedBy   []string `json:"blockedBy"`
 		Target      string   `json:"target"`
 		StartAt     int64    `json:"startAt"`
 		In          string   `json:"in"`
-		Isolate     bool     `json:"isolate"`
+		Isolate     *bool    `json:"isolate"`
 	}
 	_ = json.Unmarshal(args, &p)
 	if c.Ask != nil {
@@ -201,7 +209,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		}, nil
 
 	case "add":
-		if strings.TrimSpace(p.Title) == "" {
+		if p.Title == nil || strings.TrimSpace(*p.Title) == "" {
 			return Result{}, errors.New("add requires a title")
 		}
 		// cards are only ever created in a waiting column (planning or
@@ -210,13 +218,13 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		if p.Column != "" && !board.IsWaiting(p.Column) {
 			return Result{}, errors.New("cards can only be added to the planning or open column (move the card afterwards to start work on it)")
 		}
-		card, err := board.Add(projectID, p.Title, board.AddOpts{
+		card, err := board.Add(projectID, *p.Title, board.AddOpts{
 			Column:      p.Column,
-			Isolate:     p.Isolate,
-			Agent:       p.Agent,
-			Model:       p.Model,
-			Description: p.Description,
-			Criteria:    p.Criteria,
+			Isolate:     p.Isolate != nil && *p.Isolate,
+			Agent:       deref(p.Agent),
+			Model:       deref(p.Model),
+			Description: deref(p.Description),
+			Criteria:    deref(p.Criteria),
 			BlockedBy:   p.BlockedBy,
 		})
 		if err == board.ErrBadLink {
@@ -227,13 +235,92 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		}
 		t.notify()
 		out := fmt.Sprintf("Card %s (%q) created in column %q.", card.ID, card.Title, card.Column)
-		if p.Isolate {
+		if p.Isolate != nil && *p.Isolate {
 			out += " It will run in an isolated git worktree on its own branch when started."
 		}
 		return Result{
 			Title:    "Card added: " + card.Title,
 			Metadata: map[string]any{"card": card},
 			Output:   out,
+		}, nil
+
+	case "edit":
+		if p.Card == "" {
+			return Result{}, errors.New("edit requires a card ID (see action list)")
+		}
+		if p.Title == nil && p.Description == nil && p.Criteria == nil && p.Agent == nil && p.Model == nil && p.Isolate == nil && p.BlockedBy == nil {
+			return Result{}, errors.New("edit requires at least one field to change: title, description, criteria, agent, model, isolate or blockedBy")
+		}
+		if p.Title != nil && strings.TrimSpace(*p.Title) == "" {
+			return Result{}, errors.New("title cannot be empty")
+		}
+		// blockers must exist and not be the card itself; duplicates and
+		// self-references are dropped, an empty array clears the list
+		var blockers []string
+		if p.BlockedBy != nil {
+			cards, err := board.Get(projectID)
+			if err != nil {
+				return Result{}, err
+			}
+			known := map[string]bool{}
+			for _, c := range cards {
+				known[c.ID] = true
+			}
+			seen := map[string]bool{}
+			for _, b := range p.BlockedBy {
+				if b == p.Card || seen[b] {
+					continue
+				}
+				if !known[b] {
+					return Result{}, fmt.Errorf("blockedBy references a card that does not exist: %s (see action list)", b)
+				}
+				seen[b] = true
+				blockers = append(blockers, b)
+			}
+		}
+		card, err := board.Edit(projectID, p.Card, func(c *board.Card) error {
+			// checked under the board lock so a card that starts between
+			// the caller's decision and this mutation is still rejected
+			if !board.IsWaiting(c.Column) {
+				return errNotWaiting
+			}
+			if p.Title != nil {
+				c.Title = strings.TrimSpace(*p.Title)
+			}
+			if p.Description != nil {
+				c.Description = *p.Description
+			}
+			if p.Criteria != nil {
+				c.Criteria = *p.Criteria
+			}
+			if p.Agent != nil {
+				c.Agent = *p.Agent
+			}
+			if p.Model != nil {
+				c.Model = *p.Model
+			}
+			if p.Isolate != nil {
+				c.Isolate = *p.Isolate
+			}
+			if p.BlockedBy != nil {
+				c.BlockedBy = blockers
+			}
+			return nil
+		})
+		if err == board.ErrNotFound {
+			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", p.Card)
+		}
+		if err == errNotWaiting {
+			return Result{}, errors.New("only cards waiting in the planning or open column can be edited (a started card belongs to its session, a finished one is history)")
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		t.notify()
+		return Result{
+			Title:    "Edited card " + card.ID,
+			Metadata: map[string]any{"card": card},
+			Output:   fmt.Sprintf("Card %s (%q) updated.", card.ID, card.Title),
 		}, nil
 
 	case "watch", "unwatch":
@@ -470,8 +557,16 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		}, nil
 
 	default:
-		return Result{}, fmt.Errorf("unknown action %q (valid: list, move, add, watch, unwatch, link, unlink, schedule, start, approve, reject, merge)", p.Action)
+		return Result{}, fmt.Errorf("unknown action %q (valid: list, move, add, edit, watch, unwatch, link, unlink, schedule, start, approve, reject, merge)", p.Action)
 	}
+}
+
+// deref returns *s or "" when s is nil.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // parseDuration parses a duration string for the schedule action's "in"
