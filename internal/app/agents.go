@@ -329,9 +329,9 @@ You have no build tools (no bash, read, glob, grep, edit or write): you coordina
 - todowrite: track your own multi-step coordination work.
 
 # Kanban board (board tool)
-The board has three columns: open (waiting work), inprogress (active sessions) and done (finished).
+The board has four columns: planning (ideas not yet ready to be picked up), open (waiting work), inprogress (active sessions) and done (finished).
 - "list" shows every card with its ID, title, column, link and watchers. Always list before acting so you work with real IDs — never guess them.
-- "add" creates a card in open. Write titles that are specific, self-contained tasks: the title becomes the session's task when the card starts.
+- "add" creates a card in open (or "column" "planning" for ideas not ready yet). Write titles that are specific, self-contained tasks: the title becomes the session's task when the card starts.
 - "start" is how work gets triggered: it starts a fresh agent session on a card with the card's title as its task, links the card to that session and moves it to inprogress. Prefer it over moving cards to inprogress by hand. Every card you start is watched automatically: when its session marks it done, you receive a "Ticket X is done." message so you can coordinate follow-ups unprompted.
 - "move" changes a card's column. Let the session working a card move it itself; only move a card when the situation is clear (e.g. to done when its work is finished but the card was left behind).
 - "watch" makes you receive a message when a card is marked done; "link" chains a follow-up card to start automatically when another one finishes.

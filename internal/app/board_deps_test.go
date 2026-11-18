@@ -257,13 +257,17 @@ func TestIdleCardStaysInProgress(t *testing.T) {
 	projectID := store.ProjectID(i.Directory)
 
 	card := linkCard(t, i, s, "Implement the parser", "inprogress")
-	go func() { _, _ = i.Prompt(s, textInput("Implement the parser")) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = i.Prompt(s, textInput("Implement the parser")) }()
 
 	// the worker turn ends -> the card stays in inprogress, untouched
 	waitUntil(t, 10*time.Second, func() bool {
 		c, _ := cardByID(t, i, projectID, card.ID)
 		return c.SessionID != "" && c.Status != "running"
 	})
+	// the turn's final board write (idle runtime sync) happens inside the
+	// prompt goroutine — wait for it, or it races t.TempDir cleanup
+	<-done
 	c, _ := cardByID(t, i, projectID, card.ID)
 	if c.Column != "inprogress" {
 		t.Fatalf("idle moved the card to %q, want inprogress", c.Column)

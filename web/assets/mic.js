@@ -44,13 +44,42 @@
   };
   const fmtMB = (n) => (n / 1048576).toFixed(1) + " MB";
   const upd = () => hooks.onUpdate();
+  const recSecs = () => Math.max(0, Math.round((Date.now() - S.recordingSince) / 1000));
 
-  // the composer rebuilds on every update — never do it more than ~5x/s
+  // The composer rebuilds on every update — never do it more than ~5x/s.
+  // More importantly, a rebuild wipes the DOM, so a tick landing between
+  // pointerdown and click replaces the mic button under the cursor and
+  // swallows the press that should stop the dictation. Live numbers
+  // (recording timer, download/transcribe progress) are therefore patched
+  // in place; the composer is only rebuilt on real state changes.
   let lastUpd = 0;
   const updThrottled = () => {
     const now = Date.now();
     if (now - lastUpd > 200) { lastUpd = now; upd(); }
   };
+  const patch = (sel, fn) => {
+    const region = document.querySelector("#composer-region");
+    if (!region) return;
+    const t = region.querySelector(sel);
+    if (t) fn(t);
+    else updThrottled(); // dock missing — rebuild to restore it
+  };
+  const patchRecSecs = () =>
+    patch(".mic-rec-secs", (t) => { t.textContent = String(recSecs()); });
+  const patchDownload = () => {
+    const { loaded: done, total } = S.progress;
+    const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
+    patch(".mic-dl-pct", (t) => { t.textContent = pct.toFixed(0) + "%"; });
+    patch(".mic-dl-fill", (t) => { t.style.width = pct.toFixed(1) + "%"; });
+    patch(".mic-dl-sub", (t) => {
+      t.innerHTML = total > 0
+        ? `${fmtMB(done)} of ${fmtMB(total)} — downloaded once, cached in your browser`
+        : "preparing download — cached in your browser after the first run";
+    });
+  };
+  const decodeProg = () =>
+    S.decode && S.decode.total > 1 ? ` — segment ${S.decode.done}/${S.decode.total}` : "";
+  const patchDecode = () => patch(".mic-decode-prog", (t) => { t.textContent = decodeProg(); });
 
   // ---- worker plumbing (mirrors the worker's task protocol) ----
 
@@ -62,7 +91,7 @@
         const msg = e.data || {};
         if (msg.type === "progress") {
           S.progress = { loaded: msg.loaded || 0, total: msg.total || 0 };
-          updThrottled();
+          patchDownload();
           return;
         }
         if (msg.type === "fallback") {
@@ -71,7 +100,7 @@
         }
         if (msg.type === "decode-progress") {
           S.decode = { done: msg.done || 0, total: msg.total || 0 };
-          updThrottled();
+          patchDecode();
           return;
         }
         const { id, dir, data, error } = msg;
@@ -220,8 +249,10 @@
 
     upd();
 
-    // recording-timer display only — no decoding while recording
-    tickTimer = setInterval(updThrottled, 1000);
+    // recording-timer display only — patch the seconds counter in place.
+    // A full composer rebuild every second replaces the mic button under
+    // the cursor mid-click and swallows the press that stops dictation.
+    tickTimer = setInterval(patchRecSecs, 1000);
   }
 
   function stopRecording() {
@@ -305,13 +336,13 @@
       const head = el("div", "d-head");
       head.innerHTML =
         `<span class="d-title">Downloading speech model <span class="mic-model">parakeet-ctc-0.6b · ${S.device || "webgpu"} · ~1.2 GB</span></span>` +
-        `<span class="mic-dock-pct">${pct.toFixed(0)}%</span>`;
+        `<span class="mic-dl-pct mic-dock-pct">${pct.toFixed(0)}%</span>`;
       d.appendChild(head);
       const bar = el("div", "mic-progress");
-      bar.innerHTML = `<div class="mic-progress-fill" style="width:${pct.toFixed(1)}%"></div>`;
+      bar.innerHTML = `<div class="mic-progress-fill mic-dl-fill" style="width:${pct.toFixed(1)}%"></div>`;
       d.appendChild(bar);
       d.appendChild(
-        el("div", "mic-dock-sub",
+        el("div", "mic-dl-sub mic-dock-sub",
           total > 0
             ? `${fmtMB(done)} of ${fmtMB(total)} — downloaded once, cached in your browser`
             : "preparing download — cached in your browser after the first run")
@@ -322,16 +353,14 @@
       actions.appendChild(cancel);
       d.appendChild(actions);
     } else if (S.state === "recording") {
-      const secs = Math.max(0, Math.round((Date.now() - S.recordingSince) / 1000));
       const head = el("div", "d-head");
       head.innerHTML =
-        `<span class="rec-dot"></span><span class="d-title">Recording — ${secs}s · click the mic to stop</span>`;
+        `<span class="rec-dot"></span><span class="d-title">Recording — <span class="mic-rec-secs">${recSecs()}</span>s · click the mic to stop</span>`;
       d.appendChild(head);
     } else if (S.state === "decoding") {
       const head = el("div", "d-head");
       const dev = S.device === "webgpu" ? "On GPU" : "On CPU";
-      const prog = S.decode && S.decode.total > 1 ? ` — segment ${S.decode.done}/${S.decode.total}` : "";
-      head.innerHTML = `<span class="d-title">Transcribing${prog}…</span>` +
+      head.innerHTML = `<span class="d-title">Transcribing<span class="mic-decode-prog">${decodeProg()}</span>…</span>` +
         (S.device ? `<span class="mic-device">${dev}</span>` : "");
       d.appendChild(head);
     }

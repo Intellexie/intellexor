@@ -41,24 +41,24 @@ type BoardTool struct {
 func (BoardTool) Name() string { return "board" }
 
 func (BoardTool) Description() string {
-	return `Work with the project kanban board (columns: open, inprogress, review, done).
+	return `Work with the project kanban board (columns: planning, open, inprogress, review, done).
 
 ## When to use
 - When you finish working on the card linked to this session, move it to the done column (action "move", column "done") — the card is resolved automatically, no ID needed.
 - Use action "list" to see all cards with their IDs, titles, columns, status and watchers.
 - Use action "add" to create a follow-up card for work that is out of scope for the current task.
 - Use action "watch" when your work depends on another card: you receive a message on behalf of the user as soon as that card is marked done.
-- Use action "link" to chain a follow-up card to this one: when this card is moved to done, the target card starts automatically in a fresh session (only cards still in the open column can be targeted). "blockedBy" (on add) declares dependencies the other way round: a card with blockers only starts once all of them are done.
+- Use action "link" to chain a follow-up card to this one: when this card is moved to done, the target card starts automatically in a fresh session (only cards still waiting in planning or open can be targeted). "blockedBy" (on add) declares dependencies the other way round: a card with blockers only starts once all of them are done.
 - Use action "start" to begin work on a card in a fresh session, exactly like the user clicking Start on the board.
 - Use action "approve"/"reject" on a card in the review column: approve moves it to done, reject sends it back to inprogress with the review findings as the next prompt.
 
 ## Actions
 - "list": returns every card (id, title, column, status, blockedBy, watchers).
 - "move": moves a card to another column. Pass "card" to move a specific card by ID; omit it to move the card linked to the current session.
-- "add": creates a card with "title" in the open column (cards can only be created there; move it afterwards to start work). Optional: "description", "criteria" (acceptance criteria), "agent", "model" ("provider/model"), "blockedBy" (array of card IDs), "isolate".
+- "add": creates a card with "title" in a waiting column — "column" "planning" or "open" (default; move it afterwards to start work). Optional: "description", "criteria" (acceptance criteria), "agent", "model" ("provider/model"), "blockedBy" (array of card IDs), "isolate".
 - "watch" / "unwatch": start/stop watching a card — pass "card" to watch a specific card by ID, or omit it to use the card linked to the current session. Watchers are messaged when the card is marked done. Watching the card linked to this session is rejected: you are already working on it.
 - "link" / "unlink": point "card" (or the session's card) at "target" so the target starts automatically when the card is done; "unlink" removes the link.
-- "schedule": set a timed start on a card — a background scheduler starts it (exactly like "start") when the time passes. Only cards still waiting in the open column can be scheduled; startAt 0 clears the schedule.
+- "schedule": set a timed start on a card — a background scheduler starts it (exactly like "start") when the time passes. Only cards still waiting in planning or open can be scheduled; startAt 0 clears the schedule.
 - "start": start a new agent session on card "card"; the card's title becomes the new session's task. The orchestrator agent automatically watches every card it started.
 - "approve" / "reject": resolve a card waiting in review — approve moves it to done (merging its worktree when isolated), reject returns it to inprogress and prompts its session with the findings.
 - "merge": merge the card's worktree branch into the repository and remove the worktree (cards started with worktree isolation only).`
@@ -79,8 +79,8 @@ func (BoardTool) Schema() map[string]any {
 			},
 			"column": map[string]any{
 				"type":        "string",
-				"enum":        []any{"open", "inprogress", "review", "done"},
-				"description": "Target column for move (add always creates in open)",
+				"enum":        []any{"planning", "open", "inprogress", "review", "done"},
+				"description": "Target column for move; for add, the waiting column to create the card in (planning or open, default open)",
 			},
 			"title": map[string]any{
 				"type":        "string",
@@ -167,7 +167,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 
 	case "move":
 		if p.Column == "" {
-			return Result{}, errors.New("move requires a target column (open, inprogress, review or done)")
+			return Result{}, errors.New("move requires a target column (planning, open, inprogress, review or done)")
 		}
 		id := p.Card
 		if id == "" {
@@ -185,7 +185,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
 		}
 		if err == board.ErrBadColumn {
-			return Result{}, fmt.Errorf("unknown column %q (valid: open, inprogress, review, done)", p.Column)
+			return Result{}, fmt.Errorf("unknown column %q (valid: planning, open, inprogress, review, done)", p.Column)
 		}
 		if err != nil {
 			return Result{}, err
@@ -204,12 +204,14 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 		if strings.TrimSpace(p.Title) == "" {
 			return Result{}, errors.New("add requires a title")
 		}
-		// cards are only ever created in open — work starts by moving a
-		// card to inprogress, never by creating it there
-		if p.Column != "" && p.Column != "open" {
-			return Result{}, errors.New("cards can only be added to the open column (move the card afterwards to start work on it)")
+		// cards are only ever created in a waiting column (planning or
+		// open) — work starts by moving a card to inprogress, never by
+		// creating it there
+		if p.Column != "" && !board.IsWaiting(p.Column) {
+			return Result{}, errors.New("cards can only be added to the planning or open column (move the card afterwards to start work on it)")
 		}
 		card, err := board.Add(projectID, p.Title, board.AddOpts{
+			Column:      p.Column,
 			Isolate:     p.Isolate,
 			Agent:       p.Agent,
 			Model:       p.Model,
@@ -301,7 +303,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
 		}
 		if err == board.ErrBadLink {
-			return Result{}, fmt.Errorf("card %s cannot be linked to %q: the target must be another card that is still waiting in the open column", id, p.Target)
+			return Result{}, fmt.Errorf("card %s cannot be linked to %q: the target must be another card that is still waiting (planning or open)", id, p.Target)
 		}
 		if err != nil {
 			return Result{}, err
@@ -341,7 +343,7 @@ func (t BoardTool) Run(c *Ctx, args json.RawMessage) (Result, error) {
 			return Result{}, fmt.Errorf("card not found: %s (use action list to see card IDs)", id)
 		}
 		if err == board.ErrNotOpen {
-			return Result{}, errors.New("only cards still waiting in the open column can be scheduled")
+			return Result{}, errors.New("only cards still waiting (planning or open) can be scheduled")
 		}
 		if err != nil {
 			return Result{}, err

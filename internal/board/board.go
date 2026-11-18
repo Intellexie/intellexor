@@ -17,10 +17,19 @@ import (
 	"github.com/Intellexie/intellexor/internal/util"
 )
 
-// Columns of the board, in display order. Review sits between in-progress
-// and done: a card whose session went idle lands there for inspection
-// (optionally by a review agent) before it counts as done.
-var Columns = []string{"open", "inprogress", "review", "done"}
+// Columns of the board, in display order. Planning sits before open: it
+// holds ideas not yet ready to be picked up. Review sits between
+// in-progress and done: a card whose session went idle lands there for
+// inspection (optionally by a review agent) before it counts as done.
+var Columns = []string{"planning", "open", "inprogress", "review", "done"}
+
+// IsWaiting reports whether the column holds cards that have not started
+// yet — planning and open. Only waiting cards can be linked to a session,
+// scheduled, isolated or targeted by a done-link; startCard moves a card
+// out of its waiting column into inprogress.
+func IsWaiting(column string) bool {
+	return column == "open" || column == "planning"
+}
 
 // ErrBadColumn is returned when a card targets an unknown column.
 var ErrBadColumn = errors.New("unknown column")
@@ -30,18 +39,19 @@ var ErrNotFound = errors.New("card not found")
 
 // ErrBadLink is returned when a card cannot be linked to the requested
 // target: the target does not exist, is the card itself, or is not waiting
-// in the open column (only open cards can be targeted).
-var ErrBadLink = errors.New("card can only be linked to a card in the open column")
+// in the planning or open column (only waiting cards can be targeted).
+var ErrBadLink = errors.New("card can only be linked to a card in the planning or open column")
 
 // ErrNotOpen is returned when a start schedule is set on a card that is not
-// waiting in the open column — only cards that have not started yet can be
-// scheduled (clearing a schedule is always allowed).
-var ErrNotOpen = errors.New("only cards in the open column can be scheduled")
+// waiting in the planning or open column — only cards that have not started
+// yet can be scheduled (clearing a schedule is always allowed).
+var ErrNotOpen = errors.New("only cards in the planning or open column can be scheduled")
 
 // ErrBadSession is returned when a session is linked to a card it cannot
-// work on: the card is no longer waiting in the open column (already
-// started, moved or done), or another session is already linked to it.
-var ErrBadSession = errors.New("only cards waiting in the open column can be linked to a session")
+// work on: the card is no longer waiting in the planning or open column
+// (already started, moved or done), or another session is already linked
+// to it.
+var ErrBadSession = errors.New("only cards waiting in the planning or open column can be linked to a session")
 
 // OnMovedToDone, when set, is called after a card is moved into the done
 // column from another column — from any entry point (the agent's board tool,
@@ -51,11 +61,12 @@ var ErrBadSession = errors.New("only cards waiting in the open column can be lin
 var OnMovedToDone func(projectID string, card Card)
 
 // OnStopped, when set, is called after a card is moved from inprogress back
-// to open — the "stop the agent" flow. The card's session link is cleared
-// (a card back in open is waiting and unowned again, so it can be started
-// fresh) and the hook hands the released session ID to the app layer, which
-// aborts the agent that was working on the card. Like OnMovedToDone it is
-// called without the board lock held, from any entry point.
+// to a waiting column (planning or open) — the "stop the agent" flow. The
+// card's session link is cleared (a card back in a waiting column is
+// waiting and unowned again, so it can be started fresh) and the hook hands
+// the released session ID to the app layer, which aborts the agent that was
+// working on the card. Like OnMovedToDone it is called without the board
+// lock held, from any entry point.
 var OnStopped func(projectID, sessionID string)
 
 // Attachment is a file (usually an image) attached to a card when it is
@@ -313,11 +324,13 @@ func ForSession(projectID, sessionID string) (Card, bool, error) {
 	return Card{}, false, nil
 }
 
-// AddOpts carries the optional fields of a new card: attachments and the
-// worktree-isolation flag (as before), plus the richer card fields — the
-// agent/model the card runs with, its description and acceptance criteria,
-// and the cards it is blocked by.
+// AddOpts carries the optional fields of a new card: the waiting column to
+// create it in (planning or open, defaulting to open), attachments and the
+// worktree-isolation flag, plus the richer card fields — the agent/model
+// the card runs with, its description and acceptance criteria, and the
+// cards it is blocked by.
 type AddOpts struct {
+	Column      string
 	Attachments []Attachment
 	Isolate     bool
 	Agent       string
@@ -327,12 +340,20 @@ type AddOpts struct {
 	BlockedBy   []string
 }
 
-// Add creates a card at the end of the open column. Cards can only be
-// created in open — work begins by moving a card to inprogress (which links
-// the session working on it), never by creating it there. Attachments, when
-// given, ride along and are prompted to the session when the card starts.
-// Isolate opts the card into git worktree isolation when it is started.
+// Add creates a card at the end of a waiting column (o.Column, or open when
+// empty). Cards can only be created in planning or open — work begins by
+// moving a card to inprogress (which links the session working on it),
+// never by creating it there. Attachments, when given, ride along and are
+// prompted to the session when the card starts. Isolate opts the card into
+// git worktree isolation when it is started.
 func Add(projectID, title string, o AddOpts) (Card, error) {
+	column := o.Column
+	if column == "" {
+		column = "open"
+	}
+	if !IsWaiting(column) {
+		return Card{}, ErrBadColumn
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	cards, err := load(projectID)
@@ -342,8 +363,8 @@ func Add(projectID, title string, o AddOpts) (Card, error) {
 	card := Card{
 		ID:          nextID(cards),
 		Title:       title,
-		Column:      "open",
-		Order:       len(inColumn(cards, "open")), // end of the column
+		Column:      column,
+		Order:       len(inColumn(cards, column)), // end of the column
 		Created:     util.Now(),
 		Attachments: o.Attachments,
 		Isolate:     o.Isolate,
@@ -370,14 +391,14 @@ func Add(projectID, title string, o AddOpts) (Card, error) {
 // When column is set the card is placed before the card with ID before
 // (end of the column when before is empty or missing from it). Both
 // affected columns are renumbered. Linking a session is only allowed while
-// the card is still waiting in open and unowned — the same precondition
-// startCard enforces. Moving a card out of open clears its
-// start schedule (a schedule only makes sense for a waiting card — starting
-// it, by hand or by the scheduler, consumes it). Moving a card from
-// inprogress back to open stops it: the session link is cleared (the card
-// is waiting and unowned again) and OnStopped fires so the released
-// session's agent is aborted. Moving a card into done fires OnMovedToDone
-// (both after the lock is released).
+// the card is still waiting (planning or open) and unowned — the same
+// precondition startCard enforces. Moving a card out of a waiting column
+// clears its start schedule (a schedule only makes sense for a waiting
+// card — starting it, by hand or by the scheduler, consumes it). Moving a
+// card from inprogress back to a waiting column stops it: the session link
+// is cleared (the card is waiting and unowned again) and OnStopped fires so
+// the released session's agent is aborted. Moving a card into done fires
+// OnMovedToDone (both after the lock is released).
 func Update(projectID, id string, title *string, column, before, sessionID *string) (Card, error) {
 	card, movedDone, stoppedSession, err := updateLocked(projectID, id, title, column, before, sessionID)
 	if err == nil && stoppedSession != "" && OnStopped != nil {
@@ -410,11 +431,12 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 		return Card{}, false, "", ErrNotFound
 	}
 	// linking a session is only meaningful for a card that is still waiting
-	// in open and not owned by another session — the same precondition
-	// startCard enforces, so the web UI's link dialog cannot hijack a card
-	// that is in progress or done (clearing a sessionID is always allowed)
+	// (planning or open) and not owned by another session — the same
+	// precondition startCard enforces, so the web UI's link dialog cannot
+	// hijack a card that is in progress or done (clearing a sessionID is
+	// always allowed)
 	if sessionID != nil && *sessionID != "" {
-		if cards[idx].Column != "open" || (cards[idx].SessionID != "" && cards[idx].SessionID != *sessionID) {
+		if !IsWaiting(cards[idx].Column) || (cards[idx].SessionID != "" && cards[idx].SessionID != *sessionID) {
 			return Card{}, false, "", ErrBadSession
 		}
 	}
@@ -431,17 +453,18 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 		to := *column
 		movedDone = to == "done" && from != "done"
 		cards[idx].Column = to
-		// leaving open consumes the start schedule: the card is no longer
-		// waiting, whether it was started by hand, by the scheduler, or by
-		// a done-link trigger
-		if from == "open" && to != "open" {
+		// leaving a waiting column consumes the start schedule: the card is
+		// no longer waiting, whether it was started by hand, by the
+		// scheduler, or by a done-link trigger
+		if IsWaiting(from) && !IsWaiting(to) {
 			cards[idx].StartAt = 0
 		}
-		// returning to open stops the card: drop the stale session link so
-		// the card is waiting and unowned again (a fresh Start can link a
-		// new session), and let the caller abort the released agent — from
-		// inprogress (the stop flow) or from review (dragged back)
-		if (from == "inprogress" || from == "review") && to == "open" && cards[idx].SessionID != "" {
+		// returning to a waiting column stops the card: drop the stale
+		// session link so the card is waiting and unowned again (a fresh
+		// Start can link a new session), and let the caller abort the
+		// released agent — from inprogress (the stop flow) or from review
+		// (dragged back)
+		if (from == "inprogress" || from == "review") && IsWaiting(to) && cards[idx].SessionID != "" {
 			stoppedSession = cards[idx].SessionID
 			cards[idx].SessionID = ""
 		}
@@ -485,7 +508,7 @@ func updateLocked(projectID, id string, title *string, column, before, sessionID
 }
 
 // SetIsolate toggles the card's worktree isolation flag. Only cards still
-// waiting in open can change it — a started card already has its
+// waiting (planning or open) can change it — a started card already has its
 // environment fixed.
 func SetIsolate(projectID, id string, isolate bool) (Card, error) {
 	mu.Lock()
@@ -504,7 +527,7 @@ func SetIsolate(projectID, id string, isolate bool) (Card, error) {
 	if idx < 0 {
 		return Card{}, ErrNotFound
 	}
-	if cards[idx].Column != "open" {
+	if !IsWaiting(cards[idx].Column) {
 		return Card{}, ErrNotOpen
 	}
 	cards[idx].Isolate = isolate
@@ -702,8 +725,8 @@ func Watch(projectID, cardID, sessionID string, watch bool) (Card, error) {
 // SetLink points card at target: when the card is moved to done, the target
 // is started automatically in a fresh session (the Start-button flow). An
 // empty target clears the link. The target must be an existing card other
-// than the card itself, and it must still be waiting in the open column —
-// only open cards can be targeted.
+// than the card itself, and it must still be waiting in the planning or
+// open column — only waiting cards can be targeted.
 func SetLink(projectID, id, target string) (Card, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -732,7 +755,7 @@ func SetLink(projectID, id, target string) (Card, error) {
 				break
 			}
 		}
-		if tIdx < 0 || cards[tIdx].Column != "open" {
+		if tIdx < 0 || !IsWaiting(cards[tIdx].Column) {
 			return Card{}, ErrBadLink
 		}
 	}
@@ -778,8 +801,8 @@ func SetLink(projectID, id, target string) (Card, error) {
 // background scheduler starts the card when the time passes, exactly like
 // the Start button. startAt == 0 clears the schedule (always allowed, so a
 // start can consume it on any column). Setting a schedule is only allowed
-// while the card is still waiting in open — a card that already started
-// cannot be scheduled.
+// while the card is still waiting (planning or open) — a card that already
+// started cannot be scheduled.
 func SetSchedule(projectID, id string, startAt int64) (Card, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -797,7 +820,7 @@ func SetSchedule(projectID, id string, startAt int64) (Card, error) {
 	if idx < 0 {
 		return Card{}, ErrNotFound
 	}
-	if startAt != 0 && (cards[idx].Column != "open" || cards[idx].SessionID != "") {
+	if startAt != 0 && (!IsWaiting(cards[idx].Column) || cards[idx].SessionID != "") {
 		return Card{}, ErrNotOpen
 	}
 	cards[idx].StartAt = startAt

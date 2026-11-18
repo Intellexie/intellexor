@@ -343,7 +343,7 @@ func TestBoardToolLinkAction(t *testing.T) {
 
 	// linking the session's card to itself is rejected
 	_, err = bt.Run(ctx, json.RawMessage(`{"action":"link","target":"`+source.ID+`"}`))
-	if err == nil || !strings.Contains(err.Error(), "open column") {
-		t.Fatalf("expected open-column rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "waiting") {
+		t.Fatalf("expected waiting-column rejection, got %v", err)
 	}
 }

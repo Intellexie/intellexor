@@ -90,7 +90,7 @@ func Import(projectID string, p *ExportPayload, mode string) (int, error) {
 		c.ReviewSessionID = "" // a session ref of the exporting project
 		c.Status = ""          // runtime state never survives an import
 		c.StatusText = ""
-		if c.Column != "open" {
+		if !IsWaiting(c.Column) {
 			c.StartAt = 0 // schedules only make sense for waiting cards
 		}
 		switch {

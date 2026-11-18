@@ -68,7 +68,7 @@ func sweepProject(i *Instance, projectID string, now int64) {
 		return
 	}
 	for _, c := range cards {
-		if c.Column != "open" || c.SessionID != "" || c.StartAt == 0 || c.StartAt > now {
+		if !board.IsWaiting(c.Column) || c.SessionID != "" || c.StartAt == 0 || c.StartAt > now {
 			continue
 		}
 		if _, err := startCard(i, projectID, c.ID); err != nil {

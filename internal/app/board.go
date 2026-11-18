@@ -130,7 +130,7 @@ func triggerReadyCards(in *Instance, projectID string) {
 		}
 		started := false
 		for _, c := range cards {
-			if c.Column != "open" || c.SessionID != "" || len(c.BlockedBy) == 0 || !blockersSatisfied(c, done) {
+			if !board.IsWaiting(c.Column) || c.SessionID != "" || len(c.BlockedBy) == 0 || !blockersSatisfied(c, done) {
 				continue
 			}
 			if _, err := startCard(in, projectID, c.ID); err != nil {
@@ -226,7 +226,7 @@ func startCard(i *Instance, projectID, cardID string) (string, error) {
 	if card == nil {
 		return "", fmt.Errorf("card not found: %s", cardID)
 	}
-	if card.Column != "open" || card.SessionID != "" {
+	if !board.IsWaiting(card.Column) || card.SessionID != "" {
 		return "", errCardNotOpen
 	}
 	// the card picks its agent and model, falling back to the defaults:

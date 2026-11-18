@@ -47,12 +47,13 @@ func (s *Server) createBoardCard(w http.ResponseWriter, r *http.Request) *apiErr
 	if e := decodeBody(r, &body); e != nil {
 		return e
 	}
-	// cards are only ever created in open — work starts by moving a card to
-	// inprogress, never by creating it there
-	if body.Column != "" && body.Column != "open" {
-		return badRequest("Cards can only be added to the open column")
+	// cards are only ever created in a waiting column (planning or open) —
+	// work starts by moving a card to inprogress, never by creating it there
+	if body.Column != "" && !board.IsWaiting(body.Column) {
+		return badRequest("Cards can only be added to the planning or open column")
 	}
 	card, err := board.Add(s.boardProjectID(r), body.Title, board.AddOpts{
+		Column:      body.Column,
 		Attachments: body.Attachments,
 		Isolate:     body.Isolate,
 		Agent:       body.Agent,
@@ -99,7 +100,7 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 			return notFound("Card not found: " + r.PathValue("cardID"))
 		}
 		if err == board.ErrBadLink {
-			return badRequest("Cards can only be linked to another card that is still waiting in the open column")
+			return badRequest("Cards can only be linked to another card that is still waiting (planning or open)")
 		}
 		if err != nil {
 			return badRequest(err.Error())
@@ -116,7 +117,7 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 			return notFound("Card not found: " + r.PathValue("cardID"))
 		}
 		if err == board.ErrNotOpen {
-			return badRequest("Only cards still waiting in the open column can be scheduled")
+			return badRequest("Only cards still waiting (planning or open) can be scheduled")
 		}
 		if err != nil {
 			return badRequest(err.Error())
@@ -126,14 +127,14 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 		return nil
 	}
 	// isolation is its own mutation too: toggle the card's worktree flag
-	// (only cards still waiting in open can change it)
+	// (only cards still waiting can change it)
 	if body.Isolate != nil {
 		card, err := board.SetIsolate(s.boardProjectID(r), r.PathValue("cardID"), *body.Isolate)
 		if err == board.ErrNotFound {
 			return notFound("Card not found: " + r.PathValue("cardID"))
 		}
 		if err == board.ErrNotOpen {
-			return badRequest("Only cards still waiting in the open column can change worktree isolation")
+			return badRequest("Only cards still waiting (planning or open) can change worktree isolation")
 		}
 		if err != nil {
 			return badRequest(err.Error())
@@ -187,7 +188,7 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 		return notFound("Card not found: " + r.PathValue("cardID"))
 	}
 	if err == board.ErrBadSession {
-		return badRequest("Only cards still waiting in the open column can be linked to a session")
+		return badRequest("Only cards still waiting (planning or open) can be linked to a session")
 	}
 	if err != nil {
 		return badRequest(err.Error())

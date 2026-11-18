@@ -188,8 +188,9 @@ parallelizable. Use it when you have several independent tasks (or a
 multi-stage pipeline) and want the agent to chew through them while you
 review results as they land.
 
-The board is the first tab in the web UI: three columns (`open`,
-`inprogress`, `done`) of cards stored per project in a single JSON file —
+The board is the first tab in the web UI: five columns (`planning`,
+`open`, `inprogress`, `review`, `done`) of cards stored per project in a
+single JSON file —
 it survives restarts and is shared by every client connected to the same
 project. Card IDs are plain numbers (`1`, `2`, …) so they are easy to
 reference; cards can carry attachments (usually images) that are passed to
@@ -212,7 +213,7 @@ already working on it).
 
 - **Links (chains):** `link` points a card at a *target* card; when the
   source card is moved to done, the target starts automatically in a fresh
-  session (only cards still waiting in `open` can be targeted). This is the
+  session (only cards still waiting in `planning` or `open` can be targeted). This is the
   multi-stage pattern: *implement → write tests → update docs*, or
   *migrate schema → backfill data → verify counts*. Each stage is its own
   session with a clean context, and you can inspect (or abort) any stage
@@ -222,8 +223,8 @@ already working on it).
   (`"30m"`, `"2h"`, `"1d"`) or `startAt` (unix milliseconds) and a
   background scheduler starts the card then, exactly like the Start
   button. Use it for off-hours work: queue the risky migration now,
-  schedule it for 2 AM, review the diff in the morning. Only open cards
-  can be scheduled; `startAt 0` clears the schedule.
+  schedule it for 2 AM, review the diff in the morning. Only waiting cards
+  (`planning`/`open`) can be scheduled; `startAt 0` clears the schedule.
 
 The two compose: a scheduled card can itself be the head of a chain, so
 "tonight at 2 AM: deploy, then run the smoke tests, then post the results"

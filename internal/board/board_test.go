@@ -180,3 +180,63 @@ func TestStopReturnsCardToOpenAndFiresOnStopped(t *testing.T) {
 		t.Fatalf("OnStopped fired for a move to done (session %q)", stopped)
 	}
 }
+
+// The planning column is a waiting column like open: cards can be created
+// there, linked to sessions, scheduled and targeted by done-links — and
+// moving a card back to planning stops it (clears the session link and
+// fires OnStopped) just like moving it back to open.
+func TestPlanningColumnBehavesLikeOpen(t *testing.T) {
+	projectID := setup(t)
+
+	card, err := Add(projectID, "Idea", AddOpts{Column: "planning"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card.Column != "planning" {
+		t.Fatalf("card created in %q, want planning", card.Column)
+	}
+	if _, err := Add(projectID, "Bad", AddOpts{Column: "done"}); err != ErrBadColumn {
+		t.Fatalf("creating in done: got %v, want ErrBadColumn", err)
+	}
+
+	// schedules are allowed from planning (while the card is unowned)
+	if _, err := SetSchedule(projectID, card.ID, 12345); err != nil {
+		t.Fatalf("schedule from planning failed: %v", err)
+	}
+	// and so are session links
+	sess := "ses_planning"
+	if _, err := Update(projectID, card.ID, nil, nil, nil, &sess); err != nil {
+		t.Fatalf("link from planning failed: %v", err)
+	}
+	// and so are done-link targets
+	target, err := Add(projectID, "Target", AddOpts{Column: "planning"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetLink(projectID, card.ID, target.ID); err != nil {
+		t.Fatalf("link target in planning rejected: %v", err)
+	}
+
+	// moving a waiting card to inprogress consumes the schedule
+	inprogress := "inprogress"
+	if _, err := Update(projectID, card.ID, nil, &inprogress, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := findCard(projectID, card.ID); c.StartAt != 0 {
+		t.Fatalf("startAt %d survived the start, want 0", c.StartAt)
+	}
+
+	// moving back to planning stops the card: session link cleared, hook fired
+	stopped := make(chan string, 1)
+	OnStopped = func(_ string, sessionID string) { stopped <- sessionID }
+	defer func() { OnStopped = nil }()
+	if _, err := Update(projectID, card.ID, nil, strPtr("planning"), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-stopped; got != sess {
+		t.Fatalf("OnStopped fired with %q, want %q", got, sess)
+	}
+	if c, _ := findCard(projectID, card.ID); c.SessionID != "" {
+		t.Fatalf("session link %q survived the move back to planning", c.SessionID)
+	}
+}

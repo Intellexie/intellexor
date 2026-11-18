@@ -424,14 +424,14 @@ The asking tool call blocks until reply/reject. On reply the agent continues wit
 {
   "id": "1",                    // plain number string; max+1, never repurposed
   "title": "...",               // also used as session title + prompt on start
-  "column": "open" | "inprogress" | "review" | "done",
+  "column": "planning" | "open" | "inprogress" | "review" | "done",
   "order": 0,                   // position within column, ascending, always dense 0..n-1
   "created": 0,                 // unix ms
   "sessionID": "ses_...",       // optional — session working on the card
   "watchers": ["ses_..."],      // optional — sessions pinged when card is done
   "link": "2",                  // deprecated — migrated into the target's blockedBy on load
   "blockedBy": ["1"],           // optional — dependency: starts only once all blockers are done
-  "startAt": 0,                 // optional — scheduled start, unix ms (open cards only)
+  "startAt": 0,                 // optional — scheduled start, unix ms (waiting cards only: planning/open)
   "attachments": [              // optional — passed to the session prompt on start
     { "type": "file", "mime": "image/png", "url": "data:...", "filename": "..." }
   ],
@@ -454,13 +454,13 @@ The asking tool call blocks until reply/reject. On reply the agent continues wit
 
 Semantics:
 
-- Cards are created **only in `open`**. Columns: `open` → `inprogress` → `review` → `done`.
+- Cards are created **only in a waiting column** (`planning` or `open`). Columns in display order: `planning` → `open` → `inprogress` → `review` → `done`. `planning` holds ideas not yet ready to be picked up; it behaves exactly like `open` (start/schedule/link/isolate all work from both waiting columns).
 - **Starting a card** (Start button / agent `board` tool / dependency trigger / scheduler) creates a session titled with the card title, moves the card to `inprogress`, links `sessionID`, and prompts the session with the title + description + acceptance criteria + attachments. The card's `agent` and `model` are used; empty values fall back to the defaults (build agent, first connected provider's preferred model).
-- **Dependencies**: a card with `blockedBy` only starts once every blocker is in `done` (missing blocker IDs count as satisfied). When a card reaches done, every open card whose `blockedBy` list is non-empty and fully satisfied is started automatically — cards without any `blockedBy` entry are never auto-started (they wait for a manual start). The legacy single `link` is migrated into the target's `blockedBy` on load and still accepted (deprecated) in the API — setting `link` to X is equivalent to adding the card to X's `blockedBy`. Config `board.max_running` caps how many cards the automatic flow runs at once (manual starts are never capped).
+- **Dependencies**: a card with `blockedBy` only starts once every blocker is in `done` (missing blocker IDs count as satisfied). When a card reaches done, every waiting card whose `blockedBy` list is non-empty and fully satisfied is started automatically — cards without any `blockedBy` entry are never auto-started (they wait for a manual start). The legacy single `link` is migrated into the target's `blockedBy` on load and still accepted (deprecated) in the API — setting `link` to X is equivalent to adding the card to X's `blockedBy`. Config `board.max_running` caps how many cards the automatic flow runs at once (manual starts are never capped).
 - **Review stage**: a card enters `review` only by an explicit move (web UI drag, `PATCH /board/card/{id}` with `column: "review"`, or the agent `board` tool's `move` action) — a card's session going idle never moves the card or spawns a review session. When a card lands in `review`, the configured review agent (config `board.review_agent`, default the built-in `review` agent; `board.auto_review: false` disables the run) inspects the card's changes in a fresh session. Its report is attached to the card as `findings`. **Approve** (`POST /board/card/{id}/approve`) moves the card to `done` (merging an isolated worktree first); **reject** (`POST /board/card/{id}/reject`) moves it back to `inprogress` and prompts its session with the findings. A new prompt on the card's session moves it out of review automatically.
 - **Worktree isolation**: when a card has `isolate: true` (or config `worktree.enabled` is on), its session runs in a fresh git worktree at `<repo>/.intellexor/worktrees/card-<id>` on a new branch `itx/card-<id>` (uniquified with `-2`, `-3`, … on retry), branched from config `worktree.base` or the repo's current HEAD. The session keeps the parent repo's project ID, so board and session storage stay grouped. `branch`/`worktreePath` are recorded on the card and `worktree` on the session. `POST /board/card/{id}/merge` merges the branch back (committing uncommitted worktree changes first), removes the worktree + branch, and returns the session to the repo directory.
 - Moving a card to **`done`** prompts all `watchers` (on behalf of the user) and triggers the dependency flow.
-- `sessionID` can only be set while the card is `open` and unowned (`""` clears it). `startAt` can only be set while `open` and unowned (`0` clears). `link` targets must exist, not be self, and be `open`; `blockedBy` entries must exist and not be self.
+- `sessionID` can only be set while the card is waiting (`planning`/`open`) and unowned (`""` clears it). `startAt` can only be set while waiting and unowned (`0` clears). `link` targets must exist, not be self, and be waiting; `blockedBy` entries must exist and not be self.
 - **Live status**: the server keeps `status`/`statusText`/`startedAt`/`cost`/`tokens` in sync with the card's session — `running` while the session works, `waiting` when a question or permission is pending (needs attention), `blocked` after a non-retryable provider failure (with the error in `statusText`), `idle` otherwise. Status changes ride on `board.updated` broadcasts.
 - **Failure handling**: retryable provider errors (429/5xx, mid-stream resets, stalls) are retried forever on an exponential backoff (5s doubling, capped at 10 min) until the endpoint recovers or the session is aborted — the card stays `running` with `retry` status events. Only non-retryable errors (4xx, bad request) mark the card `blocked` with the error. There is no model fallback: the card runs the model it is configured with.
 - Deleting a card clears links and `blockedBy` entries pointing at it.
@@ -470,7 +470,7 @@ Semantics:
 | Route | Body / params | Response |
 |---|---|---|
 | `GET /board` | — | **200** array of `Card`, display-ordered (column rank, then `order`) |
-| `POST /board/card` | `{ "title": "...", "column": "open", "isolate": false, "attachments": [...], "agent": "", "model": "", "description": "", "criteria": "", "blockedBy": [] }` (column must be `""`/`"open"`) | **200** created `Card` |
+| `POST /board/card` | `{ "title": "...", "column": "open", "isolate": false, "attachments": [...], "agent": "", "model": "", "description": "", "criteria": "", "blockedBy": [] }` (column must be `""`/`"planning"`/`"open"`) | **200** created `Card` |
 | `PATCH /board/card/{cardID}` | see below | **200** updated `Card` |
 | `POST /board/card/{cardID}/merge` | — | **200** updated `Card` (branch/worktreePath cleared); 400 when the card has no worktree or the merge fails |
 | `POST /board/card/{cardID}/approve` | — | **200** updated `Card` (review → done, worktree merged); 400 when the card is not in review |
@@ -486,11 +486,11 @@ Semantics:
   "title": "...",        // rename
   "column": "done",      // move (triggers watchers/dependencies when moving to done)
   "before": "3",         // insert before this card in the target column (end if empty)
-  "sessionID": "ses_...",// link a session (open+unowned only; "" clears)
+  "sessionID": "ses_...",// link a session (waiting+unowned only; "" clears)
   "link": "2",           // deprecated: set/clear done-link ("" clears) — adds/removes the card in the target's blockedBy
   "blockedBy": ["1"],    // replace the dependency list (existing card IDs, not self)
-  "startAt": 1700000000000,  // schedule (unix ms; 0 clears; open+unowned only)
-  "isolate": true,       // toggle worktree isolation (open cards only)
+  "startAt": 1700000000000,  // schedule (unix ms; 0 clears; waiting+unowned only)
+  "isolate": true,       // toggle worktree isolation (waiting cards only)
   "agent": "plan",       // agent the card runs with ("" = default)
   "model": "provider/model", // model the card runs with ("" = default)
   "description": "...",  // context beyond the title
@@ -499,9 +499,9 @@ Semantics:
 }
 ```
 
-Move semantics: leaving `open` clears `startAt` (a schedule is consumed by the start); moving from `inprogress` back to `open` **stops** the card — its `sessionID` is cleared and the released session's agent is aborted, so the card can be started fresh. Moving to `done` keeps the session link.
+Move semantics: leaving a waiting column (`planning`/`open`) clears `startAt` (a schedule is consumed by the start); moving from `inprogress` back to a waiting column **stops** the card — its `sessionID` is cleared and the released session's agent is aborted, so the card can be started fresh. Moving to `done` keeps the session link.
 
-Errors: 404 `Card not found: <id>`; 400 with messages like `"Cards can only be added to the open column"`, `"unknown column"`, `"Only cards still waiting in the open column can be scheduled"`.
+Errors: 404 `Card not found: <id>`; 400 with messages like `"Cards can only be added to the planning or open column"`, `"unknown column"`, `"Only cards still waiting (planning or open) can be scheduled"`.
 
 Import modes: `replace` (default) — board becomes exactly the import (session refs/watchers cleared, invalid columns coerced to `open`); `merge` — appended with fresh ids, links remapped.
 
@@ -838,7 +838,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 
 ### 13.2 Board tab
 
-1. `GET /board` → render four columns sorted by `order`.
+1. `GET /board` → render five columns (`planning`, `open`, `inprogress`, `review`, `done`) sorted by `order`.
 2. Subscribe to `board.updated` → re-fetch `GET /board` (payload has no cards; also fires on card status changes).
 3. Create: `POST /board/card`. Move/reorder/link/schedule/edit: `PATCH /board/card/{id}`. Delete: `DELETE /board/card/{id}`.
 4. Start button → `PATCH /board/card/{id}` `{"column":"inprogress"}` — the server creates + prompts the linked session automatically (watch `session.created`).
@@ -932,7 +932,7 @@ This section specifies **what a complete Intellexor UI must do**. Sections 1–1
 Required top-level structure (names are free; behavior is not):
 
 1. **Icon rail** (far left, ~64px): brand/logo, sidebar toggle, board-panel toggle, current workspace avatar, other open workspaces, new-workspace button, settings button.
-2. **Board panel** (optional left panel, ~300px): compact list of `open` + `inprogress` kanban cards; click opens the board.
+2. **Board panel** (optional left panel, ~300px): compact list of `inprogress` + `review` + `open` + `planning` kanban cards; click opens the board.
 3. **Session sidebar** (~280px): workspace title, "New session" button, session list grouped by day (Today / Yesterday / Older), sorted by `time.updated` descending, with an "Archived (N)" collapsible section.
 4. **Main area**: everything else — workspace tab bar, session tab bar, and the active view.
 5. Overlays: modal root and a toast stack (bottom-right).
@@ -1019,15 +1019,15 @@ The composer is the heart of the app. Requirements:
 
 ### 15.7 Kanban board
 
-- Four columns `open` / `inprogress` / `review` / `done` (§5), cards sorted by `order`; per-column collapse persisted (collapsed columns become vertical buttons in a rail, still droppable). Reload on `board.updated`.
-- **Create:** header modal **and** an inline "Add card…" textarea pinned to the bottom of the Open column — both support attachments/paste; `POST /board/card {title, column:"open", attachments, isolate?, description?, criteria?, agent?, model?}`. Drafts survive re-renders. Cards can only be created in Open. Enter creates; Ctrl/Shift+Enter newline. Both creators offer an **"Isolate in a git worktree"** toggle (`isolate: true`); the modal also offers description, acceptance criteria, agent and model.
-- **Edit/delete:** Open cards only — edit modal or double-click title (contenteditable) → `PATCH /board/card/{id}` (also description/criteria/agent/model); delete with confirm.
+- Five columns `planning` / `open` / `inprogress` / `review` / `done` (§5), cards sorted by `order`; per-column collapse persisted (collapsed columns become vertical buttons in a rail, still droppable). Reload on `board.updated`.
+- **Create:** header modal (with a Planning/Open column picker) **and** an inline "Add card…" textarea pinned to the bottom of the Planning and Open columns — all support attachments/paste; `POST /board/card {title, column:"planning"|"open", attachments, isolate?, description?, criteria?, agent?, model?}`. Drafts survive re-renders. Cards can only be created in a waiting column. Enter creates; Ctrl/Shift+Enter newline. Both creators offer an **"Isolate in a git worktree"** toggle (`isolate: true`); the modal also offers description, acceptance criteria, agent and model.
+- **Edit/delete:** waiting cards (Planning/Open) only — edit modal or double-click title (contenteditable) → `PATCH /board/card/{id}` (also description/criteria/agent/model); delete with confirm.
 - **Move:** HTML5 drag & drop with insert-before computed from pointer position; optimistic local reorder, then `PATCH {column, before}`. Moving out of In Progress asks "Stop the agent?".
-- **Start:** Open cards get **Start** → `POST /session` (with the card's agent/model) → `PATCH {column:"inprogress", sessionID}` → `POST /session/{sid}/prompt_async` with the card title + description + criteria + attachments → open a tab without switching. Cards with `sessionID` get **View**; in-progress cards show a spinner while their session is busy.
-- **Dependencies:** open cards with unmet `blockedBy` render a "⛔ blocked by #x, #y" badge; they start automatically once their blockers are done (server-side, capped by `board.max_running`).
+- **Start:** waiting cards (Planning/Open) get **Start** → `POST /session` (with the card's agent/model) → `PATCH {column:"inprogress", sessionID}` → `POST /session/{sid}/prompt_async` with the card title + description + criteria + attachments → open a tab without switching. Cards with `sessionID` get **View**; in-progress cards show a spinner while their session is busy.
+- **Dependencies:** waiting cards with unmet `blockedBy` render a "⛔ blocked by #x, #y" badge; they start automatically once their blockers are done (server-side, capped by `board.max_running`).
 - **Live status:** cards show a status row — spinner + elapsed time while `running`, "⏳ waiting for input" when a question/permission is pending, "⛔ <error>" when `blocked` — plus a tokens/cost snapshot (`c.tokens`, `c.cost`). Cards with a pending question/permission are the "needs attention" highlight.
 - **Review stage:** cards in `review` show the review agent's `findings` and **Approve** (`POST /board/card/{id}/approve`) / **Reject** (`POST /board/card/{id}/reject`) buttons. Reject sends the card back to In Progress and prompts its session with the findings.
-- **Schedule:** Open cards get **Schedule** → datetime picker + presets (1h/2h/8h/24h) → `PATCH {startAt}` (unix ms; 0 removes). Show a 🕐 badge with humanized time; the server starts the card.
+- **Schedule:** waiting cards get **Schedule** → datetime picker + presets (1h/2h/8h/24h) → `PATCH {startAt}` (unix ms; 0 removes). Show a 🕐 badge with humanized time; the server starts the card.
 - **Linking (follow-ups):** each card has a draggable link pill; dropping it on an Open card sets `PATCH {link: dst}` — when the source is done, the target auto-starts (equivalent to adding the source to the target's `blockedBy`). Render animated dashed SVG bezier curves between linked cards (border-to-border, highlighted on hover); redraw on resize/scroll. Click the pill to unlink (`link: ""`).
 - **Watchers:** show 👁 + count (`c.watchers`).
 - **Worktree isolation:** cards with `c.branch` show a branch chip (tooltip: the worktree path), a **Diff** button (`GET /session/{sid}/worktree/diff`, §3.28, rendered as a patch) and a **Merge** button (confirm → `POST /board/card/{id}/merge`, §5.2 — merges the branch into the repo and removes the worktree).
@@ -1084,7 +1084,7 @@ A new UI is feature-complete when all of the following are true:
 - [ ] Message actions: copy, revert (+ banner/restore), fork
 - [ ] Session: create/rename/archive/delete, day-grouped sidebar with status dots, context/cost ring + popover, export/import
 - [ ] Docks: permission (Deny/Allow once/Allow always), question wizard with dismiss, todos with clear
-- [ ] Board: 3 columns, drag & drop with insert-before, add-card inline + modal with attachments, edit/delete, Start/Schedule/View, link pills + SVG link lines, watchers, collapse, export/import (merge/replace), orchestrator chat column
+- [ ] Board: 5 columns (planning/open/inprogress/review/done), drag & drop with insert-before, add-card inline + modal with attachments, edit/delete, Start/Schedule/View, link pills + SVG link lines, watchers, collapse, export/import (merge/replace), orchestrator chat column
 - [ ] Cron tab: rows with running indicator, pause/play, live spec validation via preview endpoint, create/edit/delete
 - [ ] Alarms: ⏰ indicators, alarm list modal with countdowns, trigger-now, scheduled-message modal
 - [ ] Settings: theme + background toggles, provider/model/agent CRUD against the config endpoints

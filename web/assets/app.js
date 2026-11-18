@@ -1857,6 +1857,7 @@ const BOARD_PANEL_COLUMNS = [
   { id: "inprogress", label: "In Progress" },
   { id: "review", label: "Review" },
   { id: "open", label: "Open" },
+  { id: "planning", label: "Planning" },
 ];
 
 // True while the board panel is holding the slot the sidebar was occupying:
@@ -2313,7 +2314,7 @@ async function openLinkCardModal(sess) {
 
   let busy = false;
   const current = () => cards.find((c) => c.sessionID === sid);
-  const openCards = () => cards.filter((c) => c.column === "open" && !c.sessionID);
+  const openCards = () => cards.filter((c) => isWaitingCol(c.column) && !c.sessionID);
 
   // link the card to this session (moving it to In Progress), releasing a
   // previously linked card back to open first so the session only ever has one
@@ -4000,11 +4001,16 @@ function renderTurnFiles(files) {
 /* ---------- kanban board (first tab) ---------- */
 
 const BOARD_COLUMNS = [
+  { id: "planning", label: "Planning" },
   { id: "open", label: "Open" },
   { id: "inprogress", label: "In Progress" },
   { id: "review", label: "Review" },
   { id: "done", label: "Done" },
 ];
+
+// Waiting columns hold cards that have not started yet: they offer Start,
+// can be scheduled, edited and targeted by done-links, same as Open.
+const isWaitingCol = (col) => col === "open" || col === "planning";
 
 // Per-column collapsed state, persisted like the other UI prefs. A collapsed
 // column renders as a narrow vertical button in a rail on the left of the
@@ -4040,7 +4046,7 @@ async function trackStartedCards(cards) {
   const started = [];
   for (const c of cards) {
     next[c.id] = c.column;
-    if (c.column === "inprogress" && c.sessionID && prev[c.id] === "open") started.push(c.sessionID);
+    if (c.column === "inprogress" && c.sessionID && isWaitingCol(prev[c.id])) started.push(c.sessionID);
   }
   boardColByCard = next;
   for (const sid of started) {
@@ -4067,7 +4073,7 @@ async function renderBoardView(main) {
   const header = el("header", "chat-header");
   header.appendChild(el("div", "title", "Board"));
   header.appendChild(el("div", "spacer"));
-  header.appendChild(el("span", "board-hint", "Drag cards to move · drag ⌖ onto an Open card to link · double-click an Open card title to edit"));
+  header.appendChild(el("span", "board-hint", "Drag cards to move · drag ⌖ onto a waiting card to link · double-click a waiting card title to edit"));
   header.appendChild(buildBoardActions());
   const addBtn = el("button", "btn secondary board-add", ICONS.plus + "<span>Add card</span>");
   addBtn.title = "Create a new card in Open";
@@ -4770,6 +4776,20 @@ function openAddCardModal() {
     const am = buildCardAgentModelRow("", "");
     modal.appendChild(am.row);
 
+    // waiting column to create the card in: planning (not ready yet) or
+    // open (ready to be picked up)
+    const colField = el("div", "m-field");
+    colField.appendChild(el("label", "m-label", "Column"));
+    const colSel = el("select", "m-select");
+    for (const col of BOARD_COLUMNS.filter((k) => isWaitingCol(k.id))) {
+      const opt = el("option", "", col.label);
+      opt.value = col.id;
+      if (col.id === "open") opt.selected = true;
+      colSel.appendChild(opt);
+    }
+    colField.appendChild(colSel);
+    modal.appendChild(colField);
+
     // worktree isolation: the card's session runs in its own git worktree
     // on its own branch, so several cards can edit code in parallel
     const isoCb = el("input");
@@ -4797,7 +4817,7 @@ function openAddCardModal() {
       create.disabled = true;
       try {
         await post("/board/card", {
-          title, column: "open", attachments: files, isolate: isoCb.checked,
+          title, column: colSel.value, attachments: files, isolate: isoCb.checked,
           description: desc.value, criteria: crit.value,
           ...am.get(),
         });
@@ -4846,8 +4866,8 @@ function openWorktreeDiffModal(c) {
 }
 
 /* ---------- schedule a timed start ---------- */
-// A card in Open can be given a startAt (unix ms): a background scheduler on
-// the server starts it when the time passes — same flow as the Start button,
+// A waiting card (planning or open) can be given a startAt (unix ms): a
+// background scheduler on the server starts it when the time passes — same flow as the Start button,
 // so it works with no client connected. The dialog offers quick offsets plus
 // a free date/time picker.
 
@@ -5139,11 +5159,11 @@ function buildBoardColumn(col) {
   for (const c of cards) list.appendChild(boardCardNode(c));
   colEl.appendChild(list);
 
-  // add-card input pinned to the bottom of the Open column — cards can only
-  // be created in open (work starts by moving a card to In Progress). Enter
-  // creates the card, Ctrl+Enter inserts a newline; images/files can be
-  // attached or pasted, same as the composer.
-  if (col.id === "open") {
+  // add-card input pinned to the bottom of the waiting columns — cards can
+  // only be created in planning or open (work starts by moving a card to
+  // In Progress). Enter creates the card, Ctrl+Enter inserts a newline;
+  // images/files can be attached or pasted, same as the composer.
+  if (isWaitingCol(col.id)) {
     const add = el("div", "kanban-add");
     const input = el("textarea", "kanban-add-input");
     input.rows = 1;
@@ -5195,7 +5215,7 @@ function buildBoardColumn(col) {
       if (!title) return;
       const attachments = [...files];
       try {
-        await post("/board/card", { title, column: "open", attachments, isolate: addIsolate });
+        await post("/board/card", { title, column: col.id, attachments, isolate: addIsolate });
         input.value = "";
         kanbanAddDraft = "";
         files.length = 0;
@@ -5204,7 +5224,7 @@ function buildBoardColumn(col) {
         redraw();
         await loadBoard();
         renderBoard();
-        const next = $(`#kanban .kanban-col[data-column="open"] .kanban-add-input`);
+        const next = $(`#kanban .kanban-col[data-column="${col.id}"] .kanban-add-input`);
         if (next) next.focus();
       } catch (e) {
         toast(e.message || String(e), true);
@@ -5288,7 +5308,7 @@ function boardCardNode(c) {
   // short numeric ID so cards are easy to reference (links, chat, commits)
   head.appendChild(el("span", "kanban-card-id", "#" + esc(c.id)));
   const title = el("div", "kanban-card-title", esc(c.title));
-  if (c.column === "open") title.title = "Double-click to edit";
+  if (isWaitingCol(c.column)) title.title = "Double-click to edit";
   head.appendChild(title);
   // sessions watching this card get pinged when it is marked done
   if (c.watchers && c.watchers.length) {
@@ -5300,20 +5320,20 @@ function boardCardNode(c) {
   card.appendChild(head);
 
   // scheduled start: clock emoji + expected start time; clicking it reopens
-  // the schedule dialog (open cards only — started cards have none left)
+  // the schedule dialog (waiting cards only — started cards have none left)
   if (c.startAt) {
     const sched = el("div", "kanban-card-schedule", "🕐 <span>" + esc(fmtSchedule(c.startAt)) + "</span>");
     sched.title = `Scheduled start: ${new Date(c.startAt).toLocaleString()} (${relTime(c.startAt)})`;
-    if (c.column === "open") {
+    if (isWaitingCol(c.column)) {
       sched.classList.add("clickable");
       sched.onclick = (e) => { e.stopPropagation(); openScheduleModal(c); };
     }
     card.appendChild(sched);
   }
 
-  // dependency blockers: an open card whose blockers are not all done yet
+  // dependency blockers: a waiting card whose blockers are not all done yet
   // is waiting for them (the dependency flow starts it when they land)
-  if (c.column === "open") {
+  if (isWaitingCol(c.column)) {
     const unmet = boardUnmetBlockers(c);
     if (unmet.length) {
       const blk = el("div", "kanban-card-blocked", "⛔ <span>blocked by " + unmet.map((id) => "#" + esc(id)).join(", ") + "</span>");
@@ -5370,10 +5390,10 @@ function boardCardNode(c) {
   }
 
   const actions = el("div", "kanban-card-actions");
-  // Only cards waiting in Open offer Start: In Progress cards are already
-  // being worked on (View below opens the session working on them), and
-  // Done cards are finished — restarting them makes no sense.
-  if (c.column === "open") {
+  // Only waiting cards offer Start: In Progress cards are already being
+  // worked on (View below opens the session working on them), and Done
+  // cards are finished — restarting them makes no sense.
+  if (isWaitingCol(c.column)) {
     const start = el("button", "kanban-card-btn", ICONS.play + "<span>Start</span>");
     start.title = "Start the agent on this card in a new session";
     start.onclick = async (e) => {
@@ -5465,9 +5485,9 @@ function boardCardNode(c) {
     };
     actions.appendChild(merge);
   }
-  // Only Open cards are editable: In Progress and Done cards are locked —
+  // Only waiting cards are editable: In Progress and Done cards are locked —
   // no Edit button, and their titles can't be double-click-edited either.
-  if (c.column === "open") {
+  if (isWaitingCol(c.column)) {
     const edit = el("button", "kanban-card-btn", ICONS.edit + "<span>Edit</span>");
     edit.title = "Edit this card";
     edit.onclick = (e) => { e.stopPropagation(); openEditCardModal(c); };
@@ -5484,7 +5504,7 @@ function boardCardNode(c) {
   };
   card.appendChild(delBtn);
 
-  if (c.column === "open") title.ondblclick = () => {
+  if (isWaitingCol(c.column)) title.ondblclick = () => {
     title.contentEditable = "true";
     title.focus();
     document.getSelection().selectAllChildren(title);
@@ -5514,10 +5534,11 @@ function boardCardNode(c) {
   };
   card.ondragend = () => card.classList.remove("dragging");
 
-  // link drop target: only cards still waiting in Open can be targeted
+  // link drop target: only cards still waiting (planning or open) can be
+  // targeted
   card.ondragover = (e) => {
     if (!e.dataTransfer.types.includes(LINK_MIME)) return;
-    if (c.column !== "open" || c.id === linkDragSource) return;
+    if (!isWaitingCol(c.column) || c.id === linkDragSource) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "link";
     card.classList.add("link-over");
@@ -5526,7 +5547,7 @@ function boardCardNode(c) {
   card.ondrop = async (e) => {
     card.classList.remove("link-over");
     const src = e.dataTransfer.getData(LINK_MIME);
-    if (!src || src === c.id || c.column !== "open") return;
+    if (!src || src === c.id || !isWaitingCol(c.column)) return;
     e.preventDefault();
     e.stopPropagation(); // a link drop must not move the card
     try {
@@ -5542,7 +5563,7 @@ function boardCardNode(c) {
 }
 
 // The link pill: a small target icon next to the other card buttons. Drag it
-// onto a card in Open to link the two — once the source card is done, the
+// onto a waiting card to link the two — once the source card is done, the
 // target starts automatically in a fresh session. While linked, the pill
 // reads "Will start Card X"; clicking it removes the link.
 function linkPill(c) {
@@ -5565,7 +5586,7 @@ function linkPill(c) {
     };
   } else {
     pill.innerHTML = ICONS.target;
-    pill.title = "Drag onto a card in Open to link it — it starts automatically when this card is done";
+    pill.title = "Drag onto a waiting card to link it — it starts automatically when this card is done";
   }
   pill.ondragstart = (e) => {
     e.stopPropagation(); // drag the link, not the card
@@ -5831,8 +5852,8 @@ function openEditCardModal(c) {
     colField.appendChild(sel);
     modal.appendChild(colField);
 
-    // worktree isolation (open cards only): the session started for this
-    // card runs in its own git worktree on its own branch
+    // worktree isolation (waiting cards only): the session started for
+    // this card runs in its own git worktree on its own branch
     const isoCb = el("input");
     isoCb.type = "checkbox";
     isoCb.checked = !!c.isolate;
@@ -5932,12 +5953,13 @@ async function moveBoardCard(id, column, beforeID) {
     const curIdx = boardCardsIn(column).findIndex((x) => x.id === id);
     if (curIdx === targetIdx) return; // dropped back where it was
   }
-  // Leaving In Progress — to Done, or back to Open — stops the agent working
-  // on the card, so ask before pulling the rug out from under it.
-  if (card.column === "inprogress" && (column === "done" || column === "open")) {
+  // Leaving In Progress — to Done, or back to a waiting column — stops the
+  // agent working on the card, so ask before pulling the rug out from under
+  // it.
+  if (card.column === "inprogress" && (column === "done" || isWaitingCol(column))) {
     const ok = await confirmModal(
       "Stop the agent?",
-      `Moving card #${esc(card.id)} "${esc(card.title)}" from In Progress to ${column === "done" ? "Done" : "Open"} will stop the agent. Are you sure you want to stop the current progress?`,
+      `Moving card #${esc(card.id)} "${esc(card.title)}" from In Progress to ${column === "done" ? "Done" : column === "open" ? "Open" : "Planning"} will stop the agent. Are you sure you want to stop the current progress?`,
       "Stop & move"
     );
     if (!ok) return;
@@ -5945,9 +5967,10 @@ async function moveBoardCard(id, column, beforeID) {
   // optimistic: reposition locally, then reconcile with the server
   col.splice(targetIdx, 0, card);
   col.forEach((c, i) => { c.column = column; c.order = i; });
-  // returning to Open stops the card: the server clears its session link
-  // (and aborts the agent) — mirror that locally so Start is offered at once
-  if (card.column === "open") card.sessionID = "";
+  // returning to a waiting column stops the card: the server clears its
+  // session link (and aborts the agent) — mirror that locally so Start is
+  // offered at once
+  if (isWaitingCol(column)) card.sessionID = "";
   renderBoard();
   try {
     await patch("/board/card/" + id, { column, before: beforeID || "" });
@@ -6934,7 +6957,13 @@ function buildQuestionDock(q) {
   const answers = q._answers;
   if (typeof q._qi !== "number" || q._qi < 0 || q._qi >= q.questions.length) q._qi = 0;
   let qi = q._qi;
-  let draft = typeof q._draft === "string" ? q._draft : "";
+  // Per-question input drafts (a single shared draft used to carry typed text
+  // from one question into the next). Migrates the old single-draft field.
+  if (!Array.isArray(q._drafts) || q._drafts.length !== q.questions.length) {
+    q._drafts = q.questions.map(() => "");
+    if (typeof q._draft === "string" && q._draft) q._drafts[0] = q._draft;
+    delete q._draft;
+  }
   let inputEl = null;
 
   const submit = () => {
@@ -6971,15 +7000,15 @@ function buildQuestionDock(q) {
     const input = el("input", "q-input");
     inputEl = input;
     input.placeholder = "Type your answer…";
-    input.value = draft;
-    input.oninput = () => { draft = input.value; q._draft = draft; };
+    input.value = q._drafts[qi] || "";
+    input.oninput = () => { q._drafts[qi] = input.value; };
     // Enter commits a custom answer; on the last question it sends the reply
     // right away instead of forcing a second click on Submit.
     const commitCustom = (sendNow) => {
       const v = input.value.trim();
       if (!v) return;
       answers[qi] = [v];
-      draft = ""; q._draft = "";
+      q._drafts[qi] = "";
       if (!sendNow && qi < q.questions.length - 1) qi++;
       if (sendNow) submit();
       else render();
@@ -6997,20 +7026,28 @@ function buildQuestionDock(q) {
       await post(`/question/${q.id}/reject`).catch(() => {});
     };
     actions.appendChild(dismiss);
+    // Moving between questions must not lose a typed-but-uncommitted custom
+    // answer: commit the draft first (same rule as Submit — an explicit
+    // selection wins over a leftover draft).
+    const commitDraft = () => {
+      const v = (q._drafts[qi] || "").trim();
+      if (v && !answers[qi].length) answers[qi] = [v];
+      q._drafts[qi] = "";
+    };
     if (qi > 0) {
       const back = el("button", "btn secondary", "Back");
-      back.onclick = () => { qi--; render(); };
+      back.onclick = () => { commitDraft(); qi--; render(); };
       actions.appendChild(back);
     }
     if (qi < q.questions.length - 1) {
       const next = el("button", "btn primary", "Next");
-      next.onclick = () => { qi++; render(); };
+      next.onclick = () => { commitDraft(); qi++; render(); };
       actions.appendChild(next);
     } else {
       const submitBtn = el("button", "btn primary", "Submit");
       submitBtn.onclick = () => {
         // an uncommitted draft still counts if nothing was selected
-        if (!answers[qi].length && draft.trim()) answers[qi] = [draft.trim()];
+        commitDraft();
         submit();
       };
       actions.appendChild(submitBtn);
