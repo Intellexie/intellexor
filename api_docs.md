@@ -472,6 +472,7 @@ Semantics:
 | `GET /board` | — | **200** array of `Card`, display-ordered (column rank, then `order`) |
 | `POST /board/card` | `{ "title": "...", "column": "open", "isolate": false, "attachments": [...], "agent": "", "model": "", "description": "", "criteria": "", "blockedBy": [] }` (column must be `""`/`"planning"`/`"open"`) | **200** created `Card` |
 | `PATCH /board/card/{cardID}` | see below | **200** updated `Card` |
+| `POST /board/card/{cardID}/start` | — | **200** `{ "sessionID": "ses_..." }` — starts a new agent session on a waiting card (the one shared start path: web UI Start button, board tool, done-link trigger and scheduler all use it). The card moves to `inprogress` linked to the session and the session is prompted in the background with the card's **full task**: title, description, acceptance criteria and attachments as file parts; the card's `agent`/`model` and worktree isolation are honored. 400 when the card is not waiting (already started/moved/deleted). |
 | `POST /board/card/{cardID}/merge` | — | **200** updated `Card` (branch/worktreePath cleared); 400 when the card has no worktree or the merge fails |
 | `POST /board/card/{cardID}/approve` | — | **200** updated `Card` (review → done, worktree merged); 400 when the card is not in review |
 | `POST /board/card/{cardID}/reject` | — | **200** updated `Card` (review → inprogress, findings prompted to the session); 400 when the card is not in review |
@@ -841,7 +842,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 1. `GET /board` → render five columns (`planning`, `open`, `inprogress`, `review`, `done`) sorted by `order`.
 2. Subscribe to `board.updated` → re-fetch `GET /board` (payload has no cards; also fires on card status changes).
 3. Create: `POST /board/card`. Move/reorder/link/schedule/edit: `PATCH /board/card/{id}`. Delete: `DELETE /board/card/{id}`.
-4. Start button → `PATCH /board/card/{id}` `{"column":"inprogress"}` — the server creates + prompts the linked session automatically (watch `session.created`).
+4. Start button → `POST /board/card/{id}/start` — returns `{ "sessionID": ... }`; the server creates the session, moves the card to `inprogress` and prompts it with the full task (title, description, criteria, attachments) in the background (watch `session.created` + `board.updated`).
 5. Review cards: `POST /board/card/{id}/approve` (→ done) or `/reject` (→ inprogress + findings prompt).
 6. Export/import via `GET /board/export` / `POST /board/import?mode=`.
 
@@ -896,6 +897,7 @@ The server **never** sends `fs/*` or `terminal/*` requests.
 | `GET /question` + `POST /question/{id}/reply|reject` | question dock |
 | `GET /board` | cards |
 | `POST /board/card`, `PATCH/DELETE /board/card/{id}` | mutate |
+| `POST /board/card/{id}/start` | start a waiting card: new session linked + prompted with the full task |
 | `POST /board/card/{id}/merge` | merge an isolated card's worktree branch + cleanup |
 | `POST /board/card/{id}/approve`, `POST /board/card/{id}/reject` | resolve a review card (done / back to inprogress) |
 | `GET /board/export`, `POST /board/import?mode=` | backup / restore |
@@ -1023,7 +1025,7 @@ The composer is the heart of the app. Requirements:
 - **Create:** header modal (with a Planning/Open column picker) **and** an inline "Add card…" textarea pinned to the bottom of the Planning and Open columns — all support attachments/paste; `POST /board/card {title, column:"planning"|"open", attachments, isolate?, description?, criteria?, agent?, model?}`. Drafts survive re-renders. Cards can only be created in a waiting column. Enter creates; Ctrl/Shift+Enter newline. Both creators offer an **"Isolate in a git worktree"** toggle (`isolate: true`); the modal also offers description, acceptance criteria, agent and model.
 - **Edit/delete:** waiting cards (Planning/Open) only — edit modal or double-click title (contenteditable) → `PATCH /board/card/{id}` (also description/criteria/agent/model); delete with confirm.
 - **Move:** HTML5 drag & drop with insert-before computed from pointer position; optimistic local reorder, then `PATCH {column, before}`. Moving out of In Progress asks "Stop the agent?".
-- **Start:** waiting cards (Planning/Open) get **Start** → `POST /session` (with the card's agent/model) → `PATCH {column:"inprogress", sessionID}` → `POST /session/{sid}/prompt_async` with the card title + description + criteria + attachments → open a tab without switching. Cards with `sessionID` get **View**; in-progress cards show a spinner while their session is busy.
+- **Start:** waiting cards (Planning/Open) get **Start** → `POST /board/card/{id}/start` (§5.2) → open a tab for the returned `sessionID` without switching. The server does the rest (session, move to inprogress, full-task prompt). Cards with `sessionID` get **View**; in-progress cards show a spinner while their session is busy.
 - **Dependencies:** waiting cards with unmet `blockedBy` render a "⛔ blocked by #x, #y" badge; they start automatically once their blockers are done (server-side, capped by `board.max_running`).
 - **Live status:** cards show a status row — spinner + elapsed time while `running`, "⏳ waiting for input" when a question/permission is pending, "⛔ <error>" when `blocked` — plus a tokens/cost snapshot (`c.tokens`, `c.cost`). Cards with a pending question/permission are the "needs attention" highlight.
 - **Review stage:** cards in `review` show the review agent's `findings` and **Approve** (`POST /board/card/{id}/approve`) / **Reject** (`POST /board/card/{id}/reject`) buttons. Reject sends the card back to In Progress and prompts its session with the findings.

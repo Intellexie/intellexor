@@ -199,6 +199,20 @@ func promptWatcher(i *Instance, s *session.Session, card board.Card) {
 // tell a stale schedule apart from a transient failure.
 var errCardNotOpen = errors.New("card is not waiting in the open column")
 
+// ErrCardNotOpen is the exported form of the start precondition failure:
+// the card is not waiting in a waiting column (already started, moved or
+// deleted). The HTTP start route maps it to a distinct error name.
+var ErrCardNotOpen = errCardNotOpen
+
+// StartCard starts a new agent session on a waiting card — the one shared
+// start path behind every entry point (web UI Start button, board tool,
+// done-link trigger, scheduler), so a card is always prompted with its full
+// task: title, description, acceptance criteria and attachments. Returns
+// the new session ID.
+func StartCard(i *Instance, projectID, cardID string) (string, error) {
+	return startCard(i, projectID, cardID)
+}
+
 // startCard starts a new agent session on a card — the same flow as the web
 // UI's Start button: create the session, link the card to it and move it to
 // inprogress BEFORE prompting (so the agent knows its card from the first

@@ -822,6 +822,18 @@ position it is about to restore. */
 .kanban-card-attachments .attach-chip { margin:0; max-width:100%; }
 .kanban-card-attachments .attach-chip span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
+/* read-only card details modal (opened by clicking a card) */
+.card-detail-head { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:2px; }
+.card-detail-pill { font-size:11px; font-weight:600; line-height:1.4; color:var(--text-muted); background:var(--layer-2); border:1px solid var(--border-weak); border-radius:999px; padding:1px 8px; }
+.card-detail-pill.status-running { color:var(--accent); border-color:color-mix(in srgb, var(--accent) 40%, transparent); }
+.card-detail-pill.status-waiting { color:var(--warn-fg); border-color:color-mix(in srgb, var(--warn-fg) 40%, transparent); }
+.card-detail-pill.status-blocked, .card-detail-pill.status-error { color:var(--err-fg); border-color:color-mix(in srgb, var(--err-fg) 40%, transparent); }
+.modal .card-detail-value { font-size:13px; line-height:1.5; color:var(--text-base); white-space:pre-wrap; overflow-wrap:anywhere; }
+.card-detail-findings { background:color-mix(in srgb, var(--warn-fg) 7%, transparent); border:1px solid color-mix(in srgb, var(--warn-fg) 25%, transparent); border-radius:var(--radius-md); padding:6px 8px; }
+.card-detail-dim { font-size:12px; color:var(--text-faint); }
+.card-detail-atts { display:flex; flex-wrap:wrap; gap:6px; }
+.card-detail-atts .attach-chip { margin:0; max-width:100%; }
+
 /* ---------- board chat (orchestrator, a column of the board) ---------- */
 /* The orchestrator chat is the last column of the kanban row: same flex
    sizing, background, border and radius as the status columns, scrolling

@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	handle("GET /board", s.getBoard)
 	handle("POST /board/card", s.createBoardCard)
 	handle("PATCH /board/card/{cardID}", s.patchBoardCard)
+	handle("POST /board/card/{cardID}/start", s.startBoardCard)
 	handle("POST /board/card/{cardID}/merge", s.mergeBoardCard)
 	handle("POST /board/card/{cardID}/approve", s.resolveBoardReview(true))
 	handle("POST /board/card/{cardID}/reject", s.resolveBoardReview(false))

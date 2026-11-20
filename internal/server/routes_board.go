@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -207,6 +208,27 @@ func (s *Server) patchBoardCard(w http.ResponseWriter, r *http.Request) *apiErro
 	}
 	s.publishBoardUpdate(r)
 	writeJSON(w, 200, card)
+	return nil
+}
+
+// startBoardCard starts a new agent session on a waiting card. This is the
+// one shared start path — the web UI's Start button, the board tool,
+// done-link triggers and the scheduler all land in the same app.StartCard —
+// so the session is prompted with the card's full task (title, description,
+// acceptance criteria, attachments) and honors the card's agent/model and
+// worktree isolation, no matter which entry point started it. Returns the
+// new session ID; the prompt runs in the background.
+func (s *Server) startBoardCard(w http.ResponseWriter, r *http.Request) *apiError {
+	in := s.Instance(directoryOf(r))
+	sessID, err := app.StartCard(in, s.boardProjectID(r), r.PathValue("cardID"))
+	if errors.Is(err, app.ErrCardNotOpen) {
+		return badRequest("Only cards still waiting (planning or open) can be started")
+	}
+	if err != nil {
+		return badRequest(err.Error())
+	}
+	s.publishBoardUpdate(r)
+	writeJSON(w, 200, map[string]any{"sessionID": sessID})
 	return nil
 }
 

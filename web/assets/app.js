@@ -4073,7 +4073,7 @@ async function renderBoardView(main) {
   const header = el("header", "chat-header");
   header.appendChild(el("div", "title", "Board"));
   header.appendChild(el("div", "spacer"));
-  header.appendChild(el("span", "board-hint", "Drag cards to move · drag ⌖ onto a waiting card to link · double-click a waiting card title to edit"));
+  header.appendChild(el("span", "board-hint", "Drag cards to move · click a card for details · drag ⌖ onto a waiting card to link · double-click a waiting card title to edit"));
   header.appendChild(buildBoardActions());
   const addBtn = el("button", "btn secondary board-add", ICONS.plus + "<span>Add card</span>");
   addBtn.title = "Create a new card in Open";
@@ -4985,32 +4985,22 @@ function openScheduleModal(c) {
 
 /* ---------- start / view a card ---------- */
 
-// Start the agent on a card: create a fresh session, link the card to it
-// (and move it to In Progress) BEFORE prompting so the agent already knows
-// its card from the first step, then prompt it with the card's task. The
-// task title goes in as the plain user message — all card handling guidance
-// (how to work the card, moving it to done) is injected server-side into the
-// system prompt, keeping the message the user sees clean.
+// Start the agent on a card: one call to the shared server-side start path
+// (the same one the scheduler, the board tool and done-links use), which
+// creates the session, links the card to it and moves it to In Progress
+// BEFORE prompting so the agent already knows its card from the first step.
+// The session is prompted with the card's full task — title, description,
+// acceptance criteria and attachments — and honors the card's agent/model
+// and worktree isolation; all card handling guidance is injected
+// server-side into the system prompt, keeping the message the user sees
+// clean.
 async function startCard(c) {
   try {
-    const body = { agent: S.agent, title: c.title };
-    if (S.model) body.model = { id: S.model.modelID, providerID: S.model.providerID };
-    const sess = await post("/session", body);
-    await patch("/board/card/" + c.id, { column: "inprogress", sessionID: sess.id });
-    // the card's task goes in as the plain user message, its attachments
-    // (if any) ride along as file parts — same shape the composer sends
-    const parts = [{ type: "text", text: c.title }];
-    if (c.attachments && c.attachments.length) parts.push(...c.attachments);
-    await post(`/session/${sess.id}/prompt_async`, {
-      agent: S.agent,
-      model: S.model ? { providerID: S.model.providerID, modelID: S.model.modelID } : undefined,
-      variant: S.effort || undefined,
-      parts,
-    });
-    await refreshSession(sess.id).catch(() => {});
+    const { sessionID } = await post(`/board/card/${c.id}/start`, {});
+    await refreshSession(sessionID).catch(() => {});
     // Create a tab for the new session without activating it — like View,
     // but the user stays on the board.
-    openTab(sess.id);
+    openTab(sessionID);
     renderTabs();
     await loadBoard();
     renderBoard();
@@ -5504,6 +5494,18 @@ function boardCardNode(c) {
   };
   card.appendChild(delBtn);
 
+  // Single click opens the read-only details view (all columns — it is the
+  // only way to see the full fields of locked cards). The open is delayed
+  // briefly so a double-click (title edit on waiting cards) cancels it, and
+  // buttons/chips/schedule — which stop propagation anyway — are excluded
+  // as a belt-and-braces guard.
+  card.addEventListener("click", (e) => {
+    if (e.target.closest("button, a, .attach-chip, .kanban-card-schedule.clickable")) return;
+    clearTimeout(card._detailTimer);
+    card._detailTimer = setTimeout(() => openCardDetailsModal(c), 220);
+  });
+  card.addEventListener("dblclick", () => clearTimeout(card._detailTimer));
+
   if (isWaitingCol(c.column)) title.ondblclick = () => {
     title.contentEditable = "true";
     title.focus();
@@ -5900,6 +5902,78 @@ function openEditCardModal(c) {
     actions.append(attachBtn, fileInput, cancel, save);
     modal.appendChild(actions);
     setTimeout(() => { autosize(input); input.focus(); input.setSelectionRange(input.value.length, input.value.length); }, 0);
+  });
+}
+
+// Read-only card details, opened by single-clicking any card on the board.
+// Waiting (open/planning) cards are editable via their Edit button, but
+// started, reviewing and done cards are locked — this modal is the only
+// place their full (untruncated) fields are visible. Nothing here mutates
+// the card; the only actions are viewing attachments and opening the
+// linked session.
+function openCardDetailsModal(c) {
+  const col = BOARD_COLUMNS.find((k) => k.id === c.column);
+  openModal(`Card #${esc(c.id)}`, (modal, ov) => {
+    // column + live status pills
+    const head = el("div", "card-detail-head");
+    head.appendChild(el("span", "card-detail-pill", esc(col ? col.label : c.column)));
+    if (c.status && c.status !== "idle") {
+      head.appendChild(el("span", "card-detail-pill status-" + c.status, esc(c.status)));
+    }
+    modal.appendChild(head);
+
+    const field = (label, html) => {
+      const f = el("div", "m-field");
+      f.appendChild(el("label", "m-label", label));
+      f.appendChild(el("div", "card-detail-value", html));
+      modal.appendChild(f);
+    };
+
+    field("Title", esc(c.title));
+    if (c.description) field("Description", esc(c.description));
+    if (c.criteria) field("Acceptance criteria", "✓ " + esc(c.criteria));
+    if (c.findings) field("Review findings", `<div class="card-detail-findings">${esc(c.findings)}</div>`);
+    if (c.agent || c.model) {
+      field("Agent / model", "@" + esc(c.agent || "build") + (c.model ? " · " + esc(c.model) : ""));
+    }
+    if (c.startAt) {
+      field("Scheduled start", esc(new Date(c.startAt).toLocaleString()) + ` <span class="card-detail-dim">(${esc(relTime(c.startAt))})</span>`);
+    }
+    if (c.statusText) field("Status", esc(c.statusText));
+    if (isWaitingCol(c.column)) {
+      const unmet = boardUnmetBlockers(c);
+      if (unmet.length) field("Blocked by", unmet.map((id) => "#" + esc(id)).join(", "));
+    }
+    if (c.link) field("Link", `Will start card #${esc(c.link)} when done`);
+    if (c.branch) {
+      field("Worktree", esc(c.branch) + (c.worktreePath ? ` <span class="card-detail-dim">(${esc(c.worktreePath)})</span>` : ""));
+    }
+    if (c.watchers && c.watchers.length) {
+      field("Watchers", `${c.watchers.length} session${c.watchers.length > 1 ? "s" : ""} — notified when the card is marked done`);
+    }
+    if (c.cost || c.tokens) field("Usage", esc(fmtCardUsage(c.cost, c.tokens) || "—"));
+    if (c.created) field("Created", esc(new Date(c.created).toLocaleString()));
+
+    if (c.attachments && c.attachments.length) {
+      const f = el("div", "m-field");
+      f.appendChild(el("label", "m-label", "Attachments"));
+      const row = el("div", "card-detail-atts");
+      for (const a of c.attachments) row.appendChild(attachmentChip(a));
+      f.appendChild(row);
+      modal.appendChild(f);
+    }
+
+    const actions = el("div", "m-actions");
+    if (c.sessionID) {
+      const view = el("button", "btn ghost", ICONS.eye + "<span>View session</span>");
+      view.title = "Open the session working on this card";
+      view.onclick = () => { ov.remove(); viewCard(c); };
+      actions.appendChild(view);
+    }
+    const close = el("button", "btn primary", "Close");
+    close.onclick = () => ov.remove();
+    actions.appendChild(close);
+    modal.appendChild(actions);
   });
 }
 
